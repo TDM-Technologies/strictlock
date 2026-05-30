@@ -1,0 +1,24 @@
+{
+  "_comment": "Example Claude Code settings.json wiring plan-gate as a PreToolUse hook. Replace the absolute paths with your own. The env block turns the gate on and points it at your plans directory; the hooks block runs the gate before every gated tool call.",
+
+  "env": {
+    "PLAN_GATE": "on",
+    "PLAN_GATE_PLANS_DIR": "/home/you/.agent/plans",
+    "PLAN_GATE_LOG_DIR": "/home/you/.agent/logs",
+    "PLAN_GATE_ALWAYS_WRITABLE": "/home/you/.agent/plans"
+  },
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python /home/you/strictlock/plan-gate/plan-gate.py"
+          }
+        ]
+      }
+    ]
+  }
+}

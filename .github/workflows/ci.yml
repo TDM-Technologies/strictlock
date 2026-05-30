@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    name: python tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: plan-gate tests
+        run: python plan-gate/tests/test_plan_gate.py
+      - name: memory-cap tests
+        run: python memory-cap/tests/test_memory_cap.py
+
+  shell:
+    name: shell lint + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          shellcheck commit-msg-gate/commit-msg-gate.sh
+          shellcheck commit-msg-gate/tests/test_commit_msg_gate.sh
+      - name: commit-msg-gate tests
+        run: bash commit-msg-gate/tests/test_commit_msg_gate.sh
+
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: scan for secrets and stray UUIDs
+        run: |
+          set -e
+          fail=0
+          secrets='(BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36})'
+          uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+          if git grep -nIE "$secrets" -- . ':(exclude).github/workflows/ci.yml'; then fail=1; fi
+          if git grep -nIE "$uuid" -- . ':(exclude).github/workflows/ci.yml'; then fail=1; fi
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Possible secret or stray UUID found in tracked files."
+            exit 1
+          fi
+          echo "Secret scan passed."
