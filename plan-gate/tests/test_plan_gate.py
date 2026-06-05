@@ -97,6 +97,28 @@ class PlanGateTests(unittest.TestCase):
         )
         self.assertEqual(decision(p), "allow")
 
+    def test_inline_comment_on_status_and_path(self):
+        # `status` and an allowed_paths entry both carry a trailing inline
+        # comment. The parser must strip both: the plan stays active and the
+        # clean path matches. Before inline-comment support this denied twice
+        # over (status read as "active  # ..." -> no active plan).
+        (self.plans / "active.md").write_text(
+            "---\n"
+            "name: test-plan\n"
+            "status: active  # work in progress\n"
+            "allowed_paths:\n"
+            f"  - {self.allowed}  # the one file\n"
+            "allowed_commands:\n"
+            "  - npm test\n"
+            "---\n\ntest body (ignored by the gate)\n",
+            encoding="utf-8",
+        )
+        p = run_gate(
+            {"tool_name": "Edit", "tool_input": {"file_path": str(self.allowed)}},
+            self.plans, cwd=self.work,
+        )
+        self.assertEqual(decision(p), "allow")
+
     def test_edit_denied_path(self):
         write_active_plan(self.plans, str(self.allowed))
         p = run_gate(
