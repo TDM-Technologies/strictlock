@@ -5,7 +5,7 @@ This is a SANITIZED reference extract of a gate running in production against a
 regulated product. Machine-specific paths, usernames, tenant identifiers, and
 internal tracker IDs have been removed; the enforcement logic is intact. It is
 published as the reference implementation for the `plan-gate` paper (see
-`../paper-v1.md`). Adapt the configuration to your own environment.
+`paper.md`). Adapt the configuration to your own environment.
 
 WHAT IT DOES
   Reads tool-use JSON from stdin, consults the single active "plan" file in a
@@ -555,6 +555,43 @@ def _check_cd_compound(cmd: str, allowed_cmds: list[str]) -> tuple[bool, str]:
     return True, f"cd-compound allowed; {len(parts) - 1} non-cd segment(s) checked"
 
 
+def _strip_scalar(raw_val: str) -> str:
+    """Strip surrounding quotes and a trailing inline comment from a YAML scalar.
+
+    Conservative, mirroring the rest of this lightweight parser:
+      - Quoted value (starts with ' or "):
+          * fully quoted (opening quote also closes the string) -> the inner
+            span, exactly as a plain `value[1:-1]` would (no behavior change);
+          * quoted value followed by trailing content (an inline comment after
+            the closing quote) -> the quoted span only; the trailing content is
+            discarded. A '#' INSIDE the quotes is preserved.
+          * unterminated opening quote -> returned as-is (never raises).
+      - Unquoted value: a trailing ' #...' (a '#' preceded by whitespace, per
+        the YAML rule) is an inline comment and is discarded; a '#' NOT preceded
+        by whitespace (embedded in a token, e.g. C:\\foo#bar.md) is preserved.
+
+    Without this, a trailing `# comment` is taken as part of the value:
+    `worktree_bypass: true  # note` reads as the literal `true  # note` (not
+    `true`, so the flag silently fails) and an allowed_paths entry with a
+    comment fails the exact-match check with a spurious deny.
+    """
+    v = raw_val.strip()
+    if not v:
+        return v
+    if v[0] in ('"', "'"):
+        q = v[0]
+        if len(v) >= 2 and v[-1] == q:
+            return v[1:-1]  # fully quoted (no behavior change)
+        end = v.find(q, 1)
+        if end != -1:
+            return v[1:end]  # quoted value + trailing inline comment
+        return v  # unterminated quote -> leave literal (conservative)
+    m = re.search(r"\s#", v)
+    if m:
+        v = v[:m.start()]
+    return v.rstrip()
+
+
 def parse_frontmatter(text: str) -> dict:
     """Tiny YAML subset: top-level scalars + list-of-strings under a key."""
     m = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
@@ -569,21 +606,20 @@ def parse_frontmatter(text: str) -> dict:
             continue
         stripped = line.lstrip()
         if stripped.startswith("- ") and current_key is not None:
-            val = stripped[2:].strip()
-            if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
-                val = val[1:-1]
-            result.setdefault(current_key, []).append(val)
+            result.setdefault(current_key, []).append(_strip_scalar(stripped[2:]))
             continue
         if ":" in line and not line.startswith((" ", "\t")):
             key, _, value = line.partition(":")
             key = key.strip()
-            value = value.strip()
-            if value == "":
+            value = _strip_scalar(value)
+            if value == "" or value == "[]":
+                # Empty scalar OR inline empty array -> a REAL empty list.
+                # Without the "[]" case, `allowed_paths: []` mis-parses as the
+                # scalar string "[]" and then iterates as 1-char paths
+                # ['[', ']'] which can accidentally match a target.
                 current_key = key
                 result[key] = []
             else:
-                if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-                    value = value[1:-1]
                 result[key] = value
                 current_key = None
     return result

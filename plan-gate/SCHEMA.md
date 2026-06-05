@@ -47,17 +47,20 @@ Free-form description for humans goes here.
 - **Path anchoring.** Relative entries anchor at the session's worktree root (or repo root).
   Absolute entries are used as-is. See [CONFIG.md](CONFIG.md) for the worktree hard-guard.
 
-## ⚠️ Frontmatter parser limitations
+## Frontmatter parser notes
 
 The gate ships a deliberately tiny YAML subset parser (top-level scalars and lists of
-strings). Two consequences worth committing to memory:
+strings). Two behaviors worth committing to memory:
 
-- **No inline comments.** `worktree_bypass: true  # cross-tree` is read as the literal value
-  `true  # cross-tree`, which is **not** `true`, so the flag silently doesn't take. Put
-  comments on their **own line** (a line starting with `#` is skipped). Own-line comments
-  inside a list are fine.
+- **Inline comments are stripped.** A trailing ` # comment` is removed from both scalars and
+  list entries, so `worktree_bypass: true  # cross-tree` correctly reads as `true` and an
+  `allowed_paths` entry with a trailing note still matches. The `#` must be preceded by
+  whitespace (the YAML rule): a `#` embedded in a token — e.g. a path like `C:\data#1\x.ts` —
+  is preserved, and a `#` inside quotes is kept. Own-line comments (a line starting with `#`)
+  are skipped as before.
 - **Strings and simple lists only.** No nested maps, anchors, flow syntax, or multi-line
-  scalars. Keep frontmatter flat.
+  scalars. Keep frontmatter flat. Both `key: []` and a key with no entries beneath it are
+  accepted as an empty list.
 
 ## Lifecycle
 
