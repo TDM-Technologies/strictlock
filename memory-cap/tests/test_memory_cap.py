@@ -106,6 +106,65 @@ class MemoryCapTests(unittest.TestCase):
         p = run_gate(payload)
         self.assertEqual(decision(p), "deny")
 
+    def test_edit_nonmatching_old_string_defers(self):
+        # Regression: a pre-existing over-cap line sits in the file, and the
+        # Edit's old_string does NOT byte-exactly match anything (here, a stray
+        # trailing space). str.replace would be a silent no-op, so evaluating the
+        # UNCHANGED file would wrongly DENY over the pre-existing over-cap line the
+        # edit never touches. The hook must DEFER (allow) and let the Edit tool
+        # surface its own "string not found" error.
+        self.index.write_text(
+            f"# Heading\n{OVER_CAP_LINE}\n- keeper\n", encoding="utf-8"
+        )
+        payload = {
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(self.index),
+                "old_string": "- keeper ",  # trailing space: absent from the file
+                "new_string": "- still short",
+                "replace_all": False,
+            },
+        }
+        p = run_gate(payload)
+        self.assertEqual(decision(p), "allow")
+
+    def test_edit_nonunique_old_string_defers(self):
+        # Regression: old_string occurs more than once and replace_all is False,
+        # so the Edit tool will reject "string not unique". The hook cannot know
+        # which occurrence is meant — it must DEFER (allow) rather than apply a
+        # single replacement and then DENY over the pre-existing over-cap line.
+        self.index.write_text(
+            f"# Heading\n{OVER_CAP_LINE}\n- dup\n- dup\n", encoding="utf-8"
+        )
+        payload = {
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(self.index),
+                "old_string": "- dup",
+                "new_string": "- changed",
+                "replace_all": False,
+            },
+        }
+        p = run_gate(payload)
+        self.assertEqual(decision(p), "allow")
+
+    def test_edit_faithful_compression_allowed(self):
+        # A faithful, unique edit that REPLACES a pre-existing over-cap line with
+        # a short one must be allowed: the hook checks the RESULT, not the stale
+        # file content.
+        self.index.write_text(f"# Heading\n{OVER_CAP_LINE}\n", encoding="utf-8")
+        payload = {
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(self.index),
+                "old_string": OVER_CAP_LINE,
+                "new_string": SHORT_LINE,
+                "replace_all": False,
+            },
+        }
+        p = run_gate(payload)
+        self.assertEqual(decision(p), "allow")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

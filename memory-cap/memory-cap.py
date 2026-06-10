@@ -135,15 +135,51 @@ def reconstruct_edit_content(
     old_string: str,
     new_string: str,
     replace_all: bool,
-) -> str:
-    """Apply Edit-tool semantics to the existing file content.
+) -> str | None:
+    """Apply Edit-tool semantics to the existing file and return the RESULT.
 
-    Returns the new content string, or None if the file cannot be read.
-    replace_all=True swaps every occurrence; False swaps only the first.
+    Returns the post-edit content string, or **None to signal "defer to the
+    Edit tool"** when the hook CANNOT faithfully reconstruct what the Edit tool
+    will actually produce. None is returned when ANY of:
+
+      * the file cannot be read (transient IO error / race), OR
+      * ``old_string`` is empty, OR
+      * ``old_string`` does not occur in the file — the Edit tool will reject
+        with "string not found", OR
+      * ``replace_all`` is False and ``old_string`` occurs more than once — the
+        Edit tool will reject with "string not unique".
+
+    In every None case the edit will NOT apply as specified, so the file's
+    content does not change. Evaluating that unchanged content and DENYING would
+    misattribute a PRE-EXISTING over-cap line to the user's edit: a compressing
+    edit whose ``old_string`` did not byte-exactly match would be refused with a
+    cap message about a line the edit doesn't even touch — wedging the index
+    against every edit, including the edit meant to fix the offending line.
+    Deferring (the caller allows on None) lets the Edit tool surface its own
+    accurate "string not found / not unique" error instead.
+
+    When reconstruction IS faithful (old_string present, and unique unless
+    replace_all): replace_all=True swaps every occurrence; replace_all=False
+    swaps the single unique occurrence — a mirror of the Edit tool. The RESULT
+    (not the current file state) is what the caller checks for over-cap lines,
+    so a genuine compressing edit passes and only an edit that INTRODUCES or
+    RETAINS an over-cap line is refused.
     """
     try:
         existing = Path(file_path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
+        return None
+    # An empty old_string is malformed (the Edit tool rejects it); defer.
+    if not old_string:
+        return None
+    count = existing.count(old_string)
+    if count == 0:
+        # Edit tool will reject: string not found. The edit won't apply, so the
+        # post-edit content is indeterminate from the hook's side — defer.
+        return None
+    if not replace_all and count > 1:
+        # Edit tool will reject: string not unique (replace_all is False). We
+        # cannot know which occurrence the user means — defer.
         return None
     if replace_all:
         return existing.replace(old_string, new_string)
@@ -196,7 +232,16 @@ def main() -> None:
             allow("memory-cap: Edit payload missing old_string/new_string — letting Edit validate.")
         new_content = reconstruct_edit_content(target_path, old_s, new_s, replace_all)
         if new_content is None:
-            allow(f"memory-cap: could not read {target_path!r} for Edit reconstruction — letting Edit handle.")
+            # Cannot faithfully reconstruct the post-edit content (file
+            # unreadable, or old_string empty / absent / non-unique). The Edit
+            # tool will apply or reject the edit on its own; deferring avoids
+            # misattributing a PRE-EXISTING over-cap line to this edit. The Edit
+            # tool surfaces its own accurate "string not found / not unique" error.
+            allow(
+                f"memory-cap: cannot faithfully reconstruct the Edit result for "
+                f"{target_path!r} (file unreadable, or old_string empty / absent "
+                f"/ non-unique) — deferring to the Edit tool's own validation."
+            )
     else:
         # NotebookEdit on a .md index is structurally unlikely; check defensively.
         new_content = tool_input.get("new_source") or ""
