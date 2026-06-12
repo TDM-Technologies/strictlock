@@ -19,7 +19,7 @@ can't talk its way past a check that executes in code it doesn't control. And th
 emits a per-decision audit trail as a byproduct — the evidence SOC 2 and ISO ask for.
 
 > **fail-closed** is the principle. **StrictLock** is the suite. **plan-gate /
-> commit-msg-gate / memory-cap** are the modules.
+> commit-msg-gate / memory-cap / externalized-memory** are the modules.
 
 ## Modules
 
@@ -28,12 +28,14 @@ emits a per-decision audit trail as a byproduct — the evidence SOC 2 and ISO a
 | [**plan-gate**](plan-gate/) | Flagship. A pre-action `PreToolUse` hook: an agent may modify only the exact files and run only the exact commands an approved plan enumerates. Everything else is denied before it runs. Ships with the formal paper. | ✅ v1 |
 | [**commit-msg-gate**](commit-msg-gate/) | A `commit-msg` git hook that requires every commit to reference an approved plan (or carry an approved chore/docs prefix) — so the version-control trail links back to an authorization. | ✅ v1 |
 | [**memory-cap**](memory-cap/) | A `PreToolUse` hook that structurally caps the size of an agent's auto-loaded memory index, keeping per-session context cost bounded instead of relying on a convention nobody enforces. | ✅ v1 |
+| [**externalized-memory**](externalized-memory/) | The shared blackboard: one on-disk state file as the source of truth across stateless agent sessions, written atomically. Ships as templates + an atomic-write reference + the design write-up — so cross-session state is an auditable artifact, not a chat scroll. | ✅ v1 |
 
-Each module is **standalone** — adopt one without the others — and **configured entirely by
-environment variables**, with no machine-specific defaults baked in.
+Each module is **standalone** — adopt one without the others — plain files with no
+machine-specific defaults baked in; the gates are **configured entirely by environment
+variables**.
 
 See [**roadmap.md**](roadmap.md) for the planned sibling modules (session-ritual
-checklists, the externalized-memory pattern, a compliance-mapping doc, and more).
+checklists, a compliance-mapping doc, and more).
 
 ## The thesis, in four moves
 
