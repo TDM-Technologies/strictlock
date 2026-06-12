@@ -1,8 +1,9 @@
 # StrictLock roadmap
 
-StrictLock ships as an umbrella that grows. v1 is three polished, standalone modules
-([`plan-gate`](plan-gate/), [`commit-msg-gate`](commit-msg-gate/),
-[`memory-cap`](memory-cap/)). Below are the sibling modules and docs on deck.
+StrictLock ships as an umbrella that grows. Four standalone modules are shipped today —
+[`plan-gate`](plan-gate/), [`commit-msg-gate`](commit-msg-gate/),
+[`memory-cap`](memory-cap/), and [`externalized-memory`](externalized-memory/). Below are
+the sibling modules and docs on deck.
 
 These are honest slots, not promises with dates. Each is marked:
 
@@ -19,13 +20,6 @@ Genericized versions of the start-of-work and end-of-work checklists that make t
 PLAN → CONFIRM → EXECUTE loop a habit rather than a hope: verify the gate environment, read
 the prior handoff, author the plan, and at close-out confirm the work landed and archive the
 plan. Ships as templates + prose, not as anyone's real checklists.
-
-### The externalized-memory pattern (the shared blackboard)
-The handoff/state-transfer pattern that the paper's §2 leans on: a single on-disk state file
-as the source of truth across stateless agent sessions, written atomically
-(write-temp-then-rename). Ships as a template + the design write-up — **structure and prose
-only, never real handoff data.** This is the natural next module to bring home, paired with
-the published field-report article on state transfer.
 
 ### Compliance-mapping doc (SOC 2 / ISO 42001 / ISO 9001)
 A standalone expansion of the paper's §6: how the gate's append-only decision log and

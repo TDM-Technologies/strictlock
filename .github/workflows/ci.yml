@@ -23,6 +23,8 @@ jobs:
         run: python plan-gate/tests/test_plan_gate.py
       - name: memory-cap tests
         run: python memory-cap/tests/test_memory_cap.py
+      - name: externalized-memory tests
+        run: python externalized-memory/tests/test_atomic_write.py
 
   shell:
     name: shell lint + tests
