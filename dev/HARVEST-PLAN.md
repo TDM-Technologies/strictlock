@@ -105,7 +105,7 @@ Dispositions: **harvest-now** (clean, ready) · **planned** (ship soon; mostly p
 | ROI / carrying-cost gate rubric | Meta | H | H | planned (doc) | 2 |
 | harvest ritual (light pass A–C) | Rituals | M | H | planned (some coupling) | 2 |
 | blast-radius review-depth trigger | Gates | M | H | planned (needs pattern-config genericization) | 2 |
-| **git-ref CAS collision lease (vault Feature C)** | Concurrency | H | H | **harvest-now ★ — Concurrency flagship; source from vault; retarget to plan-gate `allowed_paths`** | 3 |
+| **git-ref CAS collision lease (vault Feature C)** | Concurrency | H | H | **harvest-now ★ — Concurrency flagship; source from vault; path-source primitive, plan-gate plan = default adapter (Option A)** | 3 |
 | binary-sink auto-resolver | Gates/Conc | M | H | harvest-now (source vault git-native shape; precondition: pure regenerator) | 3 |
 | liveness scanner (conductor-scan) | Meta/Conc | H | M | harvest-now | 3 |
 | ~~scope-lease (HIPAAPath mtime hint)~~ | Concurrency | L | L | superseded by vault lease above | — |
@@ -205,7 +205,8 @@ only (for the web-UI-merge placement variant + circuit-breaker maturity if neede
   genericization: env/YAML registry for security markers, drop the hardcoded paths,
   ship the plan-gate parser-pinning test with it).
 - **Wave 3 — concurrency primitives (sourced from the vault; full spec in §6).**
-  `scope-lease` (the flagship git-ref lock, retargeted to plan-gate `allowed_paths`) ·
+  `scope-lease` (the flagship git-ref lock; path-source primitive, plan-gate plan as default
+  adapter — Option A) ·
   `sink-resolver` (behind its pure-generator precondition) · liveness scanner ·
   escalation substrate as exploring.
 - **Wave 4 — rituals + remaining gates.** session-ritual checklist templates · WP-
@@ -222,19 +223,28 @@ The concrete realization of the §4 decision. Both sourced from the vault `work-
 decoupled from its EA-OS `start`/work-record glue. House format each: standalone dir with
 README + script + SCHEMA + CONFIG + examples + tests, env-configured.
 
-### `scope-lease` — git-native exclusive claim over a plan's paths (Concurrency flagship)
+### `scope-lease` — git-native exclusive claim over a path set (Concurrency flagship)
+
+**✅ RESOLVED (2026-06-24): input source = Option A (decoupled primitive, plan-gate as default adapter).**
+The lock's primitive takes a **path list + lock id** — it does *not* hard-depend on plan-gate.
+plan-gate's active plan file is the **default, headlined source** (run plan-gate and the lease
+claims your existing `allowed_paths` for free); a thin fallback (`--paths`, stdin, or a small
+own-frontmatter file) serves everyone else. This keeps the suite's "every module standalone"
+promise intact *and* the flagship-extension story — composition is a bonus, not a precondition.
 
 **Thesis.** plan-gate enumerates the paths a unit of work *may* touch; `scope-lease` makes
 that hold **exclusive** across concurrent agents. A git-native, zero-service lock so N
 autonomous agents never edit the same source file at once — closing the two failures human
 supervision used to cover: **deadlock-on-crash** and **stale-holder-write**.
 
-**Composition (the product story).** It reads `allowed_paths` from the **same plan-gate plan
-file** plan-gate already parses, and claims one lock per path. Adopters already running
-plan-gate get the lease against their existing plans for free. plan-gate says "only these
-paths"; scope-lease adds "…and you hold them exclusively." Enumerated → enumerated **+
-exclusive.** This is the single strongest framing in the harvest: the lease is the multi-agent
-extension of the flagship, not a standalone curiosity.
+**Composition (the product story).** The primitive claims one lock per repo-relative path in
+the set it's handed. Its **default adapter** reads that set from the active plan-gate plan file
+plan-gate already parses, so adopters already running plan-gate get the lease against their
+existing plans for free: plan-gate says "only these paths"; scope-lease adds "…and you hold them
+exclusively." Enumerated → enumerated **+ exclusive.** That remains the strongest framing in the
+harvest — but it now rides *on top of* a standalone lock, so a fleet that doesn't run plan-gate
+can still adopt it (path set from `--paths`/stdin/own-frontmatter). The flagship-extension is the
+showcase, not the only door.
 
 **Mechanism (verbatim from vault Feature C — pure git, no daemon).**
 - One ref per claimed path: `refs/locks/<sha1(repo-relative-path)>` → a blob
@@ -254,8 +264,8 @@ extension of the flagship, not a standalone curiosity.
 
 | Vault (EA-OS) | StrictLock `scope-lease` |
 |---|---|
-| `allowed_paths` from `work/<ULID>.md` record | from a **plan-gate plan file** (YAML frontmatter) |
-| `record_id` = ULID | `plan_id` = the plan's id / stable slug |
+| `allowed_paths` from `work/<ULID>.md` record | from a **path source**: plan-gate plan file (default adapter) *or* `--paths`/stdin/own-frontmatter (standalone) |
+| `record_id` = ULID | `lock_id` = the plan's id/slug (plan-gate adapter) *or* a caller-supplied id (standalone) |
 | owner via `derive_owner` off work-branch | `SCOPE_LEASE_OWNER` env (default: git branch / `user.email`) |
 | `lease` subcommands on `work-registry.py` | standalone `scope-lease.py` (acquire / fence-check / release) |
 | `start` integration calls acquire | adopter calls `acquire` at session start (any harness) |
@@ -267,9 +277,10 @@ it must **never** wall a human's manual merge or edits (a `worktree_bypass` equi
 than silently degrading exclusion (cross-machine push-CAS-to-origin is a later phase).
 **Surface, don't auto-reap:** reclaim is logged, never a background reaper.
 
-**Config (env).** `SCOPE_LEASE=on` · `SCOPE_LEASE_PLANS_DIR` (reuse `PLAN_GATE_PLANS_DIR`) ·
-`SCOPE_LEASE_TTL` (deadline) · `SCOPE_LEASE_OWNER` · `SCOPE_LEASE_LOG_DIR` (mirror
-`PLAN_GATE_LOG_DIR`).
+**Config (env).** `SCOPE_LEASE=on` · `SCOPE_LEASE_SOURCE` (`plan-gate` default | `paths` | `file`) ·
+`SCOPE_LEASE_PLANS_DIR` (plan-gate adapter; may reuse `PLAN_GATE_PLANS_DIR`) ·
+`SCOPE_LEASE_PATHS` / `--paths` / `SCOPE_LEASE_PATHS_FILE` (standalone sources) ·
+`SCOPE_LEASE_TTL` (deadline) · `SCOPE_LEASE_OWNER` · `SCOPE_LEASE_LOG_DIR` (mirror `PLAN_GATE_LOG_DIR`).
 
 **Acceptance tests (port vault (a)–(h)).** overlapping scopes → exactly one HELD, the other a
 structured DENY · back-dated deadline reclaimable with `token+1` · reclaimed-away →
@@ -279,9 +290,11 @@ half-claim orphan ref) · GC race (ref-pin the blob before any prune window). Pl
 post-build fix: an FS-aware key fold gated on git's `core.ignorecase`/`core.precomposeunicode`
 (closes the case-insensitive/unicode-FS double-grant).
 
-**Effort: medium.** The mechanism is built + 160-test-proven in the vault; the work is the
-retarget (plan-file source, env owner, standalone script), re-porting the test suite, and the
-README/SCHEMA/CONFIG. No new research — the hard design (9-agent panel + skeptic) is done.
+**Effort: medium(+).** The mechanism is built + 160-test-proven in the vault; the work is the
+retarget — a **path-source seam** (plan-gate adapter as default + a standalone fallback), env
+owner, standalone script — re-porting the test suite **against the new source shape** (the
+fixtures change, it's not a copy), and the README/SCHEMA/CONFIG. No new research — the hard
+design (9-agent panel + skeptic) is done; Option A adds one small input abstraction over §4.
 
 ### `sink-resolver` — deterministic auto-resolution of generated-file merge conflicts (secondary)
 
@@ -372,5 +385,12 @@ stub** — content gets planned when the module ships, not now.
 ---
 
 _This plan is the durable artifact for the harvest. The §4 vault-overlap decision is
-**resolved** (source the concurrency primitives from the vault; §6 holds the module spec).
-Next: wire these waves into `BACKLOG.md` + set `STATE.md`'s Next Action._
+**resolved** (source the concurrency primitives from the vault; §6 holds the module spec), and
+the §6 `scope-lease` input-source question is **resolved to Option A** (decoupled primitive,
+plan-gate as default adapter)._
+
+_Wired into the dev-tracking surfaces 2026-06-24: the waves now live in [`BACKLOG.md`](BACKLOG.md),
+[`STATE.md`](STATE.md)'s Next Action points at Wave 0 (the unblocked, lowest-effort work), and
+[`../roadmap.md`](../roadmap.md)'s dispositions were reconciled (generated-sink gates promoted
+Exploring → Planned to match this plan). Deliberately left for a positioning call: whether the
+public roadmap adopts the §2 six-family umbrella as its presentation._
