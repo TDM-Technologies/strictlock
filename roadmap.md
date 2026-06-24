@@ -26,6 +26,23 @@ A standalone expansion of the paper's §6: how the gate's append-only decision l
 exact-path authorization become audit evidence — which control each mechanism maps to, and
 what an auditor can trace. The point the paper makes in one page, as a usable reference.
 
+### Smoke-only assertion detector (ESLint rule)
+An ESLint rule that flags false-safety-net tests — `toBeDefined`, a bare `expect(x)` with no
+matcher, `toContain` as the only assertion — the green checks that assert nothing real. Zero
+coupling; drops into any JS/TS project.
+
+### Generated-sink integrity gates
+A layered, fail-closed guard so a **stale generated artifact** (a manifest, an index, a build
+output, a checked-in schema) never ships: a commit-time freshness check plus a pre-push
+backstop, byte-exact against a regenerate. For any repo carrying generated state that can
+silently fall out of sync.
+
+### externalized-memory projection bundle
+An add-on to the shipped `externalized-memory` module: a deterministic, **git-free and
+clock-free** rendering layer (record schema + region renderer + fenced-region splicing +
+canonical-UTC timestamp guard + required-body validation) that turns the shared blackboard into
+a blackboard with an auditable, reproducible status projection.
+
 ---
 
 ## Exploring
@@ -34,11 +51,6 @@ what an auditor can trace. The point the paper makes in one page, as a usable re
 Automated working-tree hygiene checks for setups running **multiple concurrent worktrees**
 (stale branches, orphaned worktrees, drifted local state). Conditional: only earns its
 keep when you actually run parallel agent sessions across worktrees.
-
-### manifest-freshness / pre-push gate
-A pre-push guard that blocks pushing when a **generated artifact** (a manifest, an index, a
-build output) is stale relative to its sources. Conditional: only relevant when your repo
-carries generated state that can silently fall out of sync.
 
 ---
 
