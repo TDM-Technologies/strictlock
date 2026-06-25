@@ -6,6 +6,9 @@ Concrete, fictional artifacts showing the pattern end-to-end:
   `todo-api` project.
 - [`MAILBOX.example.md`](MAILBOX.example.md) — one work package in flight, plus the
   sentinel line the file is cleared to afterward.
+- [`PROJECTION.README.md`](PROJECTION.README.md) — the **projection bundle** walkthrough:
+  a [`projection-records/`](projection-records/) directory rendered deterministically into
+  the fenced region of [`PROJECTION.example.md`](PROJECTION.example.md).
 
 Everything below uses plain files and one short script. No daemon, no service.
 
