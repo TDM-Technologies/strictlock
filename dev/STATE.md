@@ -3,9 +3,9 @@
 ## Meta
 - last_session: 2026-06-25
 - agent: Claude Code (Opus 4.8)
-- git_ref: e436a72 (main, pushed to origin) — **Wave 1 COMPLETE (3 of 3)**: generated-sink-commit-gate +
-  generated-sink-prepush-gate + the externalized-memory projection bundle + eslint-plugin-strictlock
-  (the smoke-only-assertions rule, shipped as a standalone npm package — the suite's first JS sibling)
+- git_ref: a6054e8 (main, pushed to origin) — **Wave 3 `scope-lease` flagship SHIPPED** (git-ref CAS exclusive
+  path-lock, Option A; 37 tests; 3 adversarial lenses clean) on top of Wave 1 complete (sink gates + projection
+  bundle + eslint-plugin-strictlock). roadmap.md reconciled (shipped vs planned)
 - touched (this wave): generated-sink-commit-gate/*, generated-sink-prepush-gate/*,
   externalized-memory/{projection.py,PROJECTION-SCHEMA.md,tests/test_projection.py,examples/*,README.md},
   eslint-plugin-strictlock/*, README.md, COMPLIANCE.md, .github/workflows/ci.yml, dev/STATE.md, dev/BACKLOG.md
@@ -14,10 +14,11 @@
 **Wave 1 complete. Queue reordered 2026-06-25 (Tim): the marquee is deferred to the END.** Execution order is
 now **Wave 3 (concurrency) → Wave 4 (rituals/gates) → Wave 2 (marquee IP, last).**
 
-1. **IN PROGRESS — Wave 3 `scope-lease` flagship** (Option A, sourced from vault `work-registry.py` Feature C;
-   full spec in [HARVEST-PLAN.md](HARVEST-PLAN.md) §6). Building now via the build → adversarial-verify harness.
-   Then `sink-resolver` (behind its pure-generator precondition; pairs with the shipped projection bundle) and
-   the liveness scanner.
+1. **NEXT — finish Wave 3 concurrency.** The `scope-lease` flagship **SHIPPED** (main @ a6054e8: git-ref CAS
+   exclusive path-lock, Option A, 37 tests, all 3 adversarial lenses clean). Remaining Wave-3 modules:
+   **`sink-resolver`** (binary-sink auto-resolver, behind its pure-generator precondition; pairs with the
+   shipped projection bundle — source = vault Feature B) and the **liveness scanner**. After Wave 3: Wave 4
+   (rituals/gates), then Wave 2 (marquee IP, deferred to last).
 2. **(Release step — Tim, when ready)** `eslint-plugin-strictlock@0.1.0` is built + CI-tested in-repo but **not
    yet published to npm** (the package name was confirmed AVAILABLE 2026-06-25). `npm publish` needs an npm
    account/token and is an outward-facing release call. See [BACKLOG.md](BACKLOG.md) `eslint-plugin-publish`.
@@ -42,9 +43,14 @@ Forward map: [HARVEST-PLAN.md](HARVEST-PLAN.md) (waves 0–4 + later). Public mo
 - harvest-harness — **DONE 2026-06-25** — the fail-closed merge guard is built AND now proven in use: it
   landed both Wave-1 modules (clean-main pre-flight, full-suite validation after each merge, rollback-on-fail,
   no push). No workflow agent ever touched the shared main checkout — builds happen only in isolated worktrees.
-- scope-lease (wave 3) — **IN PROGRESS (next-up, building 2026-06-25)** — Option A: decoupled primitive;
-  plan-gate plan as the default adapter, standalone fallback for non-plan-gate fleets. Source = vault
-  `work-registry.py` Feature C (the git-ref CAS lease). Spec in HARVEST-PLAN §6.
+- scope-lease (wave 3) — **SHIPPED 2026-06-25** (main @ a6054e8) — Option A git-ref CAS exclusive path-lock;
+  plan-gate adapter default + --paths/stdin/own-frontmatter fallback; faithful port of vault Feature C, all
+  binding invariants kept (agents-only/never-walls-a-human, fail-loud machine boundary, surfaced reclaims,
+  FS-aware case/unicode fold). 37 tests (incl. a commit-race abort regression added at integration); the 3
+  perspective-diverse adversarial verifies (CAS-atomicity · normalization · fencing/human-bypass) all clean.
+- sink-resolver (wave 3) — **NEXT-UP** — binary-sink auto-resolver behind its pure-generator precondition;
+  pairs with the shipped projection bundle. Source = vault Feature B (HIPAAPath `conductor-resolve.py` =
+  reference only, for the web-UI-merge variant). Then the liveness scanner closes Wave 3.
 - harvest-wave-2 (marquee) — **DEFERRED to end of queue (Tim, 2026-06-25)** — Cleanup-Day / rule-archaeology
   (+ design paper) · ROI / harvest governance narrative · blast-radius (needs pattern-config genericization).
   Still the highest-cred work; just sequenced last by choice.
@@ -58,6 +64,14 @@ Forward map: [HARVEST-PLAN.md](HARVEST-PLAN.md) (waves 0–4 + later). Public mo
 - reversibility-tiers / auto-commit — exploring (later) — need a shared 2–3 month evidence window.
 
 ## Decisions
+- 2026-06-25 — **Wave 3 `scope-lease` flagship SHIPPED** (queue reordered first: marquee deferred to end,
+  concurrency next). Faithful port of vault Feature C's git-ref CAS lease, retargeted per HARVEST-PLAN §6
+  Option A (path-source seam: plan-gate adapter default + standalone fallbacks; env owner/lock-id; standalone
+  CLI; dropped the ULID/work-record glue). Verified by **build + 3 perspective-diverse adversaries**
+  (CAS-atomicity, the normalization crux, fencing/reclaim+human-bypass) — all clean, zero blocking. Integrator
+  added a commit-race abort **regression test** (the one advisory gap: the Phase-2 DECIDE→commit race was
+  confirmed-by-hand but untested) → 37 tests. Landed by the guard (a6054e8); registered in README + COMPLIANCE
+  §J + CI; roadmap.md reconciled.
 - 2026-06-25 — **Wave 1 landed (2 of 3)**: generated-sink commit+prepush gates + the externalized-memory
   projection bundle, built by the fan-out workflow (one build agent per module in its own worktree →
   independent adversarial verify [both verdict-clean, zero blocking issues] → cross-module consistency), then

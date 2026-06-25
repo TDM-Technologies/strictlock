@@ -37,10 +37,10 @@ to npm**. `npm publish` needs an npm account/token and is an outward-facing rele
 maintainer. (Genericization done: the HIPAAPath baseline.json was replaced by ESLint rule options —
 `baseline` / `marker` / `extraSmokeMatchers`, default strict.)
 
-### Wave 3 — concurrency primitives — *NEXT-UP (scope-lease in progress 2026-06-25)* — see [## concurrency](#concurrency)
-`scope-lease` (decided: Option A — **building now**) · `sink-resolver` (behind its pure-generator
-precondition; pairs with the shipped projection bundle) · liveness scanner. Sourced from the vault
-`work-registry.py` Feature C.
+### Wave 3 — concurrency primitives — *IN PROGRESS (scope-lease SHIPPED 2026-06-25)* — see [## concurrency](#concurrency)
+**SHIPPED:** `scope-lease` (Option A git-ref CAS exclusive path-lock; main @ a6054e8; 37 tests; 3 adversarial
+lenses clean). **NEXT:** `sink-resolver` (binary-sink auto-resolver, behind its pure-generator precondition;
+pairs with the shipped projection bundle; source = vault Feature B) · then the liveness scanner closes Wave 3.
 
 ### Wave 2 — marquee IP — *DEFERRED to end of queue (Tim, 2026-06-25)*
 Run LAST (after Waves 3 + 4), by choice — still the highest-cred work, just sequenced last now the salvage
@@ -225,6 +225,11 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 ---
 
 ## Done
+- **2026-06-25** — **Wave 3 `scope-lease` flagship SHIPPED** (main @ a6054e8): git-native zero-service
+  exclusive lock over a path set (`refs/locks/*` CAS), Option A — faithful port of vault Feature C,
+  retargeted to a path-source seam (plan-gate adapter default + standalone fallbacks). Built + verified by
+  build + 3 perspective-diverse adversaries (all clean); integrator added a commit-race abort regression
+  (37 tests); registered in README/COMPLIANCE §J/CI; roadmap.md reconciled. Queue reordered: marquee → end.
 - **2026-06-25** — **Harvest Wave 1 COMPLETE (3 of 3)** (main @ e436a72, pushed): generated-sink
   commit-gate + prepush-gate + the externalized-memory projection bundle + `eslint-plugin-strictlock`
   (smoke-only-assertions rule, own npm package). Built by the fan-out harness (build →
