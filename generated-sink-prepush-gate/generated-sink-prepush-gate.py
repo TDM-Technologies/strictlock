@@ -18,7 +18,7 @@ It DEPARTS from the commit-time gate on two points:
      terminal branch state is validated regardless of what is about to ship.
      (Defense-in-depth complement to the staged-change-scoped commit-time gate.)
   2. bypass isolation: it honors ONLY its own uniquely-named bypass,
-     SINK_PREPUSH_GATE_BYPASS — NOT the commit-time gate's bypass. Bypassing the
+     GENERATED_SINK_PREPUSH_GATE_BYPASS — NOT the commit-time gate's bypass. Bypassing the
      first line of defense must not silently disable the last line of defense.
 
 It is **fail-closed** by construction: a missing/misconfigured generator, a
@@ -49,13 +49,13 @@ import sys
 import traceback
 from pathlib import Path
 
-# --- environment variable names (consistently SINK_PREPUSH_GATE_*-prefixed) ---
-ENV_ENABLE = "SINK_PREPUSH_GATE"           # "on" enables the gate; else inert.
-ENV_GENERATOR = "SINK_PREPUSH_GATE_GENERATOR"   # the generator --check command.
-ENV_GENERATOR_CWD = "SINK_PREPUSH_GATE_GENERATOR_CWD"  # cwd for the generator (repo-root-relative or absolute).
-ENV_TIMEOUT = "SINK_PREPUSH_GATE_TIMEOUT"  # seconds before the generator is treated as a fail-closed timeout.
-ENV_LOG_DIR = "SINK_PREPUSH_GATE_LOG_DIR"  # optional dir for the append-only decision log.
-ENV_BYPASS = "SINK_PREPUSH_GATE_BYPASS"    # "1" = single-push, log-on-use bypass (uniquely-named).
+# --- environment variable names (consistently GENERATED_SINK_PREPUSH_GATE_*-prefixed) ---
+ENV_ENABLE = "GENERATED_SINK_PREPUSH_GATE"           # "on" enables the gate; else inert.
+ENV_GENERATOR = "GENERATED_SINK_PREPUSH_GATE_GENERATOR"   # the generator --check command.
+ENV_GENERATOR_CWD = "GENERATED_SINK_PREPUSH_GATE_GENERATOR_CWD"  # cwd for the generator (repo-root-relative or absolute).
+ENV_TIMEOUT = "GENERATED_SINK_PREPUSH_GATE_TIMEOUT"  # seconds before the generator is treated as a fail-closed timeout.
+ENV_LOG_DIR = "GENERATED_SINK_PREPUSH_GATE_LOG_DIR"  # optional dir for the append-only decision log.
+ENV_BYPASS = "GENERATED_SINK_PREPUSH_GATE_BYPASS"    # "1" = single-push, log-on-use bypass (uniquely-named).
 
 DEFAULT_TIMEOUT_S = 120
 

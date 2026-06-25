@@ -20,8 +20,8 @@ Point the gate at the sample generator. Unlike the commit gate, there is **no** 
 trigger — the backstop always validates the terminal state on a push.
 
 ```bash
-export SINK_PREPUSH_GATE=on
-export SINK_PREPUSH_GATE_GENERATOR="python3 sample-generator.py --check"
+export GENERATED_SINK_PREPUSH_GATE=on
+export GENERATED_SINK_PREPUSH_GATE_GENERATOR="python3 sample-generator.py --check"
 ```
 
 ## Fresh sink → push allowed
@@ -55,8 +55,8 @@ echo "exit: $?"        # -> 0  (ALLOW: byte-exact again)
 ## Missing generator config → loud fail-closed
 
 ```bash
-SINK_PREPUSH_GATE_GENERATOR="" python3 ../generated-sink-prepush-gate.py origin https://example.test/repo.git
-echo "exit: $?"        # -> 1  (BLOCKED: SINK_PREPUSH_GATE_GENERATOR is not set — fail-closed)
+GENERATED_SINK_PREPUSH_GATE_GENERATOR="" python3 ../generated-sink-prepush-gate.py origin https://example.test/repo.git
+echo "exit: $?"        # -> 1  (BLOCKED: GENERATED_SINK_PREPUSH_GATE_GENERATOR is not set — fail-closed)
 ```
 
 ## Bypass isolation
@@ -64,6 +64,6 @@ echo "exit: $?"        # -> 1  (BLOCKED: SINK_PREPUSH_GATE_GENERATOR is not set 
 The commit gate's bypass does **not** disable this backstop. With a stale sink:
 
 ```bash
-SINK_COMMIT_GATE_BYPASS=1 python3 ../generated-sink-prepush-gate.py origin https://example.test/repo.git
-echo "exit: $?"        # -> 1  (still BLOCKED — only SINK_PREPUSH_GATE_BYPASS=1 bypasses this gate)
+GENERATED_SINK_COMMIT_GATE_BYPASS=1 python3 ../generated-sink-prepush-gate.py origin https://example.test/repo.git
+echo "exit: $?"        # -> 1  (still BLOCKED — only GENERATED_SINK_PREPUSH_GATE_BYPASS=1 bypasses this gate)
 ```

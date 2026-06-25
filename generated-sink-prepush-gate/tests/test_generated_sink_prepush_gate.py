@@ -103,11 +103,11 @@ class PrepushGateTests(unittest.TestCase):
 
     def gate_env(self, **overrides) -> dict:
         env = dict(self.git_env)
-        env["SINK_PREPUSH_GATE"] = "on"
-        env["SINK_PREPUSH_GATE_GENERATOR"] = f"{sys.executable} gen.py --check"
-        env["SINK_PREPUSH_GATE_BYPASS"] = ""
-        env["SINK_PREPUSH_GATE_TIMEOUT"] = "60"
-        env["SINK_PREPUSH_GATE_LOG_DIR"] = ""
+        env["GENERATED_SINK_PREPUSH_GATE"] = "on"
+        env["GENERATED_SINK_PREPUSH_GATE_GENERATOR"] = f"{sys.executable} gen.py --check"
+        env["GENERATED_SINK_PREPUSH_GATE_BYPASS"] = ""
+        env["GENERATED_SINK_PREPUSH_GATE_TIMEOUT"] = "60"
+        env["GENERATED_SINK_PREPUSH_GATE_LOG_DIR"] = ""
         for k, v in overrides.items():
             env[k] = v
         return env
@@ -142,14 +142,14 @@ class PrepushGateTests(unittest.TestCase):
         self.assertIn("STALE", p.stderr)
 
     def test_missing_generator_config_loud_fail(self):
-        p = self.run_gate(self.gate_env(SINK_PREPUSH_GATE_GENERATOR=""))
+        p = self.run_gate(self.gate_env(GENERATED_SINK_PREPUSH_GATE_GENERATOR=""))
         self.assertNotEqual(p.returncode, 0, msg=f"expected fail-closed BLOCK; stderr={p.stderr!r}")
-        self.assertIn("SINK_PREPUSH_GATE_GENERATOR", p.stderr)
+        self.assertIn("GENERATED_SINK_PREPUSH_GATE_GENERATOR", p.stderr)
         self.assertIn("fail-closed", p.stderr.lower())
 
     def test_uninvokable_generator_loud_fail(self):
         env = self.gate_env(
-            SINK_PREPUSH_GATE_GENERATOR="/nonexistent/definitely/not/a/real/binary --check"
+            GENERATED_SINK_PREPUSH_GATE_GENERATOR="/nonexistent/definitely/not/a/real/binary --check"
         )
         p = self.run_gate(env)
         self.assertNotEqual(p.returncode, 0, msg=f"expected fail-closed BLOCK; stderr={p.stderr!r}")
@@ -159,8 +159,8 @@ class PrepushGateTests(unittest.TestCase):
         slow = self.repo / "slow.py"
         slow.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
         env = self.gate_env(
-            SINK_PREPUSH_GATE_GENERATOR=f"{sys.executable} slow.py --check",
-            SINK_PREPUSH_GATE_TIMEOUT="1",
+            GENERATED_SINK_PREPUSH_GATE_GENERATOR=f"{sys.executable} slow.py --check",
+            GENERATED_SINK_PREPUSH_GATE_TIMEOUT="1",
         )
         p = self.run_gate(env)
         self.assertNotEqual(p.returncode, 0, msg=f"expected fail-closed BLOCK; stderr={p.stderr!r}")
@@ -168,12 +168,12 @@ class PrepushGateTests(unittest.TestCase):
 
     def test_gate_disabled_allows_stale(self):
         self.source.write_text("changed source\n", encoding="utf-8")
-        p = self.run_gate(self.gate_env(SINK_PREPUSH_GATE="off"))
+        p = self.run_gate(self.gate_env(GENERATED_SINK_PREPUSH_GATE="off"))
         self.assertEqual(p.returncode, 0, msg=f"expected ALLOW (disabled); stderr={p.stderr!r}")
 
     def test_bypass_allows_stale(self):
         self.source.write_text("changed source\n", encoding="utf-8")
-        env = self.gate_env(SINK_PREPUSH_GATE_BYPASS="1")
+        env = self.gate_env(GENERATED_SINK_PREPUSH_GATE_BYPASS="1")
         p = self.run_gate(env)
         self.assertEqual(p.returncode, 0, msg=f"expected ALLOW (bypass); stderr={p.stderr!r}")
         self.assertIn("bypass", p.stderr.lower())
@@ -184,7 +184,7 @@ class PrepushGateTests(unittest.TestCase):
         # blocks here.
         self.source.write_text("changed source\n", encoding="utf-8")
         env = self.gate_env()
-        env["SINK_COMMIT_GATE_BYPASS"] = "1"  # the OTHER gate's bypass
+        env["GENERATED_SINK_COMMIT_GATE_BYPASS"] = "1"  # the OTHER gate's bypass
         p = self.run_gate(env)
         self.assertNotEqual(
             p.returncode, 0,
@@ -194,7 +194,7 @@ class PrepushGateTests(unittest.TestCase):
     def test_decision_log_written(self):
         log_dir = Path(self._tmp.name) / "logs"
         self.source.write_text("changed source\n", encoding="utf-8")
-        env = self.gate_env(SINK_PREPUSH_GATE_LOG_DIR=str(log_dir))
+        env = self.gate_env(GENERATED_SINK_PREPUSH_GATE_LOG_DIR=str(log_dir))
         p = self.run_gate(env)
         self.assertNotEqual(p.returncode, 0)
         logfile = log_dir / "sink-prepush-gate.log"

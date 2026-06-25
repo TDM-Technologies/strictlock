@@ -24,15 +24,15 @@ adopt both for layered enforcement.
 
 - Resolves the repo root with `git rev-parse --show-toplevel` — no hardcoded paths.
 - **Triggers only** when the staged changes touch a configured **source path** prefix
-  (`SINK_COMMIT_GATE_SOURCE_PATHS`). A commit that stages nothing in that set passes
+  (`GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS`). A commit that stages nothing in that set passes
   untouched — the gate is scoped, not a tax on every commit.
-- Runs your generator's `--check` mode (`SINK_COMMIT_GATE_GENERATOR`): a
+- Runs your generator's `--check` mode (`GENERATED_SINK_COMMIT_GATE_GENERATOR`): a
   regenerate-and-compare that exits non-zero iff the checked-in sink is not byte-exact. The
   gate **never** mutates your working tree and **never** auto-stages — it fails and tells; the
   human stays in the loop.
 - A rebase / merge / cherry-pick in progress is skipped (those fire the commit hook but the
   post-operation commit re-validates).
-- Every blocking decision can be appended to an audit log (`SINK_COMMIT_GATE_LOG_DIR`).
+- Every blocking decision can be appended to an audit log (`GENERATED_SINK_COMMIT_GATE_LOG_DIR`).
 
 ## Install
 
@@ -41,7 +41,7 @@ cp generated-sink-commit-gate.py /path/to/your/repo/.git/hooks/pre-commit
 chmod +x /path/to/your/repo/.git/hooks/pre-commit
 ```
 
-Then configure it (below) and turn it on with `SINK_COMMIT_GATE=on`. It applies to **every**
+Then configure it (below) and turn it on with `GENERATED_SINK_COMMIT_GATE=on`. It applies to **every**
 commit in that repo — human or agent. Git invokes a `pre-commit` hook with no arguments and
 honors its exit code: `0` allows the commit, non-zero blocks it. See [`examples/`](examples/)
 for an end-to-end walkthrough.
@@ -49,29 +49,29 @@ for an end-to-end walkthrough.
 ## Configuration (environment)
 
 Everything is configured by environment variables — no machine-specific or project-specific
-defaults are baked in. If `SINK_COMMIT_GATE` is not `on`, the hook is inert (allow-all).
+defaults are baked in. If `GENERATED_SINK_COMMIT_GATE` is not `on`, the hook is inert (allow-all).
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `SINK_COMMIT_GATE` | yes | `on` (case-insensitive) enables the gate. Anything else makes it inert (allow-all). |
-| `SINK_COMMIT_GATE_GENERATOR` | yes (when enabled) | The generator command to run in **check** mode, e.g. `npm run build:manifest -- --check` or `python tools/gen.py --check`. It MUST exit non-zero iff the checked-in sink is not a byte-exact regeneration, and MUST NOT mutate the tree. Parsed with shell-style word splitting; no shell is invoked. |
-| `SINK_COMMIT_GATE_SOURCE_PATHS` | yes (when enabled) | `os.pathsep`-separated list of repo-root-relative **source path prefixes** that trigger the check (e.g. `docs/manifest:openapi/spec.yaml`). A staged path under any prefix fires the gate. |
-| `SINK_COMMIT_GATE_GENERATOR_CWD` | no | Directory to run the generator from (absolute, or repo-root-relative). Default: the repo root. Useful when the generator lives in a subproject (e.g. `app`). |
-| `SINK_COMMIT_GATE_TIMEOUT` | no | Seconds before the generator is treated as a fail-closed timeout. Default `120`. A non-integer or non-positive value falls back to the default **loudly** — a misconfiguration can't silently disable the gate. |
-| `SINK_COMMIT_GATE_LOG_DIR` | no | Directory for the append-only decision log (`sink-commit-gate.log`, one JSON line per decision). Your audit trail; if unset, no log is written. |
-| `SINK_COMMIT_GATE_BYPASS` | no | `1` skips the gate for a single commit (logged on use). A distinct bypass per gate is deliberate — see below. |
+| `GENERATED_SINK_COMMIT_GATE` | yes | `on` (case-insensitive) enables the gate. Anything else makes it inert (allow-all). |
+| `GENERATED_SINK_COMMIT_GATE_GENERATOR` | yes (when enabled) | The generator command to run in **check** mode, e.g. `npm run build:manifest -- --check` or `python tools/gen.py --check`. It MUST exit non-zero iff the checked-in sink is not a byte-exact regeneration, and MUST NOT mutate the tree. Parsed with shell-style word splitting; no shell is invoked. |
+| `GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS` | yes (when enabled) | `os.pathsep`-separated list of repo-root-relative **source path prefixes** that trigger the check (e.g. `docs/manifest:openapi/spec.yaml`). A staged path under any prefix fires the gate. |
+| `GENERATED_SINK_COMMIT_GATE_GENERATOR_CWD` | no | Directory to run the generator from (absolute, or repo-root-relative). Default: the repo root. Useful when the generator lives in a subproject (e.g. `app`). |
+| `GENERATED_SINK_COMMIT_GATE_TIMEOUT` | no | Seconds before the generator is treated as a fail-closed timeout. Default `120`. A non-integer or non-positive value falls back to the default **loudly** — a misconfiguration can't silently disable the gate. |
+| `GENERATED_SINK_COMMIT_GATE_LOG_DIR` | no | Directory for the append-only decision log (`sink-commit-gate.log`, one JSON line per decision). Your audit trail; if unset, no log is written. |
+| `GENERATED_SINK_COMMIT_GATE_BYPASS` | no | `1` skips the gate for a single commit (logged on use). A distinct bypass per gate is deliberate — see below. |
 
 `os.pathsep` is `:` on Linux/macOS and `;` on Windows — it applies to
-`SINK_COMMIT_GATE_SOURCE_PATHS`.
+`GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS`.
 
 ### Example
 
 ```bash
-export SINK_COMMIT_GATE=on
-export SINK_COMMIT_GATE_GENERATOR="npm run build:manifest -- --check"
-export SINK_COMMIT_GATE_SOURCE_PATHS="docs/manifest"
-export SINK_COMMIT_GATE_GENERATOR_CWD="app"          # generator lives in app/
-export SINK_COMMIT_GATE_LOG_DIR="$HOME/.agent/logs"
+export GENERATED_SINK_COMMIT_GATE=on
+export GENERATED_SINK_COMMIT_GATE_GENERATOR="npm run build:manifest -- --check"
+export GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS="docs/manifest"
+export GENERATED_SINK_COMMIT_GATE_GENERATOR_CWD="app"          # generator lives in app/
+export GENERATED_SINK_COMMIT_GATE_LOG_DIR="$HOME/.agent/logs"
 ```
 
 ## What it prevents, detects, and can't address
@@ -84,7 +84,7 @@ export SINK_COMMIT_GATE_LOG_DIR="$HOME/.agent/logs"
   an uninstalled tool, a generator that errors or hangs — all surface as a loud, named,
   fail-closed refusal rather than a green light. The gate would rather stop you than guess.
 - **Can't address:** a `--no-verify` commit (git skips local hooks entirely), a deliberate
-  `SINK_COMMIT_GATE_BYPASS=1`, or a generator whose own `--check` lies about freshness. The
+  `GENERATED_SINK_COMMIT_GATE_BYPASS=1`, or a generator whose own `--check` lies about freshness. The
   gate is only as honest as the generator it runs and the hook git agrees to invoke. For the
   bypass / `--no-verify` hole, layer the sibling
   [`generated-sink-prepush-gate`](../generated-sink-prepush-gate/) so a stale sink that slips
@@ -94,8 +94,8 @@ export SINK_COMMIT_GATE_LOG_DIR="$HOME/.agent/logs"
 ## Why a separate bypass per gate?
 
 If every fail-closed gate honored one shared bypass variable, disabling one would silently
-disable them all. This gate has its own `SINK_COMMIT_GATE_BYPASS`, distinct from the pre-push
-gate's `SINK_PREPUSH_GATE_BYPASS`, so a deliberate one-commit escape here never weakens the
+disable them all. This gate has its own `GENERATED_SINK_COMMIT_GATE_BYPASS`, distinct from the pre-push
+gate's `GENERATED_SINK_PREPUSH_GATE_BYPASS`, so a deliberate one-commit escape here never weakens the
 backstop. When a gate blocks, the right move is almost always to **regenerate the sink** —
 not to reach for the bypass. The bypass is for a documented, deliberately-shipped stale
 snapshot, not for routine friction.

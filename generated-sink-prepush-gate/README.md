@@ -21,10 +21,10 @@ leaves the machine.
 - Runs on **every** `git push`. Unlike the commit gate, there is **no staged-source
   trigger** — the backstop validates the terminal sink state regardless of what is about to
   ship. That is precisely what catches a stale sink the commit gate's trigger never saw.
-- Runs your generator's `--check` mode (`SINK_PREPUSH_GATE_GENERATOR`): a
+- Runs your generator's `--check` mode (`GENERATED_SINK_PREPUSH_GATE_GENERATOR`): a
   regenerate-and-compare that exits non-zero iff the checked-in sink is not byte-exact. The
   gate **never** mutates your working tree and **never** auto-stages — fail and tell.
-- Every blocking decision can be appended to an audit log (`SINK_PREPUSH_GATE_LOG_DIR`).
+- Every blocking decision can be appended to an audit log (`GENERATED_SINK_PREPUSH_GATE_LOG_DIR`).
 
 A git `pre-push` hook receives the remote name and URL as arguments and the refs being pushed
 on stdin. This gate validates the *working-tree* sink, so it ignores both — it is a plain
@@ -37,23 +37,23 @@ cp generated-sink-prepush-gate.py /path/to/your/repo/.git/hooks/pre-push
 chmod +x /path/to/your/repo/.git/hooks/pre-push
 ```
 
-Then configure it (below) and turn it on with `SINK_PREPUSH_GATE=on`. Git honors the hook's
+Then configure it (below) and turn it on with `GENERATED_SINK_PREPUSH_GATE=on`. Git honors the hook's
 exit code: `0` allows the push, non-zero blocks it. See [`examples/`](examples/) for an
 end-to-end walkthrough.
 
 ## Configuration (environment)
 
 Everything is configured by environment variables — no machine-specific or project-specific
-defaults are baked in. If `SINK_PREPUSH_GATE` is not `on`, the hook is inert (allow-all).
+defaults are baked in. If `GENERATED_SINK_PREPUSH_GATE` is not `on`, the hook is inert (allow-all).
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `SINK_PREPUSH_GATE` | yes | `on` (case-insensitive) enables the gate. Anything else makes it inert (allow-all). |
-| `SINK_PREPUSH_GATE_GENERATOR` | yes (when enabled) | The generator command to run in **check** mode, e.g. `npm run build:manifest -- --check`. It MUST exit non-zero iff the checked-in sink is not a byte-exact regeneration, and MUST NOT mutate the tree. Parsed with shell-style word splitting; no shell is invoked. |
-| `SINK_PREPUSH_GATE_GENERATOR_CWD` | no | Directory to run the generator from (absolute, or repo-root-relative). Default: the repo root. Useful when the generator lives in a subproject (e.g. `app`). |
-| `SINK_PREPUSH_GATE_TIMEOUT` | no | Seconds before the generator is treated as a fail-closed timeout. Default `120`. A non-integer or non-positive value falls back to the default **loudly** — a misconfiguration can't silently disable the gate. |
-| `SINK_PREPUSH_GATE_LOG_DIR` | no | Directory for the append-only decision log (`sink-prepush-gate.log`, one JSON line per decision). Your audit trail; if unset, no log is written. |
-| `SINK_PREPUSH_GATE_BYPASS` | no | `1` skips the gate for a single push (logged on use). A distinct bypass per gate is deliberate — see below. |
+| `GENERATED_SINK_PREPUSH_GATE` | yes | `on` (case-insensitive) enables the gate. Anything else makes it inert (allow-all). |
+| `GENERATED_SINK_PREPUSH_GATE_GENERATOR` | yes (when enabled) | The generator command to run in **check** mode, e.g. `npm run build:manifest -- --check`. It MUST exit non-zero iff the checked-in sink is not a byte-exact regeneration, and MUST NOT mutate the tree. Parsed with shell-style word splitting; no shell is invoked. |
+| `GENERATED_SINK_PREPUSH_GATE_GENERATOR_CWD` | no | Directory to run the generator from (absolute, or repo-root-relative). Default: the repo root. Useful when the generator lives in a subproject (e.g. `app`). |
+| `GENERATED_SINK_PREPUSH_GATE_TIMEOUT` | no | Seconds before the generator is treated as a fail-closed timeout. Default `120`. A non-integer or non-positive value falls back to the default **loudly** — a misconfiguration can't silently disable the gate. |
+| `GENERATED_SINK_PREPUSH_GATE_LOG_DIR` | no | Directory for the append-only decision log (`sink-prepush-gate.log`, one JSON line per decision). Your audit trail; if unset, no log is written. |
+| `GENERATED_SINK_PREPUSH_GATE_BYPASS` | no | `1` skips the gate for a single push (logged on use). A distinct bypass per gate is deliberate — see below. |
 
 Note there is **no** `SOURCE_PATHS` here: the backstop always validates the terminal state,
 so it needs no trigger.
@@ -61,10 +61,10 @@ so it needs no trigger.
 ### Example
 
 ```bash
-export SINK_PREPUSH_GATE=on
-export SINK_PREPUSH_GATE_GENERATOR="npm run build:manifest -- --check"
-export SINK_PREPUSH_GATE_GENERATOR_CWD="app"          # generator lives in app/
-export SINK_PREPUSH_GATE_LOG_DIR="$HOME/.agent/logs"
+export GENERATED_SINK_PREPUSH_GATE=on
+export GENERATED_SINK_PREPUSH_GATE_GENERATOR="npm run build:manifest -- --check"
+export GENERATED_SINK_PREPUSH_GATE_GENERATOR_CWD="app"          # generator lives in app/
+export GENERATED_SINK_PREPUSH_GATE_LOG_DIR="$HOME/.agent/logs"
 ```
 
 ## What it prevents, detects, and can't address
@@ -77,7 +77,7 @@ export SINK_PREPUSH_GATE_LOG_DIR="$HOME/.agent/logs"
   tool, error, or hang) — all surface as a loud, named, fail-closed refusal of the push rather
   than a green light.
 - **Can't address:** `git push --no-verify` (git skips the pre-push hook entirely), a
-  deliberate `SINK_PREPUSH_GATE_BYPASS=1`, a sink already pushed *before* this gate was
+  deliberate `GENERATED_SINK_PREPUSH_GATE_BYPASS=1`, a sink already pushed *before* this gate was
   installed, or a generator whose own `--check` lies. This is the **last local** line of
   defense, not a server-side one — it keeps a stale commit off the remote from *your* machine,
   but it can't refuse a merge or police a push from a machine without the hook. Pair it with a
@@ -87,8 +87,8 @@ export SINK_PREPUSH_GATE_LOG_DIR="$HOME/.agent/logs"
 
 If the commit-time and pre-push gates shared one bypass, bypassing the first line of defense
 would silently disable the last line too — exactly the failure this layering exists to
-prevent. So this gate honors **only** its own `SINK_PREPUSH_GATE_BYPASS`, never the commit
-gate's `SINK_COMMIT_GATE_BYPASS`. (Its test suite proves the isolation: a stale push with the
+prevent. So this gate honors **only** its own `GENERATED_SINK_PREPUSH_GATE_BYPASS`, never the commit
+gate's `GENERATED_SINK_COMMIT_GATE_BYPASS`. (Its test suite proves the isolation: a stale push with the
 commit gate's bypass set still blocks here.) When a gate blocks, the right move is almost
 always to **regenerate the sink** — the bypass is for a documented, deliberately-shipped stale
 snapshot, not for routine friction.

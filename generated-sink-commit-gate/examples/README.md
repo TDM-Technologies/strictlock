@@ -17,13 +17,13 @@ commit proceed, non-zero blocks it.
 
 Point the gate at the sample generator and trigger on `SOURCE.txt`. (The paths below are
 written for running the gate **from this `examples/` directory** as if it were a repo root —
-in a real repo, `SINK_COMMIT_GATE_SOURCE_PATHS` is repo-root-relative and the hook lives in
+in a real repo, `GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS` is repo-root-relative and the hook lives in
 `.git/hooks/pre-commit`.)
 
 ```bash
-export SINK_COMMIT_GATE=on
-export SINK_COMMIT_GATE_GENERATOR="python3 sample-generator.py --check"
-export SINK_COMMIT_GATE_SOURCE_PATHS="SOURCE.txt"
+export GENERATED_SINK_COMMIT_GATE=on
+export GENERATED_SINK_COMMIT_GATE_GENERATOR="python3 sample-generator.py --check"
+export GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS="SOURCE.txt"
 ```
 
 ## Fresh sink → commit allowed
@@ -63,8 +63,8 @@ A staged source with no generator configured cannot be verified, so the gate ref
 than guessing:
 
 ```bash
-SINK_COMMIT_GATE_GENERATOR="" python3 ../generated-sink-commit-gate.py
-echo "exit: $?"        # -> 1  (BLOCKED: SINK_COMMIT_GATE_GENERATOR is not set — fail-closed)
+GENERATED_SINK_COMMIT_GATE_GENERATOR="" python3 ../generated-sink-commit-gate.py
+echo "exit: $?"        # -> 1  (BLOCKED: GENERATED_SINK_COMMIT_GATE_GENERATOR is not set — fail-closed)
 ```
 
 ## Deliberate, documented bypass (single commit)
@@ -72,6 +72,6 @@ echo "exit: $?"        # -> 1  (BLOCKED: SINK_COMMIT_GATE_GENERATOR is not set �
 For a known, deliberately-shipped stale snapshot only — it logs on use:
 
 ```bash
-SINK_COMMIT_GATE_BYPASS=1 python3 ../generated-sink-commit-gate.py
+GENERATED_SINK_COMMIT_GATE_BYPASS=1 python3 ../generated-sink-commit-gate.py
 echo "exit: $?"        # -> 0  (ALLOW, with a bypass warning on stderr)
 ```

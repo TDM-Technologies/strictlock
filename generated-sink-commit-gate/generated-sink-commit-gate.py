@@ -43,14 +43,14 @@ import sys
 import traceback
 from pathlib import Path
 
-# --- environment variable names (consistently SINK_COMMIT_GATE_*-prefixed) ----
-ENV_ENABLE = "SINK_COMMIT_GATE"           # "on" enables the gate; else inert.
-ENV_GENERATOR = "SINK_COMMIT_GATE_GENERATOR"   # the generator --check command.
-ENV_SOURCE_PATHS = "SINK_COMMIT_GATE_SOURCE_PATHS"  # os.pathsep list of source path prefixes (trigger).
-ENV_GENERATOR_CWD = "SINK_COMMIT_GATE_GENERATOR_CWD"  # cwd for the generator (repo-root-relative or absolute).
-ENV_TIMEOUT = "SINK_COMMIT_GATE_TIMEOUT"  # seconds before the generator is treated as a fail-closed timeout.
-ENV_LOG_DIR = "SINK_COMMIT_GATE_LOG_DIR"  # optional dir for the append-only decision log.
-ENV_BYPASS = "SINK_COMMIT_GATE_BYPASS"    # "1" = single-commit, log-on-use bypass (uniquely-named).
+# --- environment variable names (consistently GENERATED_SINK_COMMIT_GATE_*-prefixed) ----
+ENV_ENABLE = "GENERATED_SINK_COMMIT_GATE"           # "on" enables the gate; else inert.
+ENV_GENERATOR = "GENERATED_SINK_COMMIT_GATE_GENERATOR"   # the generator --check command.
+ENV_SOURCE_PATHS = "GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS"  # os.pathsep list of source path prefixes (trigger).
+ENV_GENERATOR_CWD = "GENERATED_SINK_COMMIT_GATE_GENERATOR_CWD"  # cwd for the generator (repo-root-relative or absolute).
+ENV_TIMEOUT = "GENERATED_SINK_COMMIT_GATE_TIMEOUT"  # seconds before the generator is treated as a fail-closed timeout.
+ENV_LOG_DIR = "GENERATED_SINK_COMMIT_GATE_LOG_DIR"  # optional dir for the append-only decision log.
+ENV_BYPASS = "GENERATED_SINK_COMMIT_GATE_BYPASS"    # "1" = single-commit, log-on-use bypass (uniquely-named).
 
 DEFAULT_TIMEOUT_S = 120
 
@@ -316,7 +316,7 @@ def main() -> None:
 
     staged = _staged_paths(repo_root)
     touched = any(
-        sp == pref or sp.startswith(pref + "/") or sp.startswith(pref)
+        sp == pref or sp.startswith(pref + "/")
         for sp in staged
         for pref in prefixes
     )

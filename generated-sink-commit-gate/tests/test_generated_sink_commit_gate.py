@@ -103,12 +103,12 @@ class CommitGateTests(unittest.TestCase):
         """A clean env that enables the gate, points it at the real generator,
         and triggers on staged SOURCE.txt changes."""
         env = dict(self.git_env)
-        env["SINK_COMMIT_GATE"] = "on"
-        env["SINK_COMMIT_GATE_GENERATOR"] = f'{sys.executable} gen.py --check'
-        env["SINK_COMMIT_GATE_SOURCE_PATHS"] = "SOURCE.txt"
-        env["SINK_COMMIT_GATE_BYPASS"] = ""
-        env["SINK_COMMIT_GATE_TIMEOUT"] = "60"
-        env["SINK_COMMIT_GATE_LOG_DIR"] = ""
+        env["GENERATED_SINK_COMMIT_GATE"] = "on"
+        env["GENERATED_SINK_COMMIT_GATE_GENERATOR"] = f'{sys.executable} gen.py --check'
+        env["GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS"] = "SOURCE.txt"
+        env["GENERATED_SINK_COMMIT_GATE_BYPASS"] = ""
+        env["GENERATED_SINK_COMMIT_GATE_TIMEOUT"] = "60"
+        env["GENERATED_SINK_COMMIT_GATE_LOG_DIR"] = ""
         for k, v in overrides.items():
             env[k] = v
         return env
@@ -152,10 +152,10 @@ class CommitGateTests(unittest.TestCase):
         self.source.write_text("changed source\n", encoding="utf-8")
         self.sink.write_text(_render("changed source\n"), encoding="utf-8")
         self.stage("SOURCE.txt", "SINK.txt")
-        env = self.gate_env(SINK_COMMIT_GATE_GENERATOR="")
+        env = self.gate_env(GENERATED_SINK_COMMIT_GATE_GENERATOR="")
         p = self.run_gate(env)
         self.assertNotEqual(p.returncode, 0, msg=f"expected fail-closed BLOCK; stderr={p.stderr!r}")
-        self.assertIn("SINK_COMMIT_GATE_GENERATOR", p.stderr)
+        self.assertIn("GENERATED_SINK_COMMIT_GATE_GENERATOR", p.stderr)
         self.assertIn("fail-closed", p.stderr.lower())
 
     def test_missing_source_paths_config_loud_fail(self):
@@ -163,10 +163,10 @@ class CommitGateTests(unittest.TestCase):
         # The gate cannot tell what to watch => fail-closed, not a silent allow.
         self.source.write_text("changed source\n", encoding="utf-8")
         self.stage("SOURCE.txt")
-        env = self.gate_env(SINK_COMMIT_GATE_SOURCE_PATHS="")
+        env = self.gate_env(GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS="")
         p = self.run_gate(env)
         self.assertNotEqual(p.returncode, 0, msg=f"expected fail-closed BLOCK; stderr={p.stderr!r}")
-        self.assertIn("SINK_COMMIT_GATE_SOURCE_PATHS", p.stderr)
+        self.assertIn("GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS", p.stderr)
 
     def test_uninvokable_generator_loud_fail(self):
         # The configured generator does not exist on disk / PATH. Invocation
@@ -174,7 +174,7 @@ class CommitGateTests(unittest.TestCase):
         self.source.write_text("changed source\n", encoding="utf-8")
         self.stage("SOURCE.txt")
         env = self.gate_env(
-            SINK_COMMIT_GATE_GENERATOR="/nonexistent/definitely/not/a/real/binary --check"
+            GENERATED_SINK_COMMIT_GATE_GENERATOR="/nonexistent/definitely/not/a/real/binary --check"
         )
         p = self.run_gate(env)
         self.assertNotEqual(p.returncode, 0, msg=f"expected fail-closed BLOCK; stderr={p.stderr!r}")
@@ -188,8 +188,8 @@ class CommitGateTests(unittest.TestCase):
         self.source.write_text("changed source\n", encoding="utf-8")
         self.stage("SOURCE.txt")
         env = self.gate_env(
-            SINK_COMMIT_GATE_GENERATOR=f"{sys.executable} slow.py --check",
-            SINK_COMMIT_GATE_TIMEOUT="1",
+            GENERATED_SINK_COMMIT_GATE_GENERATOR=f"{sys.executable} slow.py --check",
+            GENERATED_SINK_COMMIT_GATE_TIMEOUT="1",
         )
         p = self.run_gate(env)
         self.assertNotEqual(p.returncode, 0, msg=f"expected fail-closed BLOCK; stderr={p.stderr!r}")
@@ -210,7 +210,7 @@ class CommitGateTests(unittest.TestCase):
         # With the master switch off, a genuinely stale staged sink passes.
         self.source.write_text("changed source\n", encoding="utf-8")
         self.stage("SOURCE.txt")
-        env = self.gate_env(SINK_COMMIT_GATE="off")
+        env = self.gate_env(GENERATED_SINK_COMMIT_GATE="off")
         p = self.run_gate(env)
         self.assertEqual(p.returncode, 0, msg=f"expected ALLOW (disabled); stderr={p.stderr!r}")
 
@@ -219,7 +219,7 @@ class CommitGateTests(unittest.TestCase):
         # and logs on use.
         self.source.write_text("changed source\n", encoding="utf-8")
         self.stage("SOURCE.txt")
-        env = self.gate_env(SINK_COMMIT_GATE_BYPASS="1")
+        env = self.gate_env(GENERATED_SINK_COMMIT_GATE_BYPASS="1")
         p = self.run_gate(env)
         self.assertEqual(p.returncode, 0, msg=f"expected ALLOW (bypass); stderr={p.stderr!r}")
         self.assertIn("bypass", p.stderr.lower())
@@ -229,7 +229,7 @@ class CommitGateTests(unittest.TestCase):
         log_dir = Path(self._tmp.name) / "logs"
         self.source.write_text("changed source\n", encoding="utf-8")
         self.stage("SOURCE.txt")
-        env = self.gate_env(SINK_COMMIT_GATE_LOG_DIR=str(log_dir))
+        env = self.gate_env(GENERATED_SINK_COMMIT_GATE_LOG_DIR=str(log_dir))
         p = self.run_gate(env)
         self.assertNotEqual(p.returncode, 0)
         logfile = log_dir / "sink-commit-gate.log"

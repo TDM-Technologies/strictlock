@@ -14,16 +14,16 @@
 set -euo pipefail
 
 # --- gate configuration (or set these in your shell / CI environment) --------
-export SINK_COMMIT_GATE=on
+export GENERATED_SINK_COMMIT_GATE=on
 # The generator's --check command. MUST exit non-zero iff the sink is stale and
 # MUST NOT mutate the working tree.
-export SINK_COMMIT_GATE_GENERATOR="npm run build:manifest -- --check"
+export GENERATED_SINK_COMMIT_GATE_GENERATOR="npm run build:manifest -- --check"
 # Repo-root-relative source path prefix(es) that trigger the check. ':'-separated.
-export SINK_COMMIT_GATE_SOURCE_PATHS="docs/manifest"
+export GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS="docs/manifest"
 # Optional: run the generator from a subproject dir (repo-root-relative or absolute).
-# export SINK_COMMIT_GATE_GENERATOR_CWD="app"
+# export GENERATED_SINK_COMMIT_GATE_GENERATOR_CWD="app"
 # Optional: append a per-decision audit log.
-# export SINK_COMMIT_GATE_LOG_DIR="$HOME/.agent/logs"
+# export GENERATED_SINK_COMMIT_GATE_LOG_DIR="$HOME/.agent/logs"
 
 # --- run the gate ------------------------------------------------------------
 # Absolute path to where you installed the StrictLock module.
