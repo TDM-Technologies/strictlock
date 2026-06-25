@@ -299,6 +299,54 @@ last-writer-wins.
 Relevant also to **ISO/IEC 42001** (controlled operation of a multi-agent AI system). This is the multi-agent
 extension of the row-A access control, not a separate kind of evidence.
 
+### K. Deterministic, provably-correct resolution of generated-artifact merges → SOC 2 CC8 / ISO 9001 §8.5
+
+**Mechanism** ([`sink-resolver`](sink-resolver/)). Row I keeps a generated artifact *byte-exact at the
+commit/push boundary*; `sink-resolver` keeps it correct *at the merge boundary*. When two branches both
+change the sources of a generated sink (a manifest, index, schema), a plain merge would mangle the sink or
+demand a hand-resolution on a file no human should edit. `sink-resolver` instead marks the sink `merge=binary`
+(git conflicts cleanly rather than line-merging it), then **regenerates the sink from the already-merged
+sources, proves the result is a stable byte-exact render (the oracle), and finalizes** — the one correct
+answer, since a pure render carries no intent of its own. It **escalates** (writes nothing) on any *non-sink*
+conflict, and a **coverage guard** refuses to finalize a configured sink the generator did not actually
+rewrite, so a peer's edit can never be silently dropped. Sound only under the loud, on-the-tin precondition
+that the sink is a pure, deterministic, `--check`-able render of its sources.
+
+**Evidence it emits.** When a decision-log directory is configured, an append-only record of each
+auto-resolution (which sink, which oracle), each escalation, and each fail-closed refusal — proof that a
+generated artifact of record entered the merged history as a verified regeneration, not a hand-blend.
+
+**What an auditor can trace.** *That a derived artifact remained provably consistent with its sources across
+a merge* — the one place generated state silently corrupts — *and* that anything the tool could not resolve
+deterministically (a real source conflict, an un-regenerated sink) was handed to a person rather than guessed.
+
+**Maps to:** **SOC 2 CC8** (change management — a generated artifact cannot drift from its authorized source,
+even through a merge); **ISO 9001 §8.5** (control of production / preservation of conformity of outputs). The
+companion to row I at the merge boundary.
+
+### L. Read-only liveness supervision of a multi-agent fleet → SOC 2 CC7 / ISO/IEC 42001 (controlled operation, monitoring)
+
+**Mechanism** ([`liveness-scan`](liveness-scan/)). Running N autonomous agents in N worktrees creates a
+supervision gap: which sessions are working, stalled, finished-but-unmerged, or *ambiguously* stalled
+(crashed, or just slow?). `liveness-scan` is a **read-only reporter** that classifies each worktree on a
+heartbeat-or-commit-mtime signal and surfaces the ambiguous stalls that need human judgment. It is bounded by
+construction: it **never reaps**, never edits a tracked file, writes only gitignored logs, and **exits 0
+always**. Its cardinal safety property is asymmetric — it may *under*-claim liveness but never *over*-claim
+death — so it can feed monitoring without ever authorizing a destructive action; every recovery it emits is a
+non-destructive inspect command for a person to run.
+
+**Evidence it emits.** When a log directory is configured, a per-scan append-only digest (counts, active
+plans, and each escalation with its reason) plus a human-readable escalations report — an after-the-fact
+record of the fleet's operational state over time.
+
+**What an auditor can trace.** *That a multi-agent system's operation was continuously and observably
+monitored*, with anomalous (ambiguous-stall) states surfaced for human action and a logged trail of when they
+occurred — without the monitor itself ever being able to take a destructive or unreviewed action.
+
+**Maps to:** **SOC 2 CC7** (system monitoring — anomalies detected and surfaced) and **ISO/IEC 42001**
+(controlled, observable operation of an AI system; human oversight of automated actors). A monitoring control,
+deliberately separated from any enforcement so the observer can never become an unreviewed actor.
+
 ---
 
 ## Two things to notice

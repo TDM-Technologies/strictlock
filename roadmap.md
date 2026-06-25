@@ -6,8 +6,8 @@ StrictLock ships as an umbrella that grows. The shipped suite now spans three fa
 [`generated-sink-prepush-gate`](generated-sink-prepush-gate/),
 [`eslint-plugin-strictlock`](eslint-plugin-strictlock/)), **Hygiene**
 ([`memory-cap`](memory-cap/), [`externalized-memory`](externalized-memory/) and its projection
-bundle), and **Concurrency** ([`scope-lease`](scope-lease/)) — plus a suite-wide
-[compliance mapping](COMPLIANCE.md). The README [Modules table](README.md#modules) is the
+bundle), and **Concurrency** ([`scope-lease`](scope-lease/), [`sink-resolver`](sink-resolver/),
+[`liveness-scan`](liveness-scan/)) — plus a suite-wide [compliance mapping](COMPLIANCE.md). The README [Modules table](README.md#modules) is the
 authoritative shipped list; below are the siblings and docs still on deck.
 
 These are honest slots, not promises with dates. Each is marked:
@@ -33,22 +33,19 @@ These are honest slots, not promises with dates. Each is marked:
 - **scope-lease** — a git-native, zero-service exclusive lock over a path set so N autonomous
   agents never edit the same file at once. The multi-agent extension of plan-gate: enumerated
   paths → enumerated **and exclusive**. The Concurrency flagship.
+- **sink-resolver** — deterministic auto-resolution of generated-file merge conflicts:
+  `merge=binary` on the sink + a `resolve` that regenerates from the merged sources, byte-checks,
+  and escalates any non-sink conflict + a `check` CI backstop, with a coverage guard that refuses
+  to finalize a sink the generator didn't actually rewrite. Safe **because the generator is pure**.
+- **liveness-scan** — a read-only reporter that triages a fleet of agent worktrees
+  (running / stalled / done-unmerged / ambiguous / idle) from a heartbeat-or-commit-mtime signal.
+  Report-only, never reaps, exits 0 always. Completes the Concurrency family.
 - **compliance mapping** ([`COMPLIANCE.md`](COMPLIANCE.md)) — SOC 2 / ISO 42001 / ISO 9001; the
   paper's §6 expanded suite-wide, mapping each gate mechanism to the control it evidences.
 
 ---
 
 ## Planned
-
-### sink-resolver (binary-sink auto-resolver)
-Deterministic auto-resolution of generated-file merge conflicts — `merge=binary` on the sink +
-a `post-merge` regenerate + a `resolve` subcommand + a CI backstop. Safe **because the generator
-is pure** (`--check`-able); ships behind that loud precondition. Pairs naturally with the
-externalized-memory projection bundle.
-
-### liveness scanner
-A portable scan of agent / worktree liveness from YAML-frontmatter + mtime — surfacing stale
-holders and abandoned work without a daemon. Complements `scope-lease`.
 
 ### Session-ritual checklists (kickoff / close-out)
 Genericized versions of the start-of-work and end-of-work checklists that make the

@@ -3,28 +3,33 @@
 ## Meta
 - last_session: 2026-06-25
 - agent: Claude Code (Opus 4.8)
-- git_ref: a6054e8 (main, pushed to origin) — **Wave 3 `scope-lease` flagship SHIPPED** (git-ref CAS exclusive
-  path-lock, Option A; 37 tests; 3 adversarial lenses clean) on top of Wave 1 complete (sink gates + projection
-  bundle + eslint-plugin-strictlock). roadmap.md reconciled (shipped vs planned)
-- touched (this wave): generated-sink-commit-gate/*, generated-sink-prepush-gate/*,
-  externalized-memory/{projection.py,PROJECTION-SCHEMA.md,tests/test_projection.py,examples/*,README.md},
-  eslint-plugin-strictlock/*, README.md, COMPLIANCE.md, .github/workflows/ci.yml, dev/STATE.md, dev/BACKLOG.md
+- git_ref: 189285c (**LOCAL main — NOT pushed**) — **Wave 3 COMPLETE**: `sink-resolver` (binary-sink
+  auto-resolver; 29 tests; 3 adversarial lenses → 1 blocking + 1 structural gap fixed) AND `liveness-scan`
+  (read-only fleet reporter; 31 tests; 2 lenses clean, 4 safe-direction polish items folded in) landed on top
+  of the `scope-lease` flagship (a6054e8). Full suite green: **185 tests / 9 Python modules**. README +
+  COMPLIANCE (§K/§L) + CI + roadmap registered. **Origin is at 816a141; pushing local `main` awaits Tim's nod.**
+- touched (this wave): sink-resolver/*, liveness-scan/*, README.md, COMPLIANCE.md (§K/§L),
+  .github/workflows/ci.yml, roadmap.md, dev/STATE.md, dev/BACKLOG.md
 
 ## Next Action
-**Wave 1 complete. Queue reordered 2026-06-25 (Tim): the marquee is deferred to the END.** Execution order is
-now **Wave 3 (concurrency) → Wave 4 (rituals/gates) → Wave 2 (marquee IP, last).**
+**Wave 3 COMPLETE (concurrency family done).** Execution order from here: **Wave 4 (rituals/gates) → Wave 2
+(marquee IP, last).**
 
-1. **NEXT — finish Wave 3 concurrency.** The `scope-lease` flagship **SHIPPED** (main @ a6054e8: git-ref CAS
-   exclusive path-lock, Option A, 37 tests, all 3 adversarial lenses clean). Remaining Wave-3 modules:
-   **`sink-resolver`** (binary-sink auto-resolver, behind its pure-generator precondition; pairs with the
-   shipped projection bundle — source = vault Feature B) and the **liveness scanner**. After Wave 3: Wave 4
-   (rituals/gates), then Wave 2 (marquee IP, deferred to last).
-2. **(Release step — Tim, when ready)** `eslint-plugin-strictlock@0.1.0` is built + CI-tested in-repo but **not
-   yet published to npm** (the package name was confirmed AVAILABLE 2026-06-25). `npm publish` needs an npm
-   account/token and is an outward-facing release call. See [BACKLOG.md](BACKLOG.md) `eslint-plugin-publish`.
+1. **PUSH DECISION (Tim).** Local `main` carries both new modules + registration (Wave 3 merged at `189285c`,
+   docs registration on top); origin is at `816a141`. The guard never pushes — `git push origin main` is the
+   outward-facing step and awaits Tim's nod.
+   (Branches `harvest/wave3-sink-resolver` + `harvest/wave3-liveness-scan` are merged into local main; the
+   `liveness-build` worktree can be pruned once the push decision is made.)
+2. **NEXT BUILD — Wave 4 (rituals + remaining gates):** session-ritual checklist templates · WP-interaction
+   analysis · pre-WP currency check · test-protection co-commit guard. Then Wave 2 (marquee IP, last).
+3. **(Release step — Tim, when ready)** `eslint-plugin-strictlock@0.1.0` is built + CI-tested in-repo but **not
+   yet published to npm**. See [BACKLOG.md](BACKLOG.md) `eslint-plugin-publish`.
 
-Run any build via the proven build → adversarial-verify → consistency workflow harness; the fail-closed merge
-guard (`harvest-merge-guard.sh`) lands clean branches — **agents never merge.**
+Run any build via the proven build → adversarial-verify → consistency workflow harness. **NOTE:** the
+`harvest-merge-guard.sh` referenced earlier was an ephemeral helper, not committed — this session applied the
+guard DISCIPLINE inline (clean-main pre-flight → `merge --no-ff` → full-suite validation → rollback-on-fail →
+**never push**). **Agents never merge** (the workflow agents this session were read-only verifiers). Optional
+backlog item: commit a reusable `harvest-merge-guard.sh` so the discipline is a script, not a convention.
 
 ## Active Threads
 Forward map: [HARVEST-PLAN.md](HARVEST-PLAN.md) (waves 0–4 + later). Public module roadmap:
@@ -48,14 +53,26 @@ Forward map: [HARVEST-PLAN.md](HARVEST-PLAN.md) (waves 0–4 + later). Public mo
   binding invariants kept (agents-only/never-walls-a-human, fail-loud machine boundary, surfaced reclaims,
   FS-aware case/unicode fold). 37 tests (incl. a commit-race abort regression added at integration); the 3
   perspective-diverse adversarial verifies (CAS-atomicity · normalization · fencing/human-bypass) all clean.
-- sink-resolver (wave 3) — **NEXT-UP** — binary-sink auto-resolver behind its pure-generator precondition;
-  pairs with the shipped projection bundle. Source = vault Feature B (HIPAAPath `conductor-resolve.py` =
-  reference only, for the web-UI-merge variant). Then the liveness scanner closes Wave 3.
+- sink-resolver (wave 3) — **SHIPPED (local main @ 189285c, not pushed) 2026-06-25** — binary-sink
+  auto-resolver: `merge=binary` + `resolve` (regenerate from merged sources → byte-oracle → escalate any
+  non-sink → finalize) + `check` (web-UI/CI backstop). Vault Feature B git-native shape as default;
+  `conductor-resolve.py` documented as the pre-merge web-UI variant. 29 tests (real `merge=binary` conflicts,
+  git 2.54). 3 adversarial lenses: escalation-boundary CLEAN; found **1 proven blocking** (`check` weak path
+  used `git checkout --` → destroyed uncommitted sink edits + false STALE verdict on a dirty tree → fixed:
+  snapshot/regenerate/compare/restore-exact-bytes) + **1 structural gap** (a configured sink the generator
+  doesn't cover got 'ours' staged → fixed with a **coverage guard**: a conflicted sink left byte-unchanged
+  after regenerate escalates). Both fixed + regression-tested.
+- liveness-scan (wave 3) — **SHIPPED (local main @ 189285c, not pushed) 2026-06-25** — read-only fleet
+  reporter (running/stalled/done-unmerged/ambiguous/idle/clean) ported from HIPAAPath `conductor-scan.py`,
+  decoupled from machine-specific defaults; report-only, never reaps, exits 0 always. 31 tests (fake GitProbe
+  drives the classifier; real git proves the probe). 2 adversarial lenses **CLEAN, zero blocking** (the
+  never-over-claim-death invariant + exit-0-always held under every hostile input; decoupling complete). 4
+  safe-direction polish items folded in: `_canon` resolves symlinks + drops case-fold in attribution; idle
+  reason distinguishes unknown-base from merged; LOG_DIR-file collision prints friendly (still exit 0);
+  doc'd the main/master/detached blind spot. **Wave 3 (concurrency family) is now COMPLETE.**
 - harvest-wave-2 (marquee) — **DEFERRED to end of queue (Tim, 2026-06-25)** — Cleanup-Day / rule-archaeology
   (+ design paper) · ROI / harvest governance narrative · blast-radius (needs pattern-config genericization).
   Still the highest-cred work; just sequenced last by choice.
-- sink-resolver (wave 3) — planned — behind its pure-generator precondition; now pairs naturally with the
-  **shipped** Wave-1 projection bundle (the kind of pure renderer it requires).
 - paper-§6-reconcile — ready — `paper.md` §6 overclaims the decision log ("allow and deny",
   "tamper-evident"); the shipped gate logs denials by default. Reword §6, or build the opt-in allow/deny log.
 - ci-os-matrix — ready — add windows-latest + macos-latest to CI so OS-agnostic is proven, not just reviewed.
@@ -64,6 +81,16 @@ Forward map: [HARVEST-PLAN.md](HARVEST-PLAN.md) (waves 0–4 + later). Public mo
 - reversibility-tiers / auto-commit — exploring (later) — need a shared 2–3 month evidence window.
 
 ## Decisions
+- 2026-06-25 — **Wave 3 COMPLETE — `sink-resolver` + `liveness-scan` shipped to LOCAL main** (`189285c`,
+  **not pushed**). Built solo (drafting/file-ops per the charter), each adversarially verified via a
+  perspective-diverse workflow fan-out (3 lenses for the correctness-critical sink-resolver where silent
+  clobber = data loss; 2 for the report-only liveness-scan), fixes applied, then guard-landed (clean-main
+  pre-flight → `merge --no-ff` → full-suite green → no push). The verify earned its keep: it caught a **proven
+  data-loss defect** in sink-resolver's `check` and a **silent-clobber coverage gap**, both fixed before
+  landing. Coverage guard added as a genuine upgrade to the core safety claim (the tool now PROVES every
+  conflicted sink was regenerated, vs trusting operator CHECK_CMD coverage). liveness-scan came back
+  zero-blocking. Registered in README + COMPLIANCE §K/§L + CI + roadmap. **Pushing local `main` to origin is the
+  outward-facing step → Tim's call.** Remaining harvest: Wave 4 (rituals/gates), then Wave 2 (marquee, last).
 - 2026-06-25 — **Wave 3 `scope-lease` flagship SHIPPED** (queue reordered first: marquee deferred to end,
   concurrency next). Faithful port of vault Feature C's git-ref CAS lease, retargeted per HARVEST-PLAN §6
   Option A (path-source seam: plan-gate adapter default + standalone fallbacks; env owner/lock-id; standalone

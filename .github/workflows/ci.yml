@@ -33,6 +33,10 @@ jobs:
         run: python generated-sink-prepush-gate/tests/test_generated_sink_prepush_gate.py
       - name: scope-lease tests
         run: python scope-lease/tests/test_scope_lease.py
+      - name: sink-resolver tests
+        run: python sink-resolver/tests/test_sink_resolver.py
+      - name: liveness-scan tests
+        run: python liveness-scan/tests/test_liveness_scan.py
 
   node:
     name: eslint-plugin tests

@@ -37,10 +37,12 @@ to npm**. `npm publish` needs an npm account/token and is an outward-facing rele
 maintainer. (Genericization done: the HIPAAPath baseline.json was replaced by ESLint rule options —
 `baseline` / `marker` / `extraSmokeMatchers`, default strict.)
 
-### Wave 3 — concurrency primitives — *IN PROGRESS (scope-lease SHIPPED 2026-06-25)* — see [## concurrency](#concurrency)
-**SHIPPED:** `scope-lease` (Option A git-ref CAS exclusive path-lock; main @ a6054e8; 37 tests; 3 adversarial
-lenses clean). **NEXT:** `sink-resolver` (binary-sink auto-resolver, behind its pure-generator precondition;
-pairs with the shipped projection bundle; source = vault Feature B) · then the liveness scanner closes Wave 3.
+### Wave 3 — concurrency primitives — *COMPLETE 2026-06-25 (3 of 3; local main @ 189285c, NOT pushed)* — see [## concurrency](#concurrency)
+**SHIPPED:** `scope-lease` (Option A git-ref CAS exclusive path-lock; 37 tests; 3 lenses clean) · `sink-resolver`
+(binary-sink auto-resolver; 29 tests; 3 lenses → 1 proven blocking + 1 structural gap fixed) · `liveness-scan`
+(read-only fleet reporter; 31 tests; 2 lenses clean). Full suite **185 tests / 9 modules** green. Registered in
+README + COMPLIANCE §K/§L + CI + roadmap. **Origin still at 816a141 — pushing local `main` is Tim's call.** Next
+harvest wave: Wave 4 (rituals/gates), then Wave 2 (marquee, last).
 
 ### Wave 2 — marquee IP — *DEFERRED to end of queue (Tim, 2026-06-25)*
 Run LAST (after Waves 3 + 4), by choice — still the highest-cred work, just sequenced last now the salvage
@@ -135,7 +137,11 @@ decision log, env-gated (mirroring `PLAN_GATE_LOG_DIR`).
 
 ## concurrency
 
-### scope-lease — git-native exclusive path lock — *planned · decided Option A* (Wave 3, flagship)
+> **Wave 3 is COMPLETE (2026-06-25).** All three concurrency modules below shipped to **local main
+> @ 189285c (NOT pushed)**. `scope-lease`, `sink-resolver`, and `liveness-scan` are live in the repo;
+> the entries below are retained for provenance. See the [Done](#done) section for the close-out.
+
+### scope-lease — git-native exclusive path lock — *SHIPPED 2026-06-25* (Wave 3, flagship)
 Decouple the vault's git-ref CAS collision lease (`work-registry.py` Feature C — `refs/locks/*`
 `update-ref` compare-and-swap, transactional all-or-nothing acquire over a path set, monotonic
 fencing token as the zombie/reclaim backstop, fail-loud single-machine boundary; built + 160
@@ -148,15 +154,22 @@ exclusive**" flagship-extension story. Safety invariants (keep from the vault): 
 coordinates agents only — never wall a human's manual merge; surface reclaims, never
 auto-reap. Full spec: [`HARVEST-PLAN.md`](HARVEST-PLAN.md) §6.
 
-### sink-resolver — deterministic generated-file merge-conflict resolution — *planned* (Wave 3)
-`merge=binary` on the sink + a `post-merge` hook that regenerates + a `resolve` subcommand
-(regenerate from the merged sources, byte-check, escalate on any non-sink conflict) + a CI
-`check` backstop for web-UI merges. **Loud precondition (on the tin):** only sound if the sink
-is a pure, deterministic, `--check`-able render of its sources — otherwise `--ours`/regenerate
-silently clobbers peer edits. Default = the vault's git-native shape; documented alternative =
-HIPAAPath's pre-merge worktree script (`conductor-resolve.py`, circuit breakers) for web-UI
-flows where `merge=binary`/hooks are inert. Pairs with the Wave-1 externalized-memory projection
-bundle (the kind of pure renderer it requires). §6.
+### sink-resolver — deterministic generated-file merge-conflict resolution — *SHIPPED 2026-06-25* (Wave 3)
+`merge=binary` on the sink + a `resolve` subcommand (regenerate from the merged sources, byte-oracle,
+escalate on any non-sink conflict, finalize) + a `check` CI backstop for web-UI merges + a **coverage
+guard** (a conflicted sink the generator left byte-unchanged escalates, so a generator blind to a configured
+sink can't silently keep 'ours'). Loud precondition on the tin (pure, deterministic, `--check`-able render).
+Default = the vault's git-native shape; `conductor-resolve.py` documented as the pre-merge web-UI variant.
+29 tests; 3 adversarial lenses (1 proven blocking + 1 structural gap, both fixed pre-land). §6.
+
+### liveness-scan — read-only fleet-liveness reporter — *SHIPPED 2026-06-25* (Wave 3)
+Ported from HIPAAPath `conductor-scan.py`, decoupled from its machine-specific defaults. Classifies each git
+worktree (running/stalled/done-unmerged/ambiguous/idle/clean) on a heartbeat-or-commit-mtime signal,
+attributing worktrees to plan-gate sessions (absolute `allowed_paths`, excludes `worktree_bypass`). Report-only:
+never reaps, exits 0 always; ambiguous stalls escalate with a non-destructive recovery command. env-configured
+(`LIVENESS_SCAN_*`), no machine paths. 31 tests; 2 adversarial lenses clean (zero blocking; 4 safe-direction
+polish items folded in). Closes the concurrency family (plan-gate enumerates → scope-lease makes exclusive →
+sink-resolver heals generated-merge → liveness-scan watches the fleet).
 
 ## docs
 
@@ -225,6 +238,13 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 ---
 
 ## Done
+- **2026-06-25** — **Wave 3 COMPLETE — `sink-resolver` + `liveness-scan` shipped** (LOCAL main @ `189285c`,
+  **not pushed**; origin still `816a141`). `sink-resolver` (binary-sink auto-resolver; 29 tests; 3 lenses →
+  a proven `check`-data-loss blocking + a silent-clobber coverage gap, both fixed pre-land; coverage guard
+  added as a core-safety upgrade) and `liveness-scan` (read-only fleet reporter; 31 tests; 2 lenses clean +
+  4 safe-direction polish items). Built solo, adversarially verified by workflow fan-out, guard-landed
+  (clean-main pre-flight → `merge --no-ff` → full-suite green → no push). Full suite **185 tests / 9 modules**.
+  Registered in README + COMPLIANCE §K/§L + CI + roadmap. **Pushing local `main` → Tim's call.**
 - **2026-06-25** — **Wave 3 `scope-lease` flagship SHIPPED** (main @ a6054e8): git-native zero-service
   exclusive lock over a path set (`refs/locks/*` CAS), Option A — faithful port of vault Feature C,
   retargeted to a path-source seam (plan-gate adapter default + standalone fallbacks). Built + verified by
