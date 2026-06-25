@@ -165,6 +165,74 @@ class MemoryCapTests(unittest.TestCase):
         p = run_gate(payload)
         self.assertEqual(decision(p), "allow")
 
+    # --- changed-region scan: the self-wedge fix -------------------------------
+
+    def test_write_retaining_preexisting_over_cap_allowed(self):
+        # (a) WEDGE-REMOVED. The index ALREADY contains an over-cap `- ` line on
+        # disk. A full-file Write that RETAINS that exact line verbatim and adds
+        # only a short, compliant new entry must be ALLOWED — the retained line is
+        # pre-existing and untouched, so it is never re-flagged. This is precisely
+        # the case the whole-file scan used to DENY (the wedge): proof it's gone.
+        self.index.write_text(
+            f"# Heading\n{OVER_CAP_LINE}\n- keeper\n", encoding="utf-8"
+        )
+        retained = f"# Heading\n{OVER_CAP_LINE}\n- keeper\n{SHORT_LINE}\n"
+        p = run_gate(self._write(self.index, retained))
+        self.assertEqual(
+            decision(p), "allow",
+            msg="retaining a pre-existing over-cap line must not wedge the index",
+        )
+
+    def test_write_introducing_new_over_cap_denied(self):
+        # (b) GOOD-PROPERTY-KEPT (Write). A pre-existing over-cap line is retained
+        # AND a NEW, distinct over-cap line is introduced by the same Write. The
+        # new one must still be caught — the fix narrows the scan, it does not
+        # loosen the cap.
+        self.index.write_text(
+            f"# Heading\n{OVER_CAP_LINE}\n", encoding="utf-8"
+        )
+        new_over_cap = "- " + ("z" * 300)  # distinct from OVER_CAP_LINE, over cap
+        result = f"# Heading\n{OVER_CAP_LINE}\n{new_over_cap}\n"
+        p = run_gate(self._write(self.index, result))
+        self.assertEqual(decision(p), "deny")
+
+    def test_edit_introducing_new_over_cap_denied(self):
+        # (b) GOOD-PROPERTY-KEPT (Edit). A pre-existing over-cap line sits in the
+        # file untouched; a faithful, unique Edit turns a short line into a NEW
+        # over-cap line. The introduced over-cap line must be DENIED even though a
+        # different pre-existing over-cap line is (correctly) ignored.
+        self.index.write_text(
+            f"# Heading\n{OVER_CAP_LINE}\n- short\n", encoding="utf-8"
+        )
+        new_over_cap = "- " + ("z" * 300)
+        payload = {
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(self.index),
+                "old_string": "- short",
+                "new_string": new_over_cap,
+                "replace_all": False,
+            },
+        }
+        p = run_gate(payload)
+        self.assertEqual(decision(p), "deny")
+
+    def test_write_retaining_crlf_preexisting_over_cap_allowed(self):
+        # (c) CRLF / OS-agnostic. The on-disk index was authored with Windows
+        # (CRLF) line endings and already holds an over-cap `- ` line. An LF-form
+        # Write that retains that same logical line must be ALLOWED: the multiset
+        # is compared via splitlines()/rstrip, so CRLF vs LF does not make every
+        # line read as "introduced" (which would reintroduce the wedge on Windows).
+        crlf_existing = f"# Heading\r\n{OVER_CAP_LINE}\r\n- keeper\r\n"
+        # Write bytes verbatim so the CRLFs survive (text mode would translate).
+        self.index.write_bytes(crlf_existing.encode("utf-8"))
+        lf_result = f"# Heading\n{OVER_CAP_LINE}\n- keeper\n{SHORT_LINE}\n"
+        p = run_gate(self._write(self.index, lf_result))
+        self.assertEqual(
+            decision(p), "allow",
+            msg="CRLF-authored pre-existing line must normalize equal to its LF form",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
