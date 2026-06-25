@@ -37,15 +37,17 @@ to npm**. `npm publish` needs an npm account/token and is an outward-facing rele
 maintainer. (Genericization done: the HIPAAPath baseline.json was replaced by ESLint rule options —
 `baseline` / `marker` / `extraSmokeMatchers`, default strict.)
 
-### Wave 2 — marquee IP — *planned*
-Cleanup-Day / rule-archaeology module + rule-corpus schema **+ a design paper** on the inversion
-(zero-fire telemetry = the guard working, not dead) and the trip-test · ROI / carrying-cost gate
+### Wave 3 — concurrency primitives — *NEXT-UP (scope-lease in progress 2026-06-25)* — see [## concurrency](#concurrency)
+`scope-lease` (decided: Option A — **building now**) · `sink-resolver` (behind its pure-generator
+precondition; pairs with the shipped projection bundle) · liveness scanner. Sourced from the vault
+`work-registry.py` Feature C.
+
+### Wave 2 — marquee IP — *DEFERRED to end of queue (Tim, 2026-06-25)*
+Run LAST (after Waves 3 + 4), by choice — still the highest-cred work, just sequenced last now the salvage
+deadline is gone. Cleanup-Day / rule-archaeology module + rule-corpus schema **+ a design paper** on the
+inversion (zero-fire telemetry = the guard working, not dead) and the trip-test · ROI / carrying-cost gate
 + harvest ritual as one governance narrative (`GOVERNANCE.md`) · blast-radius review-depth trigger
 (after pattern-config genericization).
-
-### Wave 3 — concurrency primitives — see [## concurrency](#concurrency)
-`scope-lease` (decided: Option A) · `sink-resolver` (behind its pure-generator precondition) ·
-liveness scanner. Sourced from the vault `work-registry.py`.
 
 ### Wave 4 — rituals + remaining gates — *planned*
 session-ritual checklist templates · WP-interaction analysis · pre-WP currency check ·

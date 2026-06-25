@@ -190,6 +190,12 @@ only (for the web-UI-merge placement variant + circuit-breaker maturity if neede
 
 ## 5. Sequenced waves
 
+> **Execution order revised 2026-06-25 (Tim):** the **marquee (Wave 2) is deferred to the END of the queue.**
+> Waves 0–1 are done; the order from here is **Wave 3 (concurrency) → Wave 4 (rituals/gates) → Wave 2
+> (marquee IP, last).** The wave *numbers* below are unchanged (they're referenced elsewhere); only the
+> run order moved. Rationale: ship the adoptable/portfolio primitives first; the marquee stays the highest-cred
+> work, just sequenced last by choice (the salvage deadline is gone, so order is a free call).
+
 - **Wave 0 — finish/fix the shipped suite (lowest effort, do first).** memory-cap
   self-wedge fix (defect in a live module) · plan-authoring guide (`plan-gate/AUTHORING.md`)
   · compliance-mapping (`COMPLIANCE.md`). Mostly porting prose that already exists.

@@ -11,15 +11,16 @@
   eslint-plugin-strictlock/*, README.md, COMPLIANCE.md, .github/workflows/ci.yml, dev/STATE.md, dev/BACKLOG.md
 
 ## Next Action
-Wave 1 is **complete**. Two open items:
+**Wave 1 complete. Queue reordered 2026-06-25 (Tim): the marquee is deferred to the END.** Execution order is
+now **Wave 3 (concurrency) → Wave 4 (rituals/gates) → Wave 2 (marquee IP, last).**
 
-1. **(Direction — Tim) marquee vs workhorse for the next wave.** With the salvage deadline gone, the open
-   choice is **Wave 2 marquee IP** (rule-archaeology/Cleanup-Day + a design paper · ROI/governance narrative ·
-   blast-radius after pattern-config genericization) vs the **Wave 3 scope-lease flagship** (Option A, sourced
-   from vault Feature C) + sink-resolver. Per the positioning strategy the consulting cred lives in the marquee.
-2. **(Release step — Tim, when ready)** `eslint-plugin-strictlock` is built + CI-tested in-repo but **not yet
-   published to npm** — `npm publish` needs an npm account/token and is an outward-facing release call.
-   See [BACKLOG.md](BACKLOG.md) `eslint-plugin-publish`.
+1. **IN PROGRESS — Wave 3 `scope-lease` flagship** (Option A, sourced from vault `work-registry.py` Feature C;
+   full spec in [HARVEST-PLAN.md](HARVEST-PLAN.md) §6). Building now via the build → adversarial-verify harness.
+   Then `sink-resolver` (behind its pure-generator precondition; pairs with the shipped projection bundle) and
+   the liveness scanner.
+2. **(Release step — Tim, when ready)** `eslint-plugin-strictlock@0.1.0` is built + CI-tested in-repo but **not
+   yet published to npm** (the package name was confirmed AVAILABLE 2026-06-25). `npm publish` needs an npm
+   account/token and is an outward-facing release call. See [BACKLOG.md](BACKLOG.md) `eslint-plugin-publish`.
 
 Run any build via the proven build → adversarial-verify → consistency workflow harness; the fail-closed merge
 guard (`harvest-merge-guard.sh`) lands clean branches — **agents never merge.**
@@ -41,11 +42,12 @@ Forward map: [HARVEST-PLAN.md](HARVEST-PLAN.md) (waves 0–4 + later). Public mo
 - harvest-harness — **DONE 2026-06-25** — the fail-closed merge guard is built AND now proven in use: it
   landed both Wave-1 modules (clean-main pre-flight, full-suite validation after each merge, rollback-on-fail,
   no push). No workflow agent ever touched the shared main checkout — builds happen only in isolated worktrees.
-- harvest-wave-2 — planned — marquee IP: Cleanup-Day / rule-archaeology (+ design paper) · ROI / harvest
-  governance narrative · blast-radius (needs pattern-config genericization).
-- scope-lease (wave 3) — **decided: Option A** — decoupled primitive; plan-gate plan as the default adapter,
-  standalone fallback for non-plan-gate fleets. Source = vault `work-registry.py` Feature C. Spec in
-  HARVEST-PLAN §6.
+- scope-lease (wave 3) — **IN PROGRESS (next-up, building 2026-06-25)** — Option A: decoupled primitive;
+  plan-gate plan as the default adapter, standalone fallback for non-plan-gate fleets. Source = vault
+  `work-registry.py` Feature C (the git-ref CAS lease). Spec in HARVEST-PLAN §6.
+- harvest-wave-2 (marquee) — **DEFERRED to end of queue (Tim, 2026-06-25)** — Cleanup-Day / rule-archaeology
+  (+ design paper) · ROI / harvest governance narrative · blast-radius (needs pattern-config genericization).
+  Still the highest-cred work; just sequenced last by choice.
 - sink-resolver (wave 3) — planned — behind its pure-generator precondition; now pairs naturally with the
   **shipped** Wave-1 projection bundle (the kind of pure renderer it requires).
 - paper-§6-reconcile — ready — `paper.md` §6 overclaims the decision log ("allow and deny",
