@@ -31,6 +31,8 @@ jobs:
         run: python generated-sink-commit-gate/tests/test_generated_sink_commit_gate.py
       - name: generated-sink-prepush-gate tests
         run: python generated-sink-prepush-gate/tests/test_generated_sink_prepush_gate.py
+      - name: scope-lease tests
+        run: python scope-lease/tests/test_scope_lease.py
 
   node:
     name: eslint-plugin tests

@@ -274,6 +274,31 @@ authorized source) and **CC7** (the decision log); **ISO 9001 §8.5** (control o
 preservation of conformity of outputs). Like [`memory-cap`](memory-cap/) (row H), the
 independent bypasses and fail-toward-on misconfiguration also *support* configuration integrity.
 
+### J. Exclusive, enumerated access across concurrent agents → SOC 2 CC6 (least privilege / segregation)
+
+**Mechanism** ([`scope-lease`](scope-lease/)). [`plan-gate`](plan-gate/) (row A) enumerates the paths a unit
+of work *may* touch; `scope-lease` makes that hold **exclusive** across concurrent agents. A git-native,
+zero-service lock claims one ref per repo-relative path (`refs/locks/<sha1(path)>`, off-branch) via a
+transactional compare-and-swap — so two autonomous agents can never hold the same file at once. Enumerated →
+enumerated **and exclusive.** It closes the two failures human supervision used to cover: deadlock-on-crash
+(a past-deadline holder is reclaimed with a monotonic fencing token, never silently) and stale-holder-write
+(a reclaimed-away holder's `fence-check` fails at the merge gate). A binding boundary keeps it honest: the
+lock coordinates **agents only** and never walls a human's manual merge or edits; from a non-shared ref store
+it fails *loud* rather than silently degrading exclusion.
+
+**Evidence it emits.** A record (when a log directory is configured) of which agent held which paths, for
+which lock, until when — plus every reclaim of an expired holder, logged with its incremented token. Exclusive
+access becomes an observable, after-the-fact artifact rather than a coordination convention.
+
+**What an auditor can trace.** *That concurrent automated actors operated under enforced segregation* — no two
+agents authorized to write the same file at the same time — *and* that contested access resolved
+deterministically (first-mover holds; the loser is denied and writes nothing) rather than by chance or
+last-writer-wins.
+
+**Maps to:** **SOC 2 CC6** (least privilege / segregation of duties, extended to concurrent exclusivity).
+Relevant also to **ISO/IEC 42001** (controlled operation of a multi-agent AI system). This is the multi-agent
+extension of the row-A access control, not a separate kind of evidence.
+
 ---
 
 ## Two things to notice
