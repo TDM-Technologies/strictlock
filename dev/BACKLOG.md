@@ -23,11 +23,18 @@ vault-sourcing decision. The waves as entries:
 memory-cap changed-region fix · plan-authoring guide · compliance-mapping — all three built,
 adversarially verified, and merged to main (the pilot that proved the harvest workflow harness).
 
-### Wave 1 — workhorse modules — *ready* (current Next Action; auto-merges the mechanical modules per the 2026-06-25 verify-gate decision)
-smoke-only assertion ESLint rule (flags `toBeDefined` / bare `expect(x)` / `toContain`) ·
-generated-sink integrity gates (manifest-freshness + pre-push → `generated-sink-commit-gate` /
-`-prepush-gate`) · the externalized-memory **projection bundle** (record schema + git-free/
-clock-free render + fenced-region splicing + UTC-timestamp guard + required-body validation).
+### Wave 1 — workhorse modules — *landed 2026-06-25 (2 of 3; auto-merged via the guard)*
+**SHIPPED** (main @ 4e30534, pushed, CI wired): generated-sink integrity gates (manifest-freshness +
+pre-push → `generated-sink-commit-gate` / `generated-sink-prepush-gate`) · the externalized-memory
+**projection bundle** (record schema + git-free/clock-free render + fenced-region splicing +
+UTC-timestamp guard + required-body validation). Both verify-clean; landed by the fail-closed merge guard.
+**HELD** — the smoke-only assertion ESLint rule (see `eslint-smoke-rule` below).
+
+### eslint-smoke-rule — *held (Wave-1 remainder; needs a toolchain decision)*
+The smoke-only assertion ESLint rule (flags `toBeDefined` / bare `expect(x)` / `toContain`) is the one
+Wave-1 module not yet built. It drags a JS toolchain into this Python+shell, zero-dep repo, so it needs a
+conscious decision the maintainer owns: ship it as its **own npm package** (the current lean — keeps the
+suite's zero-dep promise intact) vs fold a JS toolchain into the repo. Until that's decided it stays unbuilt.
 
 ### Wave 2 — marquee IP — *planned*
 Cleanup-Day / rule-archaeology module + rule-corpus schema **+ a design paper** on the inversion
@@ -204,16 +211,22 @@ OS-sensitive change.
 
 ## harvest-harness
 
-### workflow agents must not mutate the shared main checkout — *ready* (do before Wave 1 auto-merge)
-In the Wave 0 run a verify/consistency agent left a stray uncommitted `git merge` in the shared
-`main` checkout (zero loss; aborted). Build agents were told to stay in their worktree; the
-verify/consistency prompts were not. Harden: mergeability checks use `git merge-tree` (pure
-dry-run) or always `--abort`; no agent touches the shared main checkout. Under Wave 1 auto-merge a
-stray half-merge in main is a silent hazard.
+### workflow agents must not mutate the shared main checkout — *DONE 2026-06-25 (proven in Wave 1)*
+Closed structurally by the fail-closed merge guard (`harvest-merge-guard.sh`): harvest branches are
+merged ONLY by that script, never by a free-form agent. It refuses on a dirty/mid-merge main
+(catches a stray agent write), `--abort`s on conflict, rolls back any module whose tests fail, and
+never pushes. Proven end-to-end landing both Wave-1 modules — no agent touched the shared main
+checkout; build agents work only in pre-made isolated worktrees. (Origin: a Wave-0 verify agent
+left a stray uncommitted `git merge` in main — zero loss, aborted.)
 
 ---
 
 ## Done
+- **2026-06-25** — **Harvest Wave 1 landed (2 of 3)** (main @ 4e30534, pushed): generated-sink
+  commit-gate + prepush-gate + the externalized-memory projection bundle. Built by the fan-out
+  harness (build → adversarial-verify [both clean] → consistency), landed by the fail-closed merge
+  guard, registered in README/COMPLIANCE (§I), CI wired. The smoke-only ESLint rule is held on a
+  toolchain decision (see `eslint-smoke-rule`). Also proved the harness-hardening guard in use.
 - **2026-06-25** — **Harvest Wave 0 shipped** (merged to main): memory-cap self-wedge fix
   (changed-region scan, CRLF-safe, +4 tests) · `plan-gate/AUTHORING.md` · suite-wide
   `COMPLIANCE.md`. Built + adversarially verified by the harvest workflow harness — the pilot that
