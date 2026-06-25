@@ -19,11 +19,11 @@ entry is marked:
 [`HARVEST-PLAN.md`](HARVEST-PLAN.md) holds per-item detail, the two-axis scoring, and the §4
 vault-sourcing decision. The waves as entries:
 
-### Wave 0 — finish/fix the shipped suite — *ready* (current Next Action)
-memory-cap changed-region fix · plan-authoring guide · compliance-mapping (all three have
-fine-grained entries below). Lowest effort; sources all present in this environment.
+### Wave 0 — finish/fix the shipped suite — *shipped 2026-06-25*
+memory-cap changed-region fix · plan-authoring guide · compliance-mapping — all three built,
+adversarially verified, and merged to main (the pilot that proved the harvest workflow harness).
 
-### Wave 1 — workhorse modules — *ready*
+### Wave 1 — workhorse modules — *ready* (current Next Action; auto-merges the mechanical modules per the 2026-06-25 verify-gate decision)
 smoke-only assertion ESLint rule (flags `toBeDefined` / bare `expect(x)` / `toContain`) ·
 generated-sink integrity gates (manifest-freshness + pre-push → `generated-sink-commit-gate` /
 `-prepush-gate`) · the externalized-memory **projection bundle** (record schema + git-free/
@@ -70,7 +70,12 @@ round-trips each forces), then decide: broaden compound handling, or document
 `cd <path> && <arbitrary>` bypass that the cd-compound tightening deliberately closed.
 Findings-first; any gate change is separate work. Needs the runtime deny log (off-machine).
 
-### authoring & discipline guide — *ready* (Wave 0)
+### authoring & discipline guide — *shipped 2026-06-25* (Wave 0)
+`plan-gate/AUTHORING.md` merged, every rule grounded against the live gate. Code-grounded
+correction baked in: the gate keys solely on `status == active` and treats *every* non-active
+value as inert, so the load-bearing rule is the **ordering** (flip status away from active as the
+last gated action), not an `executed` keyword. Original scoping below.
+
 `SCHEMA.md` (frontmatter) and `CONFIG.md` (env vars) exist, but there's no single guide
 to the authoring *discipline*: the `allowed_paths` / `allowed_commands` rules of thumb
 (exact match, no globs; directory entries authorize nothing; narrow destructive-capable
@@ -79,6 +84,14 @@ prefixes so a bare `git checkout` entry can't also authorize `git checkout -- .`
 `executed` as the *last* gated action, or the gate stops authorizing the plan's own
 close-out). A project-agnostic "plan-authoring" standard already exists privately and
 can be genericized into the repo (likely `plan-gate/AUTHORING.md`).
+
+### paper.md §6 ↔ shipped-log reconcile — *ready*
+`paper.md` §6 states the decision log records "every gate decision (allow *and* deny)" and is
+"tamper-evident". The shipped gate logs **denials by default** (`plan-gate-denies.log`); `CONFIG.md`
+and the new `COMPLIANCE.md` describe this accurately — so §6 is the lone overclaimer (surfaced by
+the Wave 0 verify-gate). Either reword §6 to match the shipped denials-by-default behavior, or build
+the opt-in allow/deny JSONL log to make "allow and deny" true (ties to the deferred memory-cap log
+and SOC 2 CC7). Docs-honesty item; do before §6 goes more public.
 
 ### reversibility-tiered authorization — *exploring* (harvest: later)
 Shift from pure prevention toward "prevent where reversibility runs out, account for
@@ -95,7 +108,12 @@ and sequence before building.
 
 ## memory-cap
 
-### changed-region scan — *ready* (Wave 0)
+### changed-region scan — *shipped 2026-06-25* (Wave 0)
+Merged: introduced/modified `- `-line multiset delta, CRLF/LF-agnostic, +4 tests (wedge-removed ·
+good-property-kept · CRLF · Edit-introduces-deny). The optional env-gated JSONL decision log stays
+**deferred** (ties to the CC7 "allow and deny" log — see `paper.md §6 ↔ shipped-log reconcile`).
+Original scoping below.
+
 The shipped cap scans the whole file, which can **self-wedge**: once any over-cap `- `
 line exists, every later compliant write that doesn't also delete it is denied — so the
 index can then only be written through non-enforcing paths, and violations accumulate.
@@ -132,12 +150,20 @@ bundle (the kind of pure renderer it requires). §6.
 
 ## docs
 
-### compliance-mapping (SOC 2 / ISO 42001 / ISO 9001) — *ready* (Wave 0)
+### compliance-mapping (SOC 2 / ISO 42001 / ISO 9001) — *shipped 2026-06-25* (Wave 0)
+Root `COMPLIANCE.md` merged — suite-wide (all four modules), non-certification stance preserved,
+control IDs framed as pointers into published criteria (not claims of satisfaction). Discoverability
+follow-up below (`COMPLIANCE.md discoverability`). Original scoping below.
+
 Expand `plan-gate/paper.md` §6 ("Compliance mapping (condensed)") into a standalone
 `COMPLIANCE.md`: which control each gate mechanism maps to (exact-path authorization → SOC 2
 CC6; append-only decision log → CC7; PLAN→CONFIRM→EXECUTE → CC8 / ISO 9001 §8.5; the approved
 plan as a documented artifact → ISO 9001 §7.5) and what an auditor can trace. Content largely
 exists in the paper; this is the genericized, reusable reference. Also on the public roadmap.
+
+### COMPLIANCE.md discoverability — *ready*
+`COMPLIANCE.md` (root, shipped 2026-06-25) is reachable only by knowing the filename — add a
+one-line cross-link from the root `README.md` and `roadmap.md` before public launch.
 
 ## cross-cutting
 
@@ -148,8 +174,29 @@ Enabling prerequisite for the Tier-0 "auditable via git" guarantee above. Open
 questions: which paths qualify, the message convention, and the interaction with
 `commit-msg-gate`. Discuss and sequence before building.
 
+## ci
+
+### OS test matrix — *ready*
+CI (`.github/workflows/ci.yml`) runs ubuntu-only. Add `windows-latest` + `macos-latest` to the
+Python matrix so the suite's OS-agnostic claim is **proven**, not just reviewed (the memory-cap
+CRLF test then runs on a real Windows box). Low effort; land with/just before any OS-sensitive
+change.
+
+## harvest-harness
+
+### workflow agents must not mutate the shared main checkout — *ready* (do before Wave 1 auto-merge)
+In the Wave 0 run a verify/consistency agent left a stray uncommitted `git merge` in the shared
+`main` checkout (zero loss; aborted). Build agents were told to stay in their worktree; the
+verify/consistency prompts were not. Harden: mergeability checks use `git merge-tree` (pure
+dry-run) or always `--abort`; no agent touches the shared main checkout. Under Wave 1 auto-merge a
+stray half-merge in main is a silent hazard.
+
 ---
 
 ## Done
+- **2026-06-25** — **Harvest Wave 0 shipped** (merged to main): memory-cap self-wedge fix
+  (changed-region scan, CRLF-safe, +4 tests) · `plan-gate/AUTHORING.md` · suite-wide
+  `COMPLIANCE.md`. Built + adversarially verified by the harvest workflow harness — the pilot that
+  proved the verify-gate.
 - **2026-06-22** — dev scaffold stood up (`dev/` — STATE + BACKLOG, dogfooding `externalized-memory`).
 - **2026-06-01** — v1: plan-gate, commit-msg-gate, memory-cap, externalized-memory shipped.
