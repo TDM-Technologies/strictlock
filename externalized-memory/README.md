@@ -43,8 +43,10 @@ together, because each makes the other auditable.
 | [`templates/MAILBOX.template.md`](templates/MAILBOX.template.md) | A bidirectional work-package mailbox, cleared to a sentinel line after use. |
 | [`templates/ARCHIVE.template.md`](templates/ARCHIVE.template.md) | Append-only completed history moved off the state file. |
 | [`atomic-write.py`](atomic-write.py) | Reference implementation of the atomic write-temp-then-rename write. Plain script, no daemon, standard library only. |
+| [`projection.py`](projection.py) | The **projection bundle**: turn a directory of per-record files into a deterministic, git-free/clock-free status projection spliced into a fenced region of a target file. Validates each record (canonical-UTC timestamps, required body). |
+| [`PROJECTION-SCHEMA.md`](PROJECTION-SCHEMA.md) | The record shape and the five projection guarantees. |
 | [`DESIGN.md`](DESIGN.md) | The why behind every rule — each one is a scar. |
-| [`examples/`](examples/) | Fictional, populated artifacts and a step-by-step walkthrough. |
+| [`examples/`](examples/) | Fictional, populated artifacts and a step-by-step walkthrough — including the [projection-bundle walkthrough](examples/PROJECTION.README.md). |
 
 All templates and examples are **structure and prose only** — never real handoff
 data.
@@ -91,6 +93,60 @@ behind. Run it by hand:
 ```bash
 printf '%s' "$new_content" | python atomic-write.py path/to/STATE.md
 ```
+
+## The projection bundle
+
+The blackboard above is hand-written — the right shape for a single human handoff. The
+**projection bundle** ([`projection.py`](projection.py)) covers the other case: a *machine-derived*
+status view over many small records. Instead of hand-merging a summary file — a last-writer-wins
+race where two sessions appending can silently drop a line — you write one record per work unit
+and let the generator derive the view. Each session writes only its **own** record; the
+projection is derived, so "whoever renders last emits the complete view" is the correct
+semantics and transient staleness self-heals on the next render. That turns the blackboard from
+*a place state lives* into *a place state lives plus an auditable, reproducible projection of
+it*.
+
+It has five parts, all proven by [`tests/test_projection.py`](tests/test_projection.py):
+
+1. **Record schema** — one `<id>.md` per record: a fenced frontmatter block + a **required**
+   body. See [`PROJECTION-SCHEMA.md`](PROJECTION-SCHEMA.md).
+2. **Deterministic render** — **git-free and clock-free**. Inputs sorted explicitly by `id`,
+   no system-clock read, no git invocation, LF-only output: same records ⇒ byte-identical bytes.
+3. **Fenced-region splicing** — the render is written only **between** two marker lines in a
+   target file; every byte outside the region is preserved exactly. A missing marker is a hard
+   refusal, never a silent append.
+4. **Canonical-UTC timestamp guard** — timestamps must already be canonical UTC
+   `YYYY-MM-DDTHH:MM:SSZ`. Non-canonical input is **rejected at write time, not normalized at
+   render time**, which is what keeps the render reproducible despite human-entered timestamps.
+5. **Required-body validation** — a record with an empty body is **rejected**.
+
+```bash
+export EM_PROJECTION_RECORDS_DIR=~/project/.state/records
+export EM_PROJECTION_TARGET=~/project/STATUS.md       # must already contain the fence markers
+
+python projection.py validate --file "$EM_PROJECTION_RECORDS_DIR/01-foo.md"  # reject a bad record
+python projection.py render                                                  # pure, to stdout
+python projection.py splice                                                  # into the fenced region
+python projection.py check                                                   # oracle: fail on drift (CI)
+```
+
+### Projection bundle configuration
+
+Every binding comes from the environment (or an overriding flag) — no machine paths, no project
+names baked in. Variables are consistently `EM_PROJECTION_`-prefixed.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `EM_PROJECTION_RECORDS_DIR` | Directory holding the per-record `<id>.md` files. | *(required for render/splice/check)* |
+| `EM_PROJECTION_TARGET` | The file the projection is spliced into (must already contain the fence markers). | *(required for splice/check)* |
+| `EM_PROJECTION_BEGIN` | The begin fence marker line. | `<!-- BEGIN externalized-memory projection -->` |
+| `EM_PROJECTION_END` | The end fence marker line. | `<!-- END externalized-memory projection -->` |
+| `EM_PROJECTION_TITLE` | Heading rendered at the top of the projection region. | `Status projection` |
+
+The worked example is in [`examples/PROJECTION.README.md`](examples/PROJECTION.README.md). Pair it
+with [`plan-gate`](../plan-gate/) by listing the target in a plan's `allowed_paths` and wiring
+`projection.py check` into CI: now the generated view can never silently drift from the records,
+and every write to it is an authorized, audited event.
 
 ## Requirements
 
