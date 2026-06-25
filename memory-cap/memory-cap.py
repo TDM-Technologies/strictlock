@@ -114,20 +114,87 @@ def is_index_target(p: str | None) -> bool:
 def find_violating_lines(content: str) -> list:
     """Return [(line_no_1based, line_stripped, char_count)] for over-cap `- ` lines.
 
-    Lines starting with `- ` (dash + space) are the index-entry convention.
-    Everything else (headings, blockquotes, blank lines, frontmatter) is exempt.
-    The character count is the whole line including the `- ` prefix, excluding
-    trailing whitespace.
+    Whole-content scan: every over-cap `- ` (dash + space) index entry, with no
+    pre-existing baseline. Equivalent to ``introduced_violating_lines("", content)``
+    (an empty baseline makes every `- ` line "introduced"). The changed-region
+    check in ``main`` uses ``introduced_violating_lines`` so a write is judged only
+    on the lines it introduces or modifies; this whole-file form remains the
+    primitive for callers that genuinely want every over-cap line.
     """
+    return introduced_violating_lines("", content)
+
+
+def _index_line_counts(content: str) -> dict:
+    """Multiset (Counter-like dict) of rstrip-normalized `- ` lines in *content*.
+
+    Lines are split with ``splitlines()`` (which treats CRLF, CR, and LF
+    uniformly) and ``rstrip``-ed, so the same logical entry compares equal
+    regardless of the line ending the file was authored with. Only `- ` lines
+    are counted; all other prose is ignored. This is what makes the changed-region
+    scan OS-agnostic: a CRLF-authored index never reads as "all lines introduced"
+    against an LF-normalized write.
+    """
+    counts: dict = {}
+    for line in content.splitlines():
+        if not line.startswith(INDEX_LINE_PREFIX):
+            continue
+        key = line.rstrip()
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def introduced_violating_lines(existing_content: str, new_content: str) -> list:
+    """Over-cap `- ` lines that *new_content* INTRODUCES or MODIFIES vs *existing_content*.
+
+    Pure function of (existing_content, new_content) — knows nothing about the
+    harness, the hook payload, or the filesystem, so it stays reusable and
+    testable in isolation, and keeps the changed-region logic harness-agnostic.
+    The "changed region" is the multiset delta of rstrip-normalized `- ` lines:
+    an index entry that appears more times in the result than it did in the
+    pre-existing file is treated as introduced/modified for that surplus; an
+    entry present in equal-or-greater count in the original is pre-existing and
+    untouched, and is NEVER flagged — that is what removes the self-wedge. A
+    brand-new or unreadable file is modeled as an empty *existing_content*, so
+    every `- ` line counts as introduced and a fresh over-cap write is still
+    correctly denied.
+
+    Returns the same shape as ``find_violating_lines`` —
+    ``[(line_no_1based, line_stripped, char_count)]`` — using line numbers from
+    *new_content* so the deny message points at the result the write would land.
+    """
+    remaining = _index_line_counts(existing_content)  # one credit per untouched occurrence
     violations = []
-    for i, line in enumerate(content.splitlines(), start=1):
+    for i, line in enumerate(new_content.splitlines(), start=1):
         if not line.startswith(INDEX_LINE_PREFIX):
             continue
         stripped = line.rstrip()
+        if remaining.get(stripped, 0) > 0:
+            # Matches a pre-existing occurrence — untouched, never flagged.
+            remaining[stripped] -= 1
+            continue
+        # Introduced or modified by this write — subject it to the cap.
         n = len(stripped)
         if n > CAP_CHARS:
             violations.append((i, stripped, n))
     return violations
+
+
+def read_existing_or_empty(file_path: str | None) -> str:
+    """Best-effort read of the current on-disk content; "" for new/unreadable.
+
+    Used by the Write path to obtain the pre-existing `- ` multiset. A file that
+    does not exist yet (brand-new write) or cannot be read returns "", which the
+    delta treats as "every `- ` line is introduced" — so a fresh over-cap write
+    is still denied, and an unreadable file degrades to the original whole-file
+    behavior (strictly safe: it can only flag MORE, never wedge a real edit,
+    because the Write path always supplies the full intended content).
+    """
+    if not file_path:
+        return ""
+    try:
+        return Path(file_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def reconstruct_edit_content(
@@ -135,12 +202,14 @@ def reconstruct_edit_content(
     old_string: str,
     new_string: str,
     replace_all: bool,
-) -> str | None:
-    """Apply Edit-tool semantics to the existing file and return the RESULT.
+) -> tuple[str, str] | None:
+    """Apply Edit-tool semantics to the existing file and return ``(existing, result)``.
 
-    Returns the post-edit content string, or **None to signal "defer to the
-    Edit tool"** when the hook CANNOT faithfully reconstruct what the Edit tool
-    will actually produce. None is returned when ANY of:
+    Returns ``(existing_content, post_edit_content)`` — the pre-existing file
+    content (the baseline for the changed-region delta) paired with the
+    reconstructed result — or **None to signal "defer to the Edit tool"** when the
+    hook CANNOT faithfully reconstruct what the Edit tool will actually produce.
+    None is returned when ANY of:
 
       * the file cannot be read (transient IO error / race), OR
       * ``old_string`` is empty, OR
@@ -160,10 +229,11 @@ def reconstruct_edit_content(
 
     When reconstruction IS faithful (old_string present, and unique unless
     replace_all): replace_all=True swaps every occurrence; replace_all=False
-    swaps the single unique occurrence — a mirror of the Edit tool. The RESULT
-    (not the current file state) is what the caller checks for over-cap lines,
-    so a genuine compressing edit passes and only an edit that INTRODUCES or
-    RETAINS an over-cap line is refused.
+    swaps the single unique occurrence — a mirror of the Edit tool. The caller
+    diffs the RESULT against the returned ``existing`` (not the stale file alone)
+    so a genuine compressing edit passes and only an edit that INTRODUCES a new
+    over-cap line is refused; a pre-existing over-cap line the edit merely retains
+    is untouched and never flagged.
     """
     try:
         existing = Path(file_path).read_text(encoding="utf-8")
@@ -182,8 +252,8 @@ def reconstruct_edit_content(
         # cannot know which occurrence the user means — defer.
         return None
     if replace_all:
-        return existing.replace(old_string, new_string)
-    return existing.replace(old_string, new_string, 1)
+        return existing, existing.replace(old_string, new_string)
+    return existing, existing.replace(old_string, new_string, 1)
 
 
 def main() -> None:
@@ -221,17 +291,23 @@ def main() -> None:
     if not is_index_target(target_path):
         allow(f"memory-cap: target path {target_path!r} is not the capped index file.")
 
-    # Reconstruct the intended new content per-tool.
+    # Reconstruct the intended new content AND establish the pre-existing baseline
+    # per-tool. The cap is then applied only to the `- ` lines the write
+    # introduces or modifies (the multiset delta), never to pre-existing untouched
+    # lines — this is what stops the index from self-wedging.
     if tool_name == "Write":
         new_content = tool_input.get("content") or ""
+        # The current on-disk file is the baseline; a brand-new or unreadable file
+        # yields "" so every `- ` line counts as introduced (fresh over-cap denied).
+        existing_content = read_existing_or_empty(target_path)
     elif tool_name == "Edit":
         old_s = tool_input.get("old_string")
         new_s = tool_input.get("new_string")
         replace_all = bool(tool_input.get("replace_all", False))
         if old_s is None or new_s is None:
             allow("memory-cap: Edit payload missing old_string/new_string — letting Edit validate.")
-        new_content = reconstruct_edit_content(target_path, old_s, new_s, replace_all)
-        if new_content is None:
+        reconstructed = reconstruct_edit_content(target_path, old_s, new_s, replace_all)
+        if reconstructed is None:
             # Cannot faithfully reconstruct the post-edit content (file
             # unreadable, or old_string empty / absent / non-unique). The Edit
             # tool will apply or reject the edit on its own; deferring avoids
@@ -242,16 +318,26 @@ def main() -> None:
                 f"{target_path!r} (file unreadable, or old_string empty / absent "
                 f"/ non-unique) — deferring to the Edit tool's own validation."
             )
+        # Reuse the content the reconstruction already read as the delta baseline
+        # (no second disk read).
+        existing_content, new_content = reconstructed
     else:
         # NotebookEdit on a .md index is structurally unlikely; check defensively.
+        # No reliable pre-edit baseline, so treat the source as fully introduced —
+        # the strict (whole-content) behavior, which can only flag more, never wedge.
         new_content = tool_input.get("new_source") or ""
+        existing_content = ""
 
     if not new_content:
         allow("memory-cap: empty payload — nothing to check.")
 
-    violations = find_violating_lines(new_content)
+    # Scan only the changed region: lines this write introduces or modifies.
+    violations = introduced_violating_lines(existing_content, new_content)
     if not violations:
-        allow(f"memory-cap: no `- ` line exceeds {CAP_CHARS} chars.")
+        allow(
+            f"memory-cap: no INTRODUCED/MODIFIED `- ` line exceeds {CAP_CHARS} chars "
+            f"(pre-existing lines are not re-checked)."
+        )
 
     # Build a clear, actionable deny message naming the violators. Cap the detail
     # at 3 entries to keep the message scannable.
@@ -265,8 +351,9 @@ def main() -> None:
         if len(violations) > 3 else ""
     )
     deny(
-        f"memory-cap: write refused — {len(violations)} `- ` line(s) exceed the "
-        f"{CAP_CHARS}-char cap (whole line excluding trailing whitespace).\n"
+        f"memory-cap: write refused — {len(violations)} INTRODUCED/MODIFIED `- ` "
+        f"line(s) exceed the {CAP_CHARS}-char cap (whole line excluding trailing "
+        f"whitespace).\n"
         f"{lines_report}{overflow_note}\n"
         f"Compress each violating entry to <= {CAP_CHARS} chars and move detail into a "
         f"topic file (the index should stay a one-line-per-entry table of contents). "

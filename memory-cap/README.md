@@ -16,8 +16,15 @@ the rest of StrictLock — fail closed, deny at the boundary, before the bad wri
 - Watches Write / Edit / NotebookEdit calls targeting the configured **index file**.
 - Measures only **index entries** — lines starting with `- ` (dash + space). Headings,
   blockquotes, blank lines, and all other prose are exempt.
-- If any index entry exceeds the cap (default **200** characters, whole line excluding
-  trailing whitespace), the write is **denied** with a message naming the offending lines.
+- Checks only the index entries a write **introduces or modifies** — the multiset delta
+  between the write's result and the file's pre-existing `- ` lines (compared after
+  `splitlines()`/`rstrip`, so the comparison is line-ending agnostic across CRLF and LF).
+  A pre-existing, untouched over-cap line is **never** re-flagged, so a compliant write that
+  merely retains it is allowed — the index cannot self-wedge. A brand-new or unreadable file
+  has an empty baseline, so a fresh over-cap write is still denied.
+- If a write introduces or modifies an index entry that exceeds the cap (default **200**
+  characters, whole line excluding trailing whitespace), the write is **denied** with a
+  message naming the offending lines.
 - Every other file — including topic files in the same directory — is untouched. Those are
   the intended place to offload detail.
 
