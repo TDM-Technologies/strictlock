@@ -68,7 +68,7 @@ import subprocess
 import sys
 import traceback
 from datetime import datetime, timezone
-from pathlib import Path, PurePath
+from pathlib import Path
 
 # ── tuning defaults (overridable by env; no machine-specific paths) ──────────────────
 DEFAULT_HEARTBEAT_TIMEOUT_MIN = 10    # heartbeat older than this (with a ~30s touch) => likely dead
@@ -220,15 +220,20 @@ def load_plans(plans_dir: Path | None) -> list[Plan]:
     return out
 
 
-def _norm(p: str) -> str:
-    """Normalize a path for prefix comparison: absolute-ish, lowercased, forward slashes, no
-    trailing slash. (Attribution is a coarse 'is this path under that worktree' check, so a
-    lowercase fold is acceptable here and harmless on case-sensitive FS for this purpose.)"""
+def _canon(p: str) -> str:
+    """Canonical absolute path for prefix comparison: resolve symlinks (so `/var` and
+    `/private/var`, or any symlinked worktree root, agree with git's reported path), forward
+    slashes, no trailing slash. **Not case-folded** — on a case-sensitive FS two different-cased
+    dirs are distinct worktrees owned by distinct sessions; `Path.resolve` returns the on-disk
+    canonical case on a case-insensitive FS, so both sides still agree there. (An earlier version
+    lowercased and skipped realpath, which could falsely attribute across distinct-cased worktrees
+    and miss a symlinked worktree root — both safe-direction for a report-only tool, but both real;
+    resolving without folding closes them.)"""
     try:
-        s = str(PurePath(p))
-    except (TypeError, ValueError):
+        s = str(Path(p).resolve())
+    except (OSError, RuntimeError, ValueError):
         s = str(p)
-    return s.replace("\\", "/").rstrip("/").lower()
+    return s.replace("\\", "/").rstrip("/")
 
 
 def _is_abs(p: str) -> bool:
@@ -244,10 +249,14 @@ def plan_specifically_claims(plan: Plan, worktree_root: str) -> bool:
     KNOWN BLIND SPOT (fail-safe): a running session whose active plan is worktree_bypass:true with
     no absolute path under its own worktree is invisible here → classifies idle/done-unmerged. That
     FALSE-NEGATIVE under-claims liveness (never over-claims death), so it is safe for a report-only
-    scanner; it would need revisiting before any destructive consumer."""
-    wt = _norm(worktree_root)
+    scanner; it would need revisiting before any destructive consumer.
+
+    Paths are canonicalized (symlinks resolved, no case fold) before the prefix check, so a plan
+    whose paths use a different alias of the same dir (`/var` vs `/private/var`, a symlinked root)
+    still attributes, while distinct-cased dirs on a case-sensitive FS stay distinct."""
+    wt = _canon(worktree_root)
     for entry in plan.allowed_paths:
-        if _is_abs(entry) and _norm(entry).startswith(wt + "/"):
+        if _is_abs(entry) and _canon(entry).startswith(wt + "/"):
             return True
     return False
 
@@ -381,9 +390,13 @@ def classify(wt: dict, now: datetime, *, active_plan: Plan | None, executed_plan
                 "reason": f"work complete / commits not on base ({who}) — pending merge",
                 "escalate": False, "recovery": None, "signal": signal, "age_min": age}
 
-    return {"status": "idle",
-            "reason": f"no active plan claims this worktree; branch {branch or 'detached'} clean "
-            "or merged",
+    if ahead_of_base is None:
+        idle_reason = ("no active plan claims this worktree; ahead-of-base unknown "
+                       "(base ref unresolvable — e.g. no remote)")
+    else:
+        idle_reason = (f"no active plan claims this worktree; branch {branch or 'detached'} "
+                       "clean or merged")
+    return {"status": "idle", "reason": idle_reason,
             "escalate": False, "recovery": None, "signal": signal, "age_min": age}
 
 
@@ -551,8 +564,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print("\nliveness-scan: --dry-run, wrote nothing", file=sys.stderr)
     elif log_dir is not None:
-        md, jl = write_outputs(log_dir, report, jsonl_row(digest))
-        print(f"\nliveness-scan: wrote {md} + appended {jl}", file=sys.stderr)
+        try:
+            md, jl = write_outputs(log_dir, report, jsonl_row(digest))
+            print(f"\nliveness-scan: wrote {md} + appended {jl}", file=sys.stderr)
+        except OSError as exc:
+            print(f"\nliveness-scan: LIVENESS_SCAN_LOG_DIR not writable ({exc}); printed only, "
+                  "wrote nothing", file=sys.stderr)
     else:
         print("\nliveness-scan: LIVENESS_SCAN_LOG_DIR unset — printed only, wrote nothing",
               file=sys.stderr)

@@ -63,6 +63,22 @@ path that resolves under that worktree's root.
 - Plans are read with the **same byte-0 frontmatter discipline** as plan-gate / scope-lease: a
   `status: active` only counts inside a real `---` block at the start of the file; one in prose or
   a fenced ```yaml example is inert.
+- **Paths are canonicalized before the prefix check** (symlinks resolved, no case fold), so a plan
+  whose `allowed_paths` use a different alias of the same directory — `/var` vs `/private/var`, a
+  symlinked worktree root — still attributes, while two distinct-cased directories on a
+  case-sensitive filesystem stay distinct. If attribution ever silently misses, check that your
+  plan paths and `git worktree list` report the same canonical root.
+
+### Accepted blind spot: the main-worktree heuristic
+
+A worktree on branch `main` / `master` / detached HEAD is classified `clean` (a non-session
+worktree) **before** any plan claim. For the intended model — one feature branch per worktree —
+that is correct. But a genuinely-running session that happens to sit on a branch named
+`main`/`master` (fork-style layouts) or a detached HEAD gets reported `clean` and is **invisible**
+to the scan. This is the safest possible misclassification (`clean` is never escalated, never
+reaped, so it can never over-claim death), and is a conscious accepted blind spot. A
+non-reaping-but-action-taking consumer would want the exact main-vs-linked distinction from `git
+worktree list --porcelain` (the first/bare entry) instead of the branch-name heuristic.
 
 ## The structured (`--json`) digest
 

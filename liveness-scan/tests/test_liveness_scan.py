@@ -125,6 +125,15 @@ class TestClassify(unittest.TestCase):
     def test_idle_no_plan_not_ahead(self):
         r = self._c(ahead_of_base=False)
         self.assertEqual(r["status"], "idle")
+        self.assertIn("clean or merged", r["reason"])
+
+    def test_idle_unknown_base_says_unresolvable_not_merged(self):
+        # ahead_of_base is None (base ref absent, e.g. no remote) -> idle, but the reason must NOT
+        # claim the branch is "clean or merged" (it's unknown)
+        r = self._c(ahead_of_base=None)
+        self.assertEqual(r["status"], "idle")
+        self.assertNotIn("clean or merged", r["reason"])
+        self.assertIn("unresolvable", r["reason"])
 
     def test_main_worktree_is_clean_even_with_claiming_plan(self):
         main_wt = {"path": "/repo", "branch": "main", "head": "abc"}
@@ -158,6 +167,45 @@ class TestAttribution(unittest.TestCase):
     def test_path_under_a_different_worktree_does_not_claim(self):
         p = _plan("p", "active", ["/repo/wt-other/src/a.py"])
         self.assertFalse(ls.plan_specifically_claims(p, "/repo/wt-feat"))
+
+    def test_symlinked_worktree_root_still_attributes(self):
+        # the /var -> /private/var (and any symlinked root) trip: a plan path via the symlink
+        # spelling must still attribute to the resolved worktree root (the form git reports).
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            real = tmp / "real_wt"
+            real.mkdir()
+            (real / "src").mkdir()
+            (real / "src" / "a.py").write_text("x\n")
+            link = tmp / "link_wt"
+            try:
+                link.symlink_to(real, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable on this platform")
+            # plan references the file via the SYMLINK spelling; worktree root is the REAL path
+            p = _plan("p", "active", [str(link / "src" / "a.py")])
+            self.assertTrue(ls.plan_specifically_claims(p, str(real)))
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_case_distinct_worktrees_not_falsely_attributed(self):
+        # on a case-sensitive FS /repo/WT-Feat and /repo/wt-feat are DISTINCT; a plan owning one
+        # must not claim the other. _canon must NOT case-fold. (Skip where the FS folds case.)
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            lower = tmp / "wt-feat"
+            lower.mkdir()
+            upper = tmp / "WT-Feat"
+            if upper.exists():  # case-insensitive FS folded them to one dir — N/A here
+                self.skipTest("case-insensitive filesystem; distinct-case dirs collapse")
+            upper.mkdir()
+            p = _plan("p", "active", [str(upper / "src" / "a.py")])
+            self.assertFalse(ls.plan_specifically_claims(p, str(lower)),
+                             "a plan under WT-Feat must NOT claim the distinct dir wt-feat")
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestFrontmatter(unittest.TestCase):
@@ -300,6 +348,29 @@ class TestRealGit(unittest.TestCase):
         self.assertEqual(rc, 0)
         rc_json = ls.safe_main(["--root", str(self.root), "--json"])
         self.assertEqual(rc_json, 0)
+
+    def test_log_dir_colliding_with_a_file_still_exits_zero(self):
+        # LIVENESS_SCAN_LOG_DIR pointing at an existing FILE must not crash the scan: exit 0,
+        # report still printed, no traceback-as-failure.
+        self._seed()
+        collide = self.tmp / "not-a-dir"
+        collide.write_text("i am a file\n")
+        os.environ["LIVENESS_SCAN_LOG_DIR"] = str(collide)
+        rc = ls.safe_main(["--root", str(self.root)])
+        self.assertEqual(rc, 0)
+
+    def test_no_origin_main_base_exits_zero_and_is_idle(self):
+        # a repo with no origin/main: ahead_of_base is unknown -> a worktree reads idle (safe),
+        # and the scan still exits 0.
+        self._seed()
+        wt = self.tmp / "wt-feat"
+        self._git("worktree", "add", "-q", "-b", "feat", str(wt))
+        (wt / "c.txt").write_text("c\n")
+        self._git("add", "-A", cwd=wt)
+        self._git("commit", "-q", "-m", "feat work", cwd=wt)
+        os.environ["LIVENESS_SCAN_BASE"] = "origin/main"  # does not exist in this repo
+        rc = ls.safe_main(["--root", str(self.root), "--dry-run"])
+        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":
