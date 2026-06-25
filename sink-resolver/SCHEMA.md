@@ -64,6 +64,28 @@ Mis-bucketing here is the only silent-data-loss path, so the partition is conser
 construction: a path is auto-resolved *only* if it is explicitly in `SINK_RESOLVER_SINKS`.
 Everything else — including a source file that genuinely conflicted — goes to a person.
 
+### The coverage guard (the second safety property)
+
+The partition assumes your `SINK_RESOLVER_GENERATOR_CMD` actually *regenerates* every path in
+`SINK_RESOLVER_SINKS`. If it doesn't — a sink is in the set but the generator (and `CHECK_CMD`)
+are blind to it — then `git add`-ing that sink would stage its unmerged **'ours'** bytes and
+silently drop the peer's edit. So `resolve` does not trust that assumption: between regenerate and
+`git add`, it checks that **every conflicted sink actually changed**. A conflicted sink left
+byte-identical to its 'ours' bytes means the generator did not rewrite it → **escalate** (restore
+the conflicted sinks to 'ours', write nothing, exit 4). Its one false positive — a sink whose
+merged render legitimately equals 'ours' (e.g. a subset merge) — over-escalates to a human, the
+safe direction. This is what makes "the generator/oracle covers every sink" a *checked* property,
+not an operator promise.
+
+### Path spelling (sink-key normalization)
+
+`normalize_sinks` resolves each configured sink against the repo top-level and **follows
+symlinks** (`Path.resolve`), then compares the resulting repo-relative key against git's literal
+unmerged-path output by exact string. The asymmetry (keys are resolved; git's paths are not
+re-normalized) only ever **over-escalates**: a sink presented via an unexpected symlinked or
+miscased spelling fails to match and goes to a human, rather than colliding with a real non-sink.
+Present your sinks via the same spelling git uses (and the same one in `.gitattributes`).
+
 ## Placement variants
 
 | | Default (this script) | Documented alternative |
@@ -84,9 +106,15 @@ rather than failing CI. Both share the same core recipe; they differ only in *wh
 
 ## State this module writes
 
-- **`resolve`**: regenerates the configured sink(s) and stages them; finalizes the merge commit
-  unless `--no-commit`. Touches nothing outside the sink set. On escalation or any fail-closed
-  condition it writes **nothing**.
-- **`check`**: with `CHECK_CMD`, mutates nothing. Without it, regenerates then **restores** the
-  sink(s) (`git checkout --`), so `check` is net non-mutating either way.
+- **`resolve`**: regenerates the configured sink(s) and **stages only the sink set**; finalizes
+  the merge commit unless `--no-commit`. On escalation or any fail-closed condition it stages and
+  commits **nothing** (and the coverage-guard escalation restores the conflicted sinks to 'ours'
+  first, leaving the merge exactly as found). NOTE: the *generator* is expected to write only the
+  sink set — `resolve` stages only the sinks, so a generator that also writes other tracked files
+  leaves those **dirty** after finalize (out of contract; surfaced by `git status` and the commit
+  gates, never committed by `resolve`).
+- **`check`**: with `CHECK_CMD`, mutates nothing. Without it, it **snapshots** the sink bytes,
+  regenerates transiently, compares, and **restores the exact pre-call bytes** — so it is net
+  non-mutating on **any** tree (it never `git checkout`s, so it cannot clobber a locally-modified
+  sink or give a worktree-vs-index false verdict).
 - **the decision log** (`SINK_RESOLVER_LOG_DIR/sink-resolver.log`): append-only JSONL, best-effort.

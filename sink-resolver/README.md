@@ -35,11 +35,13 @@ sources.** If the sink carries any hand-authored content the generator does not 
 regenerate-from-sources **silently clobbers those peer edits** — the one failure that makes this
 dangerous if mis-adopted.
 
-The module's structural guard against that is the **byte-oracle**: after regenerating, it proves
-the result is a stable, byte-exact render, and a regenerate that can't prove it **fails closed**
-(it escalates to a human) rather than finalizing a clobber. But the oracle can only verify
-determinism — *you* are responsible for the "no hand-authored content in the sink" half. If your
-sink is not a pure render, do not adopt this.
+The module's structural guards against that are the **byte-oracle** (after regenerating, it proves
+the result is a stable, byte-exact render — a regenerate that can't prove it **fails closed**) and
+the **coverage guard** (a conflicted sink the regenerate left unchanged is escalated, not staged,
+so a generator blind to one of your configured sinks can't silently keep `ours`). But the tool can
+only verify *determinism and coverage* — **you** are responsible for the "no hand-authored content
+in the sink" and "the generator and `CHECK_CMD` cover every configured sink" halves. If your sink
+is not a pure render, do not adopt this.
 
 ## How it works
 
@@ -56,6 +58,10 @@ Two pieces, layered:
    - if **any** unmerged path is *not* a sink → **escalates** (exit 4), writes nothing, and names
      the offenders. The escalation is the whole safety story: auto-resolving anything but the
      deterministically-regenerable sink would be guessing at real source intent.
+   - a **coverage guard** sits between regenerate and `git add`: if a conflicted sink comes out of
+     the regenerate *byte-unchanged* from its `ours` bytes, the generator clearly doesn't cover
+     it — so staging it would silently keep `ours` and lose the peer's edit. That escalates too,
+     rather than trust that your generator regenerates every configured sink.
 
 For the non-conflicting case (sources merged cleanly, the sink merely went stale), a plain
 `post-merge` hook regenerates it — see [`examples/`](examples/).

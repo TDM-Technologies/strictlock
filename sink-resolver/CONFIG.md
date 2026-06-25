@@ -17,7 +17,7 @@ call with `SINK_RESOLVER` unset still runs.
 | `SINK_RESOLVER` | no | `on` / `1` / `true` / `yes` to run (the default when unset). Any *other* value (e.g. `off`) makes every verb a no-op. |
 | `SINK_RESOLVER_GENERATOR_CMD` | **yes** | The command that **regenerates the sink(s) in place** from the current (merged) sources. Run in the generator cwd with worktree-private git env stripped. A non-zero exit is fail-closed. |
 | `SINK_RESOLVER_SINKS` | **yes** | The sink path(s) the resolver is allowed to auto-resolve — `os.pathsep`- or whitespace-separated. These are the paths you place under `merge=binary`. Absolute or repo-relative; folded to canonical repo-relative keys for comparison. A sink resolving **outside** the repo is fail-closed. |
-| `SINK_RESOLVER_CHECK_CMD` | recommended | The **strong byte-oracle**: a generator `--check` that regenerates internally, mutates nothing, and exits non-zero on any drift. When set, it is the oracle for `resolve` and the verdict for `check`. When unset, `resolve` falls back to a weaker double-regenerate determinism check and `check` regenerates-and-diffs (announced on stderr). |
+| `SINK_RESOLVER_CHECK_CMD` | recommended | The **strong byte-oracle**: a generator `--check` that regenerates internally, mutates nothing, and exits non-zero on any drift. When set, it is the oracle for `resolve` and the verdict for `check`. When unset, `resolve` falls back to a weaker double-regenerate determinism check and `check` snapshots-regenerates-compares-and-restores-exact-bytes (net non-mutating; announced on stderr). |
 | `SINK_RESOLVER_GENERATOR_CWD` | no | Working directory for the generator / check command (absolute, or repo-root-relative). Default: the repo root. |
 | `SINK_RESOLVER_TIMEOUT` | no | Seconds before the generator / check command is treated as a fail-closed timeout. Default `120`. A non-integer or `<= 0` value falls back to the default (loudly). |
 | `SINK_RESOLVER_LOG_DIR` | no | Directory for the append-only decision log (`sink-resolver.log`). Each resolve/escalate/error appends a JSON line (UTC timestamp, decision, reason, sinks). If unset, no log is written. This is your merge-resolution audit trail. |
@@ -40,6 +40,13 @@ Most generators expose both as one tool with a `--check` flag (e.g.
 [`generated-sink-commit-gate`](../generated-sink-commit-gate/) expects. Configure both for the
 strong guarantee; without `CHECK_CMD` the determinism guard is weaker (it proves the generator is
 deterministic, not that the sink matches the sources independently).
+
+**Both commands must cover EVERY path in `SINK_RESOLVER_SINKS`.** `GENERATOR_CMD` must regenerate
+every configured sink, and `CHECK_CMD` (when set) must verify every one. A sink the generator is
+blind to would have its `ours` bytes staged on a merge — but `resolve`'s **coverage guard** is the
+backstop: a conflicted sink the generator leaves unchanged is escalated to a human, not silently
+finalized. Also keep the generator's *output* confined to the sink set — a generator that writes
+other tracked files leaves them dirty after a resolve (out of contract).
 
 ## Per-OS examples
 

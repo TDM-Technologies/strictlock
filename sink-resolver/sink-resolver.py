@@ -301,12 +301,27 @@ def _regenerate(root: Path) -> None:
 
 
 def _sink_bytes(root: Path, sink_rel: list[str]) -> dict[str, bytes | None]:
-    """Snapshot the on-disk bytes of each sink (None if absent), for the determinism oracle."""
+    """Snapshot the on-disk bytes of each sink (None if absent), for the determinism oracle, the
+    coverage guard, and the non-mutating `check` restore."""
     out: dict[str, bytes | None] = {}
     for rel in sink_rel:
         fp = root / rel
         out[rel] = fp.read_bytes() if fp.is_file() else None
     return out
+
+
+def _restore_sink_bytes(root: Path, snapshot: dict[str, bytes | None]) -> None:
+    """Restore each sink to its EXACT snapshot bytes (or remove it if it was absent). Used to make
+    a regenerate net non-mutating — NOT `git checkout --`, which pulls index/HEAD bytes and would
+    clobber a legitimately-modified working-tree sink and silently fail on a non-zero checkout."""
+    for rel, data in snapshot.items():
+        fp = root / rel
+        if data is None:
+            if fp.exists():
+                fp.unlink()
+        else:
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_bytes(data)
 
 
 def byte_oracle(root: Path, sink_rel: list[str]) -> str:
@@ -316,7 +331,10 @@ def byte_oracle(root: Path, sink_rel: list[str]) -> str:
 
       * SINK_RESOLVER_CHECK_CMD set -> the STRONG oracle: a generator `--check` that regenerates
         internally, mutates nothing, exits non-zero on drift. Proves the committed bytes equal a
-        fresh render of the CURRENT sources.
+        fresh render of the current sources — but only for the sinks YOUR CHECK_CMD actually
+        inspects. (The coverage guard in resolve_merge is the independent backstop that every
+        configured sink was really regenerated, so a CHECK_CMD blind to one of them cannot let an
+        un-regenerated 'ours' slip through.)
       * unset -> the WEAKER double-regenerate determinism check: snapshot the sinks, regenerate
         again, require byte-identical output. Proves the generator is deterministic on these
         sources (so the clobber is reproducible), but not that the sink matches the sources
@@ -391,6 +409,15 @@ def resolve_merge(
     sources are already reconciled by the merge, so a fresh regenerate reproduces exactly the
     sink both sides intended. No `git checkout --ours` is needed — a fresh render overwrites the
     unmerged bytes and `git add` clears the unmerged state. Returns (status, resolved_sinks).
+
+    A COVERAGE GUARD runs between regenerate and `git add`: a conflicted sink that the regenerate
+    left byte-identical to its 'ours' bytes means the generator does not actually cover it, so
+    finalizing would silently stage 'ours' and lose the peer edit — that escalates (write nothing,
+    leave the merge as found) rather than trusting the generator/oracle to cover every sink. (Its
+    one false positive — a sink whose merged render legitimately equals 'ours', e.g. a subset
+    merge — over-escalates to a human, the safe direction.) NOTE: the generator must confine its
+    output to the configured sink set; a generator that writes other tracked files leaves them
+    dirty after finalize (out of contract, surfaced by `git status` / the commit gates).
     """
     sink_rel = normalize_sinks(root, sinks)
     if not sink_rel:
@@ -417,7 +444,32 @@ def resolve_merge(
     if dry_run:
         return "would-resolve", conflicted_sinks
 
+    # Capture the unmerged 'ours' bytes of each conflicted sink BEFORE regenerating, for the
+    # coverage guard below.
+    ours_before = _sink_bytes(root, conflicted_sinks)
+
     _regenerate(root)                              # regenerate from the merged sources
+
+    # COVERAGE GUARD (the structural defense against a mis-paired generator). A sink that was IN
+    # CONFLICT but is byte-IDENTICAL to its 'ours' bytes after regenerate means the generator did
+    # not actually rewrite it — so it does not cover this sink, and `git add`-ing it here would
+    # silently stage 'ours' and DROP the peer's edit. We refuse rather than trust that the
+    # configured generator/oracle covers every configured sink. Restore the conflicted sinks to
+    # 'ours' so the merge state is left exactly as we found it, then escalate.
+    unchanged = [rel for rel in conflicted_sinks
+                 if (root / rel).is_file() and (root / rel).read_bytes() == ours_before.get(rel)]
+    if unchanged:
+        _restore_sink_bytes(root, ours_before)
+        raise Escalation(
+            "the generator did NOT rewrite these conflicted sink(s) — a regenerate left them "
+            "byte-identical to 'ours', so finalizing would silently stage 'ours' and LOSE the "
+            "peer's edit:\n  " + "\n  ".join(unchanged)
+            + "\nYour SINK_RESOLVER_GENERATOR_CMD must regenerate EVERY configured sink. Either "
+            "add these to the generator, or remove them from SINK_RESOLVER_SINKS if they are not "
+            "pure renders. Did not finalize, staged nothing. (If a sink legitimately needs no "
+            "change for this merge, resolve it by hand.)"
+        )
+
     mode = byte_oracle(root, sink_rel)             # prove it's a stable byte-exact render
     _git_run(root, "add", "--", *conflicted_sinks)  # clears the unmerged state for the sinks
 
@@ -445,8 +497,10 @@ def check_fresh(*, root: Path, sinks: list[str]) -> tuple[bool, str]:
 
       * SINK_RESOLVER_CHECK_CMD set -> its exit code is the verdict (0 fresh, non-0 stale) — it
         regenerates internally and mutates nothing. The clean path.
-      * unset -> regenerate in place, `git diff --exit-code` the sink(s), then RESTORE them
-        (`git checkout --`) so `check` is net non-mutating. Drift -> stale.
+      * unset -> SNAPSHOT the sink bytes, regenerate in place, compare the regenerated bytes to the
+        snapshot, then RESTORE the exact snapshot bytes. Net non-mutating on ANY tree (the restore
+        writes back the exact pre-call bytes — never `git checkout --`, which would pull index/HEAD
+        and destroy a legitimately-modified working-tree sink). Drift -> stale.
 
     A stale sink is a FAILURE (the caller exits 1): a stale generated artifact reached the merged
     tree via a path where the local self-heal never ran.
@@ -465,17 +519,23 @@ def check_fresh(*, root: Path, sinks: list[str]) -> tuple[bool, str]:
                        "artifact that is not a fresh render of its sources) — "
                        f"{check_cmd} output:\n{detail}")
 
-    # No strong oracle: regenerate, diff, restore.
-    print("sink-resolver: SINK_RESOLVER_CHECK_CMD is unset — `check` will regenerate and diff "
-          "(set CHECK_CMD for a non-mutating, stronger check).", file=sys.stderr)
+    # No strong oracle: snapshot, regenerate, compare-to-snapshot, restore-exact-bytes. This
+    # compares the regenerated output against the bytes that were on disk (== committed on a clean
+    # tree, which is the CI usage), and is net non-mutating because the restore writes back the
+    # EXACT pre-call bytes — so it never clobbers a locally-modified sink, never gives a false
+    # verdict from worktree-vs-index, and never desyncs the tree.
+    print("sink-resolver: SINK_RESOLVER_CHECK_CMD is unset — `check` regenerates transiently then "
+          "restores the exact pre-call bytes (set CHECK_CMD for a check that mutates nothing at "
+          "all).", file=sys.stderr)
+    before = _sink_bytes(root, sink_rel)
     _regenerate(root)
-    diff = _git_run(root, "diff", "--exit-code", "--", *sink_rel, check_rc=False)
-    fresh = diff.returncode == 0
-    _git_run(root, "checkout", "--", *sink_rel, check_rc=False)  # restore (net non-mutating)
-    if fresh:
-        return True, "sink(s) fresh — a regenerate produced no change from the committed bytes."
-    return False, ("the committed sink is STALE — a regenerate from the merged sources differs "
-                   f"from the committed bytes:\n{diff.stdout.strip()}")
+    after = _sink_bytes(root, sink_rel)
+    _restore_sink_bytes(root, before)              # restore EXACT pre-call bytes (non-mutating)
+    stale = sorted(rel for rel in sink_rel if before.get(rel) != after.get(rel))
+    if not stale:
+        return True, "sink(s) fresh — a regenerate reproduced the on-disk bytes exactly."
+    return False, ("the sink is STALE — a regenerate from the sources differs from the on-disk "
+                   f"bytes for: {', '.join(stale)}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────────

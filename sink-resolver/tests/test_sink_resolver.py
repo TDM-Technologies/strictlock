@@ -185,6 +185,32 @@ class SinkResolverBase(unittest.TestCase):
         out = _git(self.root, "diff", "--name-only", "--diff-filter=U").stdout
         return sorted(ln.strip() for ln in out.splitlines() if ln.strip())
 
+    def _make_two_sink_conflict(self) -> None:
+        """Two sinks under merge=binary, both conflicted — but the generator (GEN) only writes
+        dist/index.txt and is BLIND to dist/extra.txt (a mis-paired generator). Used to exercise
+        the coverage guard."""
+        r = self.root
+        self._init_repo()
+        (r / ".gitattributes").write_text(
+            "dist/index.txt merge=binary\ndist/extra.txt merge=binary\n", encoding="utf-8")
+        (r / "dist" / "extra.txt").write_text("extra_base\n", encoding="utf-8")
+        _git(r, "add", "-A")
+        _git(r, "commit", "-q", "-m", "add extra sink")
+        _git(r, "checkout", "-q", "-b", "feat")
+        (r / "src" / "b.txt").write_text("B2\n", encoding="utf-8")
+        self._regen()
+        (r / "dist" / "extra.txt").write_text("extra_feat\n", encoding="utf-8")
+        _git(r, "add", "-A")
+        _git(r, "commit", "-q", "-m", "feat")
+        _git(r, "checkout", "-q", "main")
+        (r / "src" / "a.txt").write_text("A2\n", encoding="utf-8")
+        self._regen()
+        (r / "dist" / "extra.txt").write_text("extra_main\n", encoding="utf-8")
+        _git(r, "add", "-A")
+        _git(r, "commit", "-q", "-m", "main")
+        merge = _git(r, "merge", "--no-edit", "feat", check=False)
+        self.assertNotEqual(merge.returncode, 0)
+
     def _run(self, *argv: str) -> int:
         return sr.main(list(argv) + ["--root", str(self.root)])
 
@@ -237,6 +263,37 @@ class TestEscalation(SinkResolverBase):
         with self.assertRaises(sr.Escalation) as ctx:
             sr.resolve_merge(root=self.root, sinks=["dist/index.txt"])
         self.assertIn("src/a.txt", str(ctx.exception))
+
+
+# ── coverage guard: a conflicted sink the generator does NOT regenerate -> escalate ──
+class TestCoverageGuard(SinkResolverBase):
+    def test_uncovered_conflicted_sink_escalates(self) -> None:
+        # SINKS includes dist/extra.txt but GEN never writes it -> finalizing would stage 'ours'
+        # and lose the peer edit. The coverage guard must catch this and escalate.
+        self._make_two_sink_conflict()
+        os.environ["SINK_RESOLVER_SINKS"] = "dist/index.txt:dist/extra.txt"
+        before_extra = (self.root / "dist" / "extra.txt").read_bytes()  # 'ours' = extra_main
+        rc = self._run("resolve")
+        self.assertEqual(rc, sr.EXIT_ESCALATE)
+        # nothing finalized; the conflicted sinks restored to 'ours' (peer edit NOT lost via stage)
+        self.assertTrue(sr._merge_in_progress(self.root))
+        self.assertEqual((self.root / "dist" / "extra.txt").read_bytes(), before_extra)
+        self.assertIn("dist/extra.txt", sorted(self._unmerged()))
+
+    def test_message_names_the_uncovered_sink(self) -> None:
+        self._make_two_sink_conflict()
+        with self.assertRaises(sr.Escalation) as ctx:
+            sr.resolve_merge(root=self.root, sinks=["dist/index.txt", "dist/extra.txt"])
+        self.assertIn("dist/extra.txt", str(ctx.exception))
+
+    def test_covered_sinks_still_resolve(self) -> None:
+        # control: when SINKS lists only the covered sink, resolve succeeds as before
+        self._make_two_sink_conflict()
+        # only dist/index.txt is a covered sink; extra.txt is left to a human -> but extra.txt is
+        # still unmerged, so resolve must escalate on extra.txt as a NON-sink (not auto-resolve it)
+        os.environ["SINK_RESOLVER_SINKS"] = "dist/index.txt"
+        rc = self._run("resolve")
+        self.assertEqual(rc, sr.EXIT_ESCALATE)  # extra.txt is now a non-sink conflict
 
 
 # ── (d) nothing unmerged -> clean ────────────────────────────────────────────────────
@@ -365,6 +422,44 @@ class TestCheck(SinkResolverBase):
         self.assertEqual(self._run("check"), sr.EXIT_ERROR)
         # even on the stale path, the working tree is restored
         self.assertEqual(_git(self.root, "status", "--porcelain").stdout.strip(), "")
+
+    # ── the blocking-fix regressions: check must NOT destroy uncommitted sink edits, and must
+    #    give a CORRECT verdict on a dirty tree (weak path) ───────────────────────────────────
+    def test_weak_check_preserves_uncommitted_sink_edit(self) -> None:
+        # a manual edit to the sink (uncommitted) must SURVIVE check and be reported STALE
+        os.environ.pop("SINK_RESOLVER_CHECK_CMD", None)
+        self._init_repo()
+        sink = self.root / "dist" / "index.txt"
+        edited = sink.read_text(encoding="utf-8") + "MANUAL EDIT\n"
+        sink.write_text(edited, encoding="utf-8")
+        rc = self._run("check")
+        self.assertEqual(rc, sr.EXIT_ERROR, "a hand-edited sink is not a fresh render -> STALE")
+        self.assertEqual(sink.read_text(encoding="utf-8"), edited,
+                         "check MUST NOT destroy the uncommitted sink edit")
+
+    def test_weak_check_internally_consistent_dirty_tree_is_fresh_and_preserved(self) -> None:
+        # user edited a source AND regenerated the sink (uncommitted, internally consistent):
+        # check must report FRESH and leave the tree byte-identical.
+        os.environ.pop("SINK_RESOLVER_CHECK_CMD", None)
+        self._init_repo()
+        (self.root / "src" / "a.txt").write_text("A3\n", encoding="utf-8")
+        self._regen()  # sink now matches the working sources
+        sink = self.root / "dist" / "index.txt"
+        before = sink.read_bytes()
+        src_before = (self.root / "src" / "a.txt").read_bytes()
+        rc = self._run("check")
+        self.assertEqual(rc, sr.EXIT_OK, "an internally-consistent working tree is FRESH")
+        self.assertEqual(sink.read_bytes(), before, "check must be net non-mutating")
+        self.assertEqual((self.root / "src" / "a.txt").read_bytes(), src_before)
+
+    def test_weak_check_recreated_when_sink_deleted_is_restored_to_absent(self) -> None:
+        # a worktree-deleted sink must be left deleted by check (not silently re-created)
+        os.environ.pop("SINK_RESOLVER_CHECK_CMD", None)
+        self._init_repo()
+        sink = self.root / "dist" / "index.txt"
+        sink.unlink()
+        self._run("check")
+        self.assertFalse(sink.exists(), "check must restore the sink to its pre-call (absent) state")
 
 
 # ── (j) disabled -> no-op ────────────────────────────────────────────────────────────
