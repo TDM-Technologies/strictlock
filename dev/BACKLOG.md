@@ -37,12 +37,12 @@ to npm**. `npm publish` needs an npm account/token and is an outward-facing rele
 maintainer. (Genericization done: the HIPAAPath baseline.json was replaced by ESLint rule options —
 `baseline` / `marker` / `extraSmokeMatchers`, default strict.)
 
-### Wave 3 — concurrency primitives — *COMPLETE 2026-06-25 (3 of 3; local main @ 189285c, NOT pushed)* — see [## concurrency](#concurrency)
+### Wave 3 — concurrency primitives — *COMPLETE + MERGED to origin/main 2026-06-25 (3 of 3; PR #6, CI green)* — see [## concurrency](#concurrency)
 **SHIPPED:** `scope-lease` (Option A git-ref CAS exclusive path-lock; 37 tests; 3 lenses clean) · `sink-resolver`
 (binary-sink auto-resolver; 29 tests; 3 lenses → 1 proven blocking + 1 structural gap fixed) · `liveness-scan`
 (read-only fleet reporter; 31 tests; 2 lenses clean). Full suite **185 tests / 9 modules** green. Registered in
-README + COMPLIANCE §K/§L + CI + roadmap. **Origin still at 816a141 — pushing local `main` is Tim's call.** Next
-harvest wave: Wave 4 (rituals/gates), then Wave 2 (marquee, last).
+README + COMPLIANCE §K/§L + CI + roadmap, then **PUSHED + MERGED to origin/main via PR #6 (`d17e1a9`, all 9 CI
+jobs green incl python 3.8–3.12).** Next harvest wave: Wave 4 (rituals/gates), then Wave 2 (marquee, last).
 
 ### Wave 2 — marquee IP — *DEFERRED to end of queue (Tim, 2026-06-25)*
 Run LAST (after Waves 3 + 4), by choice — still the highest-cred work, just sequenced last now the salvage
@@ -137,9 +137,9 @@ decision log, env-gated (mirroring `PLAN_GATE_LOG_DIR`).
 
 ## concurrency
 
-> **Wave 3 is COMPLETE (2026-06-25).** All three concurrency modules below shipped to **local main
-> @ 189285c (NOT pushed)**. `scope-lease`, `sink-resolver`, and `liveness-scan` are live in the repo;
-> the entries below are retained for provenance. See the [Done](#done) section for the close-out.
+> **Wave 3 is COMPLETE + MERGED to origin/main (2026-06-25, PR #6, CI green).** `scope-lease`,
+> `sink-resolver`, and `liveness-scan` are live on the public main; the entries below are retained for
+> provenance. See the [Done](#done) section for the close-out.
 
 ### scope-lease — git-native exclusive path lock — *SHIPPED 2026-06-25* (Wave 3, flagship)
 Decouple the vault's git-ref CAS collision lease (`work-registry.py` Feature C — `refs/locks/*`
@@ -238,13 +238,13 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 ---
 
 ## Done
-- **2026-06-25** — **Wave 3 COMPLETE — `sink-resolver` + `liveness-scan` shipped** (LOCAL main @ `189285c`,
-  **not pushed**; origin still `816a141`). `sink-resolver` (binary-sink auto-resolver; 29 tests; 3 lenses →
-  a proven `check`-data-loss blocking + a silent-clobber coverage gap, both fixed pre-land; coverage guard
-  added as a core-safety upgrade) and `liveness-scan` (read-only fleet reporter; 31 tests; 2 lenses clean +
-  4 safe-direction polish items). Built solo, adversarially verified by workflow fan-out, guard-landed
-  (clean-main pre-flight → `merge --no-ff` → full-suite green → no push). Full suite **185 tests / 9 modules**.
-  Registered in README + COMPLIANCE §K/§L + CI + roadmap. **Pushing local `main` → Tim's call.**
+- **2026-06-25** — **Wave 3 COMPLETE + MERGED to origin/main** (`d17e1a9`, PR #6, all 9 CI jobs green).
+  `sink-resolver` (binary-sink auto-resolver; 29 tests; 3 lenses → a proven `check`-data-loss blocking + a
+  silent-clobber coverage gap, both fixed pre-land; coverage guard added as a core-safety upgrade) and
+  `liveness-scan` (read-only fleet reporter; 31 tests; 2 lenses clean + 4 safe-direction polish items). Built
+  solo, adversarially verified by workflow fan-out, guard-landed (clean-main pre-flight → `merge --no-ff` →
+  full-suite green → no push), then pushed as PR #6 → CI-verified clean → fast-forward-merged to origin/main
+  on Tim's go-ahead. Full suite **185 tests / 9 modules**. Registered in README + COMPLIANCE §K/§L + CI + roadmap.
 - **2026-06-25** — **Wave 3 `scope-lease` flagship SHIPPED** (main @ a6054e8): git-native zero-service
   exclusive lock over a path set (`refs/locks/*` CAS), Option A — faithful port of vault Feature C,
   retargeted to a path-source seam (plan-gate adapter default + standalone fallbacks). Built + verified by
