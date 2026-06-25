@@ -302,6 +302,42 @@ class AtomicityTests(unittest.TestCase):
         a_ref = sl._lease_ref(sl._normalize_paths(self.root, ["src/a.py"])[0])
         self.assertIsNone(sl._ref_oid(self.root, a_ref))
 
+    def test_commit_race_abort_is_all_or_nothing_and_names_the_racer(self):
+        # The HARDER atomicity path: lock-b's Phase-1 DECIDE sees BOTH paths free, but a racer
+        # (lock-a) claims src/b.py in the hash->update-ref window. The `create` CAS for src/b.py
+        # then fails, so the whole transaction aborts (lines ~416-430): src/a.py must NOT be
+        # half-claimed, and the re-read must raise a structured DENY naming the racer.
+        # The race is injected deterministically by hooking the per-blob hash (the only code that
+        # runs between DECIDE and the commit) — same probe the adversarial verify used by hand.
+        orig_hash = sl._hash_lease_blob
+        state = {"raced": False}
+
+        def racing_hash(*args, **kwargs):
+            if not state["raced"]:
+                state["raced"] = True
+                sl._hash_lease_blob = orig_hash          # restore before the racer's own acquire
+                sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                                 paths=["src/b.py"], deadline=future())
+            return orig_hash(*args, **kwargs)
+
+        before = set(lock_refs(self.root))               # empty
+        sl._hash_lease_blob = racing_hash
+        try:
+            with self.assertRaises(sl.LeaseDenied) as ctx:
+                sl.acquire_lease(root=self.root, lock_id="lock-b", owner="bob",
+                                 paths=["src/a.py", "src/b.py"], deadline=future())
+        finally:
+            sl._hash_lease_blob = orig_hash
+        self.assertTrue(state["raced"], "the racer must fire in the DECIDE->commit window")
+        self.assertEqual(ctx.exception.path, "src/b.py")
+        self.assertEqual(ctx.exception.holder.get("lock_id"), "lock-a")
+        # All-or-nothing: ONLY the racer's single ref exists; lock-b half-claimed nothing.
+        b_ref = sl._lease_ref(sl._normalize_paths(self.root, ["src/b.py"])[0])
+        self.assertEqual(set(lock_refs(self.root)) - before, {b_ref})
+        a_ref = sl._lease_ref(sl._normalize_paths(self.root, ["src/a.py"])[0])
+        self.assertIsNone(sl._ref_oid(self.root, a_ref),
+                          "the aborted txn must leave src/a.py un-claimed")
+
 
 # ── (h) GC race — the blob is ref-pinned, survives prune ──────────────────────────────
 class GCRaceTests(unittest.TestCase):
