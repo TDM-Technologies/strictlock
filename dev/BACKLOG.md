@@ -174,6 +174,24 @@ Enabling prerequisite for the Tier-0 "auditable via git" guarantee above. Open
 questions: which paths qualify, the message convention, and the interaction with
 `commit-msg-gate`. Discuss and sequence before building.
 
+### per-project gate tiering (DAL A–E) — *exploring*
+Make gate strictness configurable per project by an assurance level (borrowing DO-178C's DAL A–E:
+A = highest criticality, E = lowest). A high-assurance project runs the full strict gate set; a
+low-criticality one runs a lighter profile. Ship as named "gate profiles" / a tier env var each
+module reads, so one knob sets the posture across the suite instead of wiring each gate per
+project. Composes with reversibility-tiers (that tiers by action reversibility; this by project
+criticality).
+
+### secret / non-public spill gate — *ready* (dogfood on StrictLock)
+A fail-closed pre-commit/pre-push gate that refuses to commit private keys, tokens, stray UUIDs,
+machine paths, or other non-public content — catching a leak at the BOUNDARY, not just in CI after
+it's pushed (the CI already greps for secrets/UUIDs post-hoc; this makes it structural and
+pre-commit). Generalize the CI scan's patterns into a standalone gate and dogfood it on StrictLock
+so non-public material can't reach the public repo. Honest limit: a regex gate catches
+keys/tokens/UUIDs/paths and obvious PII, but "is this personal/strategic content that shouldn't be
+public" stays partly a judgment call — pair the mechanical gate with that caveat (reduces, not
+eliminates, spill risk).
+
 ## ci
 
 ### OS test matrix + action refresh — *ready*
