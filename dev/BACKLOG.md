@@ -176,11 +176,13 @@ questions: which paths qualify, the message convention, and the interaction with
 
 ## ci
 
-### OS test matrix — *ready*
+### OS test matrix + action refresh — *ready*
 CI (`.github/workflows/ci.yml`) runs ubuntu-only. Add `windows-latest` + `macos-latest` to the
 Python matrix so the suite's OS-agnostic claim is **proven**, not just reviewed (the memory-cap
-CRLF test then runs on a real Windows box). Low effort; land with/just before any OS-sensitive
-change.
+CRLF test then runs on a real Windows box). While in `ci.yml`, also bump `actions/checkout` and
+`actions/setup-python` to current majors — the runners now force them onto Node 24 and warn on
+every run (Node-20 deprecation, observed 2026-06-25). Low effort; land with/just before any
+OS-sensitive change.
 
 ## harvest-harness
 
