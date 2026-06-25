@@ -1,0 +1,50 @@
+{
+  "name": "eslint-plugin-strictlock",
+  "version": "0.1.0",
+  "description": "StrictLock's ESLint plugin: structural gates against false-safety-net tests (e.g. smoke-only assertions).",
+  "license": "Apache-2.0",
+  "author": "TDM Technologies LLC",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "rules/no-smoke-only-assertions.mjs",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "eslint",
+    "eslintplugin",
+    "eslint-plugin",
+    "testing",
+    "test-quality",
+    "smoke-tests",
+    "strictlock"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TDM-Technologies/strictlock.git",
+    "directory": "eslint-plugin-strictlock"
+  },
+  "homepage": "https://github.com/TDM-Technologies/strictlock/tree/main/eslint-plugin-strictlock#readme",
+  "bugs": {
+    "url": "https://github.com/TDM-Technologies/strictlock/issues"
+  },
+  "peerDependencies": {
+    "eslint": ">=8"
+  },
+  "devDependencies": {
+    "eslint": ">=8"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
