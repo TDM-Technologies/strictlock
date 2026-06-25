@@ -25,6 +25,12 @@ jobs:
         run: python memory-cap/tests/test_memory_cap.py
       - name: externalized-memory tests
         run: python externalized-memory/tests/test_atomic_write.py
+      - name: externalized-memory projection tests
+        run: python externalized-memory/tests/test_projection.py
+      - name: generated-sink-commit-gate tests
+        run: python generated-sink-commit-gate/tests/test_generated_sink_commit_gate.py
+      - name: generated-sink-prepush-gate tests
+        run: python generated-sink-prepush-gate/tests/test_generated_sink_prepush_gate.py
 
   shell:
     name: shell lint + tests

@@ -4,10 +4,12 @@
 mechanism maps to.**
 
 This is the suite-wide expansion of [`plan-gate/paper.md`](plan-gate/paper.md) §6. It
-covers all four shipped modules — [`plan-gate`](plan-gate/),
-[`commit-msg-gate`](commit-msg-gate/), [`memory-cap`](memory-cap/), and
-[`externalized-memory`](externalized-memory/) — and maps each gate mechanism to the
-control it evidences and to what an auditor can actually **trace**.
+covers the shipped modules — [`plan-gate`](plan-gate/),
+[`commit-msg-gate`](commit-msg-gate/), [`memory-cap`](memory-cap/),
+[`externalized-memory`](externalized-memory/), and the generated-sink integrity gates
+([`generated-sink-commit-gate`](generated-sink-commit-gate/) /
+[`generated-sink-prepush-gate`](generated-sink-prepush-gate/)) — and maps each gate
+mechanism to the control it evidences and to what an auditor can actually **trace**.
 
 ## Read this first: what this document is, and is not
 
@@ -239,6 +241,38 @@ behavior are observable in the configuration.
 **Maps to:** **ISO/IEC 42001** (controlled operation of the AI system); *supports* **SOC 2 CC6/CC7** at the
 configuration-integrity level (independent bypasses; fail-closed misconfiguration). This is a resource-control
 and config-integrity mechanism, not a primary access or change-management control.
+
+### I. Byte-exact generated-artifact integrity at the commit/push boundary → SOC 2 CC7/CC8 / ISO 9001 §8.5
+
+**Mechanism** ([`generated-sink-commit-gate`](generated-sink-commit-gate/) at commit time,
+[`generated-sink-prepush-gate`](generated-sink-prepush-gate/) as the push-time backstop). A
+checked-in *generated* artifact — a manifest, index, schema, OpenAPI spec, or generated
+README — is supposed to be a pure function of its sources, but nothing stops a hand-edit or a
+stale commit from letting it drift. These gates re-run the configured generator in `--check`
+mode and **refuse** (loud non-zero exit, no working-tree mutation, no auto-stage) unless the
+committed artifact is a *byte-exact* regeneration. The commit gate fires only when a staged
+change touches a configured source; the push gate validates the terminal artifact on *every*
+push, so a stale sink that slipped past commit time (via `--no-verify` or a one-shot bypass)
+is still caught before it leaves the machine. Both fail closed on a missing, misconfigured, or
+erroring generator — a generator that cannot run is a block, never a silent allow — and each
+gate honors only its own uniquely-named, single-use, logged bypass, so escaping one never
+weakens the other.
+
+**Evidence it emits.** Proof that a derived artifact of record matches its source by
+construction at the moment it enters version control, plus — when a decision-log directory is
+configured — a per-decision append-only trail of each freshness check and every refusal (the
+same exhaust pattern as row B).
+
+**What an auditor can trace.** *That every committed/pushed generated artifact provably
+corresponds to the sources it claims to derive from* — a drifted or hand-edited artifact cannot
+enter the history unobserved — and, from the log, *when a stale artifact was caught and
+blocked.* The bypass isolation and fail-closed-on-misconfiguration posture are observable in
+the configuration.
+
+**Maps to:** **SOC 2 CC8** (change management — a generated artifact cannot drift from its
+authorized source) and **CC7** (the decision log); **ISO 9001 §8.5** (control of production /
+preservation of conformity of outputs). Like [`memory-cap`](memory-cap/) (row H), the
+independent bypasses and fail-toward-on misconfiguration also *support* configuration integrity.
 
 ---
 
