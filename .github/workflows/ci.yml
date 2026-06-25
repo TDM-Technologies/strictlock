@@ -32,6 +32,22 @@ jobs:
       - name: generated-sink-prepush-gate tests
         run: python generated-sink-prepush-gate/tests/test_generated_sink_prepush_gate.py
 
+  node:
+    name: eslint-plugin tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: eslint-plugin-strictlock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: install
+        run: npm ci
+      - name: eslint-plugin-strictlock tests
+        run: npm test
+
   shell:
     name: shell lint + tests
     runs-on: ubuntu-latest
