@@ -1,0 +1,16 @@
+# Add a line like this to your repo's .gitattributes for EACH generated sink.
+#
+# merge=binary makes git ALWAYS conflict cleanly on the sink when both sides changed it:
+# the path is left unmerged, "ours" kept verbatim — NO corrupt line-merge, NO conflict
+# markers (verified on git 2.54). sink-resolver's `resolve` then overwrites that unmerged
+# sink with a fresh regenerate from the already-merged sources.
+#
+# This is sound ONLY if the sink is a pure, deterministic render of its sources. If it
+# carries hand-authored content, regenerate silently clobbers it — see the README's loud
+# precondition. Do NOT mark a hand-edited file merge=binary.
+#
+# NOTE: merge=binary is INERT on a web-UI / server-side merge (git ignores user merge
+# drivers there). The CI `sink-resolver.py check` job is the backstop for that path.
+
+dist/manifest.json merge=binary
+docs/api/openapi.json merge=binary
