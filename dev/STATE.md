@@ -34,7 +34,9 @@ backlog item: commit a reusable `harvest-merge-guard.sh` so the discipline is a 
 
 ## Active Threads
 Forward map: [HARVEST-PLAN.md](HARVEST-PLAN.md) (waves 0–4 + later). Public module roadmap:
-[../roadmap.md](../roadmap.md). Finer-grained entries: [BACKLOG.md](BACKLOG.md). In brief:
+[../roadmap.md](../roadmap.md). Finer-grained entries: [BACKLOG.md](BACKLOG.md). **Before any
+HIPAAPath cleanup, check [HARVEST-SOURCE-MAP.md](HARVEST-SOURCE-MAP.md)** — what's left in
+HIPAAPath, exact paths, and whether each item is already safe. In brief:
 
 - harvest-wave-0 — **shipped 2026-06-25** — memory-cap self-wedge fix · plan-gate/AUTHORING.md ·
   suite-wide COMPLIANCE.md (the pilot that proved the verify-gate harness).
