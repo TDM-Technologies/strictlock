@@ -37,6 +37,8 @@ jobs:
         run: python sink-resolver/tests/test_sink_resolver.py
       - name: liveness-scan tests
         run: python liveness-scan/tests/test_liveness_scan.py
+      - name: test-protection-guard tests
+        run: python test-protection-guard/tests/test_test_protection_guard.py
 
   node:
     name: eslint-plugin tests

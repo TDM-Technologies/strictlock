@@ -40,6 +40,11 @@ These are honest slots, not promises with dates. Each is marked:
 - **liveness-scan** — a read-only reporter that triages a fleet of agent worktrees
   (running / stalled / done-unmerged / ambiguous / idle) from a heartbeat-or-commit-mtime signal.
   Report-only, never reaps, exits 0 always. Completes the Concurrency family.
+- **test-protection-guard** — an advisory co-commit-coupling detector that flags the
+  "rewrite the failing test to match the buggy output" move (an existing assertion changed
+  alongside source, no `TEST-CORRECTNESS:` justification). Always allows, never blocks; the
+  teeth are the close-out log review. Dual-mode (Claude Code `PreToolUse` *or* git `pre-commit`).
+  The detective complement to the born-weak `eslint-plugin-strictlock`.
 - **compliance mapping** ([`COMPLIANCE.md`](COMPLIANCE.md)) — SOC 2 / ISO 42001 / ISO 9001; the
   paper's §6 expanded suite-wide, mapping each gate mechanism to the control it evidences.
 
