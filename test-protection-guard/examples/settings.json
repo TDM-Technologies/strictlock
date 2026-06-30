@@ -1,0 +1,25 @@
+{
+  "_comment": "Example Claude Code PreToolUse wiring for test-protection-guard (the agentic-harness door). Replace the absolute path. The guard is advisory: it always returns an 'allow' decision and surfaces a flag in permissionDecisionReason + stderr. Enable it and point its log somewhere stable via environment variables exported in the session that launches the agent, e.g. TEST_PROTECTION_GUARD=on and TEST_PROTECTION_GUARD_LOG_DIR=$HOME/.agent/logs.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /abs/path/to/test-protection-guard/test-protection-guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /abs/path/to/test-protection-guard/test-protection-guard.py"
+          }
+        ]
+      }
+    ]
+  }
+}

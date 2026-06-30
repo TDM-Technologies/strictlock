@@ -347,6 +347,31 @@ occurred — without the monitor itself ever being able to take a destructive or
 (controlled, observable operation of an AI system; human oversight of automated actors). A monitoring control,
 deliberately separated from any enforcement so the observer can never become an unreviewed actor.
 
+### M. Detection of test-evidence tampering in the change process → SOC 2 CC4 / CC8 / ISO 9001 §8.6
+
+**Mechanism** ([`test-protection-guard`](test-protection-guard/)). A test suite is only *evidence* if its
+assertions change when the spec changes — not when a correctly-failing assertion is quietly edited to match
+buggy output so a change can ship "green." `test-protection-guard` is an **advisory, detective** control
+(deliberately *not* fail-closed, unlike the other gates): on a commit that changes/removes an existing test
+assertion **and** edits non-test source in the same change, with no `TEST-CORRECTNESS:` justification, it
+records and surfaces the coupling. It never blocks — its teeth are the human review of its append-only log at
+close-out, the way a monitoring control's value is in the review, not in an alarm. It is the detective
+complement to the preventive [`eslint-plugin-strictlock`](eslint-plugin-strictlock/): born-weak tests and
+silently-rewritten tests are the two ways a test stops being evidence.
+
+**Evidence it emits.** A decision log (JSONL) of every coupled change — the test and source files, the
+changed-out assertion lines, whether a justification was given, and flagged-vs-justified — a trail of whether
+a verification control (the test) was modified in lockstep with the code it is supposed to check.
+
+**What an auditor can trace.** *That changes to test assertions accompanying code changes were surfaced and
+reviewable*, with unjustified couplings flagged for human judgment — i.e. the suite's verification evidence
+was monitored against silent weakening, even when the change was authored by an autonomous agent.
+
+**Maps to:** **SOC 2 CC4.1** (monitoring of controls — the effectiveness of the test suite as a control is
+itself observed) and **CC8** (change management — a change cannot silently redefine the test that authorizes
+it); **ISO 9001 §8.6** (release of outputs — verification evidence is preserved, not retrofitted). A
+detective control, by design advisory so a false positive never wedges legitimate work.
+
 ---
 
 ## Two things to notice
