@@ -79,11 +79,17 @@ casually, just don't migrate them.
 
 ---
 
-## OFF-MACHINE — not on this Mac; don't assume HIPAAPath holds these
+## OFF-MACHINE / STAGED — check the staging dir before assuming Windows-only
 - The `*-hipaapath` skills (`start-` / `close-` / `harvest-` / `cleanup-hipaapath`) —
-  source-of-truth is the Windows dev workstation, not this repo. Partial reconstruction
-  is possible from HIPAAPath `CLAUDE.md`.
-- Historical plan files + the runtime deny log — Windows-only (see `BACKLOG.md`
+  **CORRECTION 2026-07-05 (this section previously said Windows-only — that went stale
+  four days before it was written): they were imported off the Windows box on 2026-06-26
+  and are STAGED on this Mac at `/Users/tim/StrictLock-harvest-import/skills/`**, each with
+  BOTH `SKILL.md` and `learnings.md` (~58KB of scar-tissue notes). Deliberately outside
+  this public repo (they carry `D:\` paths + HIPAAPath-coupled internals — genericize on
+  the way in). Wave 4 / Wave 2 ritual items are therefore **faithful ports, not
+  reconstruction** — do NOT rebuild them from HIPAAPath `CLAUDE.md` (whose relevant
+  sections were deleted in the 2026-06-24 rewrite anyway).
+- Historical plan files + the runtime deny log — still Windows-only (see `BACKLOG.md`
   `plans-into-repo` / `false-positive-analysis`, both marked `pending import`).
 
 ---
