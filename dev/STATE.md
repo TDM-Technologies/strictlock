@@ -1,8 +1,8 @@
 # StrictLock — state (the shared blackboard)
 
 ## Meta
-- last_session: 2026-06-25
-- agent: Claude Code (Opus 4.8)
+- last_session: 2026-07-05 (blackboard refresh — brings Meta/Next-Action current with PR #7/#8, which shipped without updating this file)
+- agent: Claude Code (Fable 5)
 - git_ref: d17e1a9 (**PUSHED + MERGED to origin/main via PR #6, all CI green**) — **Wave 3 COMPLETE & LIVE on
   public main**: `sink-resolver` (binary-sink auto-resolver; 29 tests; 3 adversarial lenses → 1 blocking + 1
   structural gap fixed) AND `liveness-scan` (read-only fleet reporter; 31 tests; 2 lenses clean, 4
@@ -14,17 +14,18 @@
   .github/workflows/ci.yml, roadmap.md, dev/STATE.md, dev/BACKLOG.md
 
 ## Next Action
-**Wave 3 COMPLETE (concurrency family done).** Execution order from here: **Wave 4 (rituals/gates) → Wave 2
-(marquee IP, last).**
+**❄ PAUSED 2026-07-05 (Tim's portfolio ruling):** StrictLock is **link-only evidence** during the 13-week
+HIPAAPath distribution push (to Oct 1). No new waves until Tim unpauses. State below is current and ready.
 
-1. **PUSH — DONE (Tim's go-ahead, 2026-06-25).** Wave 3 was pushed as PR #6, CI-verified clean (9 jobs green),
-   then fast-forward-merged to `origin/main` (`d17e1a9`). `origin/main == local main`; the concurrency family
-   is live on the public repo. All harvest branches + the build worktree are cleaned up.
-2. **NEXT BUILD — Wave 4 (rituals + remaining gates):** session-ritual checklist templates · WP-interaction
-   analysis · pre-WP currency check · test-protection co-commit guard. Then Wave 2 (marquee IP, last).
-3. **(Done — noting for consistency)** `eslint-plugin-strictlock@0.1.0` is **PUBLISHED to npm** (verified
-   2026-06-25: `npm view` → `0.1.0` latest; personal acct `downsmullen`). The `eslint-plugin-publish` BACKLOG
-   item is DONE.
+1. **Wave 3 — DONE + LIVE** (PR #6, `d17e1a9`, 2026-06-25): scope-lease + sink-resolver + liveness-scan.
+2. **Wave 4 — 1 of 4 SHIPPED:** the **test-protection co-commit guard is DONE + MERGED** (PR #7, 43 tests,
+   2026-06-30; this file previously still called it "next build" — stale, corrected 2026-07-05). The
+   **harvest source map** also landed (PR #8, `dev/HARVEST-SOURCE-MAP.md`).
+3. **Wave 4 remainder (when unpaused) — the 3 prose items:** session-ritual checklists · WP-interaction
+   analysis · pre-WP currency check. **Faithful ports, not reconstruction:** sources are STAGED at
+   `/Users/tim/StrictLock-harvest-import/skills/` (all four `*-hipaapath` skills + ~58KB learnings, imported
+   2026-06-26 — see the corrected HARVEST-SOURCE-MAP §OFF-MACHINE/STAGED). Then Wave 2 (marquee IP, last).
+4. **(Done)** `eslint-plugin-strictlock@0.1.0` PUBLISHED to npm (2026-06-25, acct `downsmullen`).
 
 Run any build via the proven build → adversarial-verify → consistency workflow harness. **NOTE:** the
 `harvest-merge-guard.sh` referenced earlier was an ephemeral helper, not committed — this session applied the
