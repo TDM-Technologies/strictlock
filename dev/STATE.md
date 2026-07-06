@@ -3,13 +3,12 @@
 ## Meta
 - last_session: 2026-07-05 (blackboard refresh — brings Meta/Next-Action current with PR #7/#8, which shipped without updating this file)
 - agent: Claude Code (Fable 5)
-- git_ref: d17e1a9 (**PUSHED + MERGED to origin/main via PR #6, all CI green**) — **Wave 3 COMPLETE & LIVE on
-  public main**: `sink-resolver` (binary-sink auto-resolver; 29 tests; 3 adversarial lenses → 1 blocking + 1
-  structural gap fixed) AND `liveness-scan` (read-only fleet reporter; 31 tests; 2 lenses clean, 4
-  safe-direction polish items folded in) landed on top of the `scope-lease` flagship (a6054e8). Full suite
-  green: **185 tests / 9 Python modules**. README + COMPLIANCE (§K/§L) + CI + roadmap registered, then
-  **PUSHED + MERGED to origin/main via PR #6 (2026-06-25, CI green: 9 jobs incl python 3.8–3.12 + node + shell
-  + secret-scan). origin/main == local main; the concurrency family is LIVE on the public repo.**
+- git_ref: e4e94fd (**origin/main HEAD, all CI green**) — current public tip: the
+  `eslint-plugin-strictlock@0.1.1` author-metadata bump, sitting on top of PR #7 (`test-protection-guard`,
+  43 tests), PR #8 (harvest source map), and PR #9 (harvest-map staged-import fix). Full Python suite green:
+  **228 tests / 10 Python modules** (the Wave-3 185/9 + test-protection-guard's 43). Wave 3 (`scope-lease` +
+  `sink-resolver` + `liveness-scan`) shipped earlier via PR #6 (`d17e1a9`); README + COMPLIANCE (§K/§L) + CI +
+  roadmap all registered. origin/main == the public repo tip.
 - touched (this wave): sink-resolver/*, liveness-scan/*, README.md, COMPLIANCE.md (§K/§L),
   .github/workflows/ci.yml, roadmap.md, dev/STATE.md, dev/BACKLOG.md
 
@@ -25,7 +24,8 @@ HIPAAPath distribution push (to Oct 1). No new waves until Tim unpauses. State b
    analysis · pre-WP currency check. **Faithful ports, not reconstruction:** sources are STAGED at
    `/Users/tim/StrictLock-harvest-import/skills/` (all four `*-hipaapath` skills + ~58KB learnings, imported
    2026-06-26 — see the corrected HARVEST-SOURCE-MAP §OFF-MACHINE/STAGED). Then Wave 2 (marquee IP, last).
-4. **(Done)** `eslint-plugin-strictlock@0.1.0` PUBLISHED to npm (2026-06-25, acct `downsmullen`).
+4. **(Done)** `eslint-plugin-strictlock` PUBLISHED to npm — `0.1.0` (2026-06-25) + `0.1.1` (2026-07-05),
+   acct `downsmullen`: <https://www.npmjs.com/package/eslint-plugin-strictlock>.
 
 Run any build via the proven build → adversarial-verify → consistency workflow harness. **NOTE:** the
 `harvest-merge-guard.sh` referenced earlier was an ephemeral helper, not committed — this session applied the
@@ -47,8 +47,9 @@ HIPAAPath, exact paths, and whether each item is already safe. In brief:
   validation) + eslint-plugin-strictlock (the smoke-only-assertions rule as a standalone npm package). On
   main @ e436a72, pushed, registered in README/COMPLIANCE, CI wired (incl. a scoped node job). All came back
   verify-clean (zero blocking issues); landed by the guard.
-- eslint-plugin-publish — **pending (Tim's release call)** — eslint-plugin-strictlock@0.1.0 is built +
-  CI-tested in-repo but not yet on npm; `npm publish` needs an account/token and is outward-facing.
+- eslint-plugin-publish — **DONE — published to npm** — eslint-plugin-strictlock `0.1.0` (2026-06-25) +
+  `0.1.1` (2026-07-05) are live on npm (acct `downsmullen`):
+  <https://www.npmjs.com/package/eslint-plugin-strictlock>. Resolves the prior "pending (Tim's release call)".
 - harvest-harness — **DONE 2026-06-25** — the fail-closed merge guard is built AND now proven in use: it
   landed both Wave-1 modules (clean-main pre-flight, full-suite validation after each merge, rollback-on-fail,
   no push). No workflow agent ever touched the shared main checkout — builds happen only in isolated worktrees.

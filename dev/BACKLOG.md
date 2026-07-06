@@ -31,11 +31,12 @@ UTC-timestamp guard + required-body validation) · **`eslint-plugin-strictlock`*
 rule as a standalone npm package — the suite's first JS / Gates-family sibling). All verify-clean; landed by
 the fail-closed merge guard.
 
-### eslint-plugin-publish — *pending (maintainer release call)*
-`eslint-plugin-strictlock@0.1.0` is built, RuleTester-green, and CI-tested in-repo, but **not yet published
-to npm**. `npm publish` needs an npm account/token and is an outward-facing release step — left for the
-maintainer. (Genericization done: the HIPAAPath baseline.json was replaced by ESLint rule options —
-`baseline` / `marker` / `extraSmokeMatchers`, default strict.)
+### eslint-plugin-publish — *DONE — published to npm* (see [Done](#done))
+`eslint-plugin-strictlock` is **live on npm**:
+[`0.1.0`](https://www.npmjs.com/package/eslint-plugin-strictlock) (2026-06-25) and
+[`0.1.1`](https://www.npmjs.com/package/eslint-plugin-strictlock) (2026-07-05), acct `downsmullen`. Built,
+RuleTester-green, and CI-tested in-repo. (Genericization done: the HIPAAPath baseline.json was replaced by
+ESLint rule options — `baseline` / `marker` / `extraSmokeMatchers`, default strict.)
 
 ### Wave 3 — concurrency primitives — *COMPLETE + MERGED to origin/main 2026-06-25 (3 of 3; PR #6, CI green)* — see [## concurrency](#concurrency)
 **SHIPPED:** `scope-lease` (Option A git-ref CAS exclusive path-lock; 37 tests; 3 lenses clean) · `sink-resolver`
@@ -217,13 +218,12 @@ eliminates, spill risk).
 
 ## ci
 
-### OS test matrix + action refresh — *ready*
+### OS test matrix — *ready*
 CI (`.github/workflows/ci.yml`) runs ubuntu-only. Add `windows-latest` + `macos-latest` to the
 Python matrix so the suite's OS-agnostic claim is **proven**, not just reviewed (the memory-cap
-CRLF test then runs on a real Windows box). While in `ci.yml`, also bump `actions/checkout` and
-`actions/setup-python` to current majors — the runners now force them onto Node 24 and warn on
-every run (Node-20 deprecation, observed 2026-06-25). Low effort; land with/just before any
-OS-sensitive change.
+CRLF test then runs on a real Windows box). Low effort; land with/just before any OS-sensitive change.
+(Action refresh — the `actions/checkout` / `setup-python` / `setup-node` Node-20 deprecation — was done
+2026-07-05: bumped to `checkout@v7` / `setup-python@v6` / `setup-node@v6`.)
 
 ## harvest-harness
 
@@ -238,6 +238,10 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 ---
 
 ## Done
+- **2026-07-05** — **`eslint-plugin-strictlock` published to npm** — `0.1.0` (2026-06-25) then `0.1.1`
+  (2026-07-05), acct `downsmullen`: <https://www.npmjs.com/package/eslint-plugin-strictlock>. Closes the
+  `eslint-plugin-publish` item (the last open thread from Wave 1). The action refresh (`checkout@v7` /
+  `setup-python@v6` / `setup-node@v6`) landed alongside; the OS matrix stays open above.
 - **2026-06-25** — **Wave 3 COMPLETE + MERGED to origin/main** (`d17e1a9`, PR #6, all 9 CI jobs green).
   `sink-resolver` (binary-sink auto-resolver; 29 tests; 3 lenses → a proven `check`-data-loss blocking + a
   silent-clobber coverage gap, both fixed pre-land; coverage guard added as a core-safety upgrade) and
