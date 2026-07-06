@@ -1,9 +1,12 @@
 {
   "name": "eslint-plugin-strictlock",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "StrictLock's ESLint plugin: structural gates against false-safety-net tests (e.g. smoke-only assertions).",
   "license": "Apache-2.0",
-  "author": "TDM Technologies LLC",
+  "author": {
+    "name": "Tim Downs Mullen",
+    "url": "https://downsmullen.com"
+  },
   "type": "module",
   "main": "./index.mjs",
   "exports": {
