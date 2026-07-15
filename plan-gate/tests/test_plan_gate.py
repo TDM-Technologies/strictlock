@@ -405,6 +405,43 @@ class DecisionLogTests(unittest.TestCase):
         (row,) = self.rows()
         self.assertEqual(row["class"], "log_self_protect")
 
+    def test_self_protect_beats_dotdot_laundering(self):
+        # Adversarial-verify repro: plans dir always-writable (the documented
+        # usage), log dir a SIBLING — a `..`-laundered file_path OS-resolves
+        # into the log dir but evades a lexical-only prefix check.
+        laundered = str(self.plans) + os.sep + ".." + os.sep + "logs" + os.sep + "plan-gate-decisions.log"
+        p = self.gate(
+            {"tool_name": "Write", "tool_input": {"file_path": laundered}},
+            extra_env={"PLAN_GATE_ALWAYS_WRITABLE": str(self.plans)},
+        )
+        self.assertEqual(decision(p), "deny")
+        (row,) = self.rows()
+        self.assertEqual(row["class"], "log_self_protect")
+
+    def test_self_protect_beats_dotdot_under_always_writable_ancestor(self):
+        # Variant: always-writable is an ANCESTOR of the log dir; `..` path
+        # stays inside the grant yet lands on the log file.
+        root = self.logs.parent
+        laundered = str(root / "foo" / ".." / "logs" / "plan-gate-decisions.log")
+        p = self.gate(
+            {"tool_name": "Edit", "tool_input": {"file_path": laundered}},
+            extra_env={"PLAN_GATE_ALWAYS_WRITABLE": str(root)},
+        )
+        self.assertEqual(decision(p), "deny")
+        (row,) = self.rows()
+        self.assertEqual(row["class"], "log_self_protect")
+
+    def test_self_protect_beats_plan_enumerated_dotdot_path(self):
+        # Variant: the plan itself enumerates the identical `..`-laden string,
+        # so allowed_paths exact-match would allow it — self-protect must
+        # still fire first.
+        laundered = str(self.plans) + os.sep + ".." + os.sep + "logs" + os.sep + "plan-gate-decisions.log"
+        write_active_plan(self.plans, laundered)
+        p = self.gate({"tool_name": "Edit", "tool_input": {"file_path": laundered}})
+        self.assertEqual(decision(p), "deny")
+        (row,) = self.rows()
+        self.assertEqual(row["class"], "log_self_protect")
+
     # --- fail-open telemetry on a fail-closed gate ---
 
     def test_unwritable_log_dir_never_changes_decisions(self):
@@ -463,6 +500,49 @@ class DecisionLogTests(unittest.TestCase):
     def test_verify_missing_file_exits_2(self):
         v = self.verify()
         self.assertEqual(v.returncode, 2)
+
+    def test_oversized_target_cannot_break_the_chain(self):
+        # Adversarial-verify repro: a 70k-char file_path used to produce a row
+        # bigger than the writer's tail window -> next row anchored wrong ->
+        # false tamper alarm. Fields are capped now; the chain must verify.
+        huge = str(self.work / ("x" * 70000))
+        p = self.gate({"tool_name": "Edit", "tool_input": {"file_path": huge}})
+        self.assertEqual(decision(p), "deny")
+        self.gate({"tool_name": "Bash", "tool_input": {"command": "git status"}})
+        rows = self.rows()
+        self.assertEqual(len(rows), 2)
+        self.assertLessEqual(len(rows[0]["target"]), 2048)
+        self.assertEqual(rows[1]["prev"], rows[0]["h"])
+        v = self.verify()
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+
+    def test_lone_surrogate_still_writes_a_row(self):
+        # Adversarial-verify repro: a lone UTF-16 surrogate (via a \ud800
+        # escape in the stdin JSON) used to abort serialization and silently
+        # drop the row. The decision row must survive, sanitized.
+        p = self.gate({"tool_name": "Bash", "tool_input": {"command": "rm \ud800 evil"}})
+        self.assertEqual(decision(p), "deny")
+        (row,) = self.rows()
+        self.assertEqual(row["decision"], "deny")
+        self.assertIn("rm ", row["command"])
+        v = self.verify()
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+
+    def test_cr_damaged_line_reanchors_identically_on_both_sides(self):
+        # Adversarial-verify repro: writer used splitlines() (strips \r),
+        # verifier splits on \n (keeps \r) -> divergent re-anchor hashes after
+        # CRLF damage. Both sides now split on \n only.
+        import hashlib
+        self.gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.allowed)}})
+        with open(self.log_file, "ab") as fh:
+            fh.write(b"GARBAGE\r\n")
+        self.gate({"tool_name": "Bash", "tool_input": {"command": "git status"}})
+        rows = self.rows()
+        self.assertEqual(rows[-1]["prev"], hashlib.sha256(b"GARBAGE\r").hexdigest())
+        v = self.verify()
+        self.assertEqual(v.returncode, 2)  # damage reported...
+        self.assertIn("unparseable", v.stdout)
+        self.assertNotIn("prev-hash mismatch", v.stdout)  # ...no false alarm
 
 
 if __name__ == "__main__":

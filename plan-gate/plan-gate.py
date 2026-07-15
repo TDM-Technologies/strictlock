@@ -276,10 +276,15 @@ def _read_prev_hash(fh) -> str:
         size = fh.tell()
         if size == 0:
             return _GENESIS
-        back = min(size, 65536)
+        # Row fields are length-capped in _log_decision so a serialized row is
+        # always far smaller than this window — the last line is guaranteed to
+        # be complete. Split on b"\n" ONLY (never splitlines): the verifier
+        # splits the same way, so a damaged line ending in \r or an exotic
+        # break byte hashes identically on both sides.
+        back = min(size, 262144)
         fh.seek(size - back)
         chunk = fh.read(back)
-        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        lines = [ln for ln in chunk.split(b"\n") if ln.strip()]
         if not lines:
             return _GENESIS
         last = lines[-1]
@@ -293,6 +298,20 @@ def _read_prev_hash(fh) -> str:
         return hashlib.sha256(last).hexdigest()
     except Exception:
         return _GENESIS
+
+
+def _safe_str(v, cap: int) -> str:
+    """Length-cap + strip un-encodable code points (lone surrogates arriving
+    via \\uXXXX escapes in the stdin JSON) so a row ALWAYS serializes — the
+    record must never lose a decision to its own input. Every string field
+    goes through this: the caps also bound total row size (worst case well
+    under 32KiB) so a row can never outgrow _read_prev_hash's tail window.
+    """
+    s = str(v)[:cap]
+    try:
+        return s.encode("utf-8", "replace").decode("utf-8")
+    except Exception:
+        return s.encode("ascii", "replace").decode("ascii")
 
 
 def _log_decision(
@@ -327,24 +346,24 @@ def _log_decision(
         command = ""
         extra: dict = {}
         if surface == "file":
-            target = str(tin.get("file_path") or tin.get("notebook_path") or "")
+            target = _safe_str(tin.get("file_path") or tin.get("notebook_path") or "", 2048)
         elif surface in ("bash", "ps"):
-            command = str(tin.get("command") or "")[:500]
+            command = _safe_str(tin.get("command") or "", 500)
         elif surface == "mcp":
             summary_fields = ("title", "parentId", "fileId", "mimeType", "newTitle")
             try:
                 for key in summary_fields:
                     if key in tin:
                         val = tin.get(key)
-                        extra[key] = str(val)[:80] if val is not None else None
-                extra["_keys"] = sorted(list(tin.keys()))[:20]
+                        extra[key] = _safe_str(val, 80) if val is not None else None
+                extra["_keys"] = sorted(_safe_str(k, 64) for k in tin.keys())[:20]
             except Exception:
                 extra = {"_keys_error": True}
         elif surface == "gate":
             # Gate-level rows (emergency bypass): best-effort context from
             # whatever payload shape was captured.
-            target = str(tin.get("file_path") or tin.get("notebook_path") or "")
-            command = str(tin.get("command") or "")[:500]
+            target = _safe_str(tin.get("file_path") or tin.get("notebook_path") or "", 2048)
+            command = _safe_str(tin.get("command") or "", 500)
         try:
             cwd_str = str(Path(os.getcwd()))
         except OSError:
@@ -353,13 +372,13 @@ def _log_decision(
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "decision": decision,
             "surface": surface,
-            "tool": tool,
+            "tool": _safe_str(tool, 200),
             "target": target,
             "command": command,
-            "class": class_,
-            "reason": reason[:300],
-            "plan": plan or "",
-            "cwd": cwd_str,
+            "class": _safe_str(class_, 100),
+            "reason": _safe_str(reason, 300),
+            "plan": _safe_str(plan or "", 300),
+            "cwd": _safe_str(cwd_str, 1024),
         }
         if extra:
             row["extra"] = extra
@@ -1010,13 +1029,26 @@ def main() -> None:
         target_n = norm(str(target))
         # Log self-protection — runs BEFORE the always-writable bypass and
         # before allowed_paths matching, so neither can shadow it: the gate
-        # never authorizes a gated write to its own decision log.
-        if LOGS_DIR is not None and _under_any(target_n, [LOGS_DIR]):
-            gated_deny(
-                f"plan-gate: {target} is under PLAN_GATE_LOG_DIR; the gate "
-                f"never authorizes gated writes to its own decision log.",
-                class_="log_self_protect",
-            )
+        # never authorizes a gated write to its own decision log. Checked in
+        # BOTH the raw and the fully RESOLVED forms (realpath on target and
+        # log dir): a `..`-laundered or symlinked target that the OS would
+        # open inside the log dir cannot slip a lexical-only comparison.
+        if LOGS_DIR is not None:
+            log_dirs = [LOGS_DIR]
+            try:
+                log_dirs.append(Path(os.path.realpath(str(LOGS_DIR))))
+            except (OSError, ValueError):
+                pass
+            try:
+                target_resolved_n = norm(os.path.realpath(str(target)))
+            except (OSError, ValueError):
+                target_resolved_n = target_n
+            if _under_any(target_n, log_dirs) or _under_any(target_resolved_n, log_dirs):
+                gated_deny(
+                    f"plan-gate: {target} is under PLAN_GATE_LOG_DIR; the gate "
+                    f"never authorizes gated writes to its own decision log.",
+                    class_="log_self_protect",
+                )
         if _under_any(target_n, ALWAYS_WRITABLE_DIRS):
             gated_allow(
                 "plan-gate: target is under an always-writable directory.",

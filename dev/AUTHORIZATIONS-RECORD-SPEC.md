@@ -119,3 +119,29 @@ correctness; (c) fail-open + privacy. Fix, land as a PR, CI green. **Merge is th
 maintainer's** — this touches the flagship module and public paper claims (marquee tier, not
 auto-merge). Out of scope: log rotation; `allowed_mcp_tools` opt-in (v2 note in code stands);
 shell-level log-write detection.
+
+## Adversarial verify — ran 2026-07-15 (3 lenses; all findings fixed + regression-tested)
+
+The fan-out earned its keep: **2 blocking + 2 advisory**, each with a runnable repro, all
+fixed same-day (every repro now lives in the test suite):
+
+1. **BLOCKING — `..`-traversal defeated `log_self_protect`** (found independently by the
+   gate-semantics AND fail-open lenses). The check compared unresolved strings, so
+   `<plans>/../logs/plan-gate-decisions.log` slipped it and was ALLOWED via always-writable —
+   a gated agent could forge the chain. **Fix:** self-protect now checks the raw AND the
+   realpath-resolved forms of both target and log dir (also closes symlinked targets and the
+   plan-enumerated-`..` variant, since self-protect precedes `allowed_paths`). 3 tests.
+2. **BLOCKING — unbounded `target` field**: a >64KiB file_path made a row bigger than the
+   writer's tail window → next row anchored wrong → verify-log reported tampering on an
+   untampered log. **Fix:** every row field is length-capped via `_safe_str` (target 2048,
+   cwd 1024, command 500, reason 300, tool 200, plan 300, extra values 80/keys 64×20 —
+   worst-case serialized row ≪ 32KiB) and the tail window widened to 256KiB.
+3. **Advisory — lone UTF-16 surrogates** (via `\uXXXX` stdin escapes) aborted serialization
+   and silently dropped the row. **Fix:** `_safe_str` strips un-encodable code points; the
+   row always writes.
+4. **Advisory — CR re-anchor parity**: writer split lines with `splitlines()` (strips `\r`),
+   verifier with `\n` — divergent damage hashes → false mismatch after CRLF damage. **Fix:**
+   both sides split on `\n` only.
+
+Gate-semantics lens additionally confirmed: across ~55 differential inputs vs `main`, the
+only decision change is the intended `log_self_protect` deny.
