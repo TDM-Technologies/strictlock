@@ -432,7 +432,12 @@ def verify_log(path_arg: str | None) -> int:
         row_without_h = {k: v for k, v in row.items() if k != "h"}
         if _canonical_row_hash(str(prev), row_without_h) != h:
             problems.append(f"line {i}: row hash invalid — row content was altered")
-        expected = h if isinstance(h, str) else hashlib.sha256(raw).hexdigest()
+        # Mirror the writer's anchor rule exactly: a 64-char string `h` anchors
+        # the chain; anything else re-anchors at the raw bytes.
+        if isinstance(h, str) and len(h) == 64:
+            expected = h
+        else:
+            expected = hashlib.sha256(raw).hexdigest()
     if problems:
         print(f"verify-log: {p}: {len(problems)} problem(s) across {rows} row(s):")
         for msg in problems[:50]:
