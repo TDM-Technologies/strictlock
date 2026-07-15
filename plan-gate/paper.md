@@ -268,10 +268,11 @@ over the broad, convenient one is the discipline the whole system is about.
 
 ### Compliance falls out of the failure handling
 
-Note what the mitigations produce as a side effect: every denied action is appended to a
-structured log; every gate decision (allow and deny) is recorded with timestamp, target, and the
-governing plan. Nobody wrote an "audit logging feature" — the audit trail is the *exhaust* of the
-gate doing its job. That exhaust is exactly what SOC 2 system-monitoring and change-management
+Note what the mitigations produce as a side effect: every decision the gate makes on a gated
+surface — allow and deny alike — is appended to a hash-chained, append-only log with timestamp,
+target, command, decision class, and the governing plan; a bundled verifier re-proves the chain,
+and the gate refuses to authorize gated writes to its own log. Nobody wrote an "audit logging
+feature" — the audit trail is the *exhaust* of the gate doing its job. That exhaust is exactly what SOC 2 system-monitoring and change-management
 criteria ask you to evidence (see §6). The failure-handling machinery and the compliance
 machinery are the same machinery.
 
@@ -287,7 +288,7 @@ internal compliance-framework backlog, maintained separately.)
 | Gate mechanism | Evidence it emits (as a byproduct) | Maps to |
 |---|---|---|
 | **Allowlist-scoped, exact-path authorization** — an agent may touch only the specific files and run only the specific commands an approved plan enumerates; least privilege by construction. | Per-plan record of exactly what each agent was permitted to access, scoped per unit of work and then retired. | **SOC 2 CC6** (logical access / least privilege); **ISO/IEC 42001** (controlled operation of the AI system) |
-| **Append-only decision log** — every gate decision, *allow and deny*, recorded with timestamp, target, command, and the governing plan. | A continuous, tamper-evident monitoring trail of system activity and policy-violation attempts. | **SOC 2 CC7** (system monitoring / security logging); **ISO/IEC 42001** (AI system logging & monitoring) |
+| **Append-only, hash-chained decision log** — every decision the gate makes on a gated surface, *allow and deny*, recorded with timestamp, target, command, decision class, and the governing plan; the gate never authorizes a gated write to its own log. | A continuous monitoring trail of authorized activity and policy-violation attempts whose integrity is *verifiable*: rows are hash-chained, so edits and deletions within the record are detectable by re-running the bundled verifier. (Scope honesty: integrity-without-secret — a host-level adversary can still truncate the tail or re-forge the file wholesale; anchor the latest row hash externally where that threat matters.) | **SOC 2 CC7** (system monitoring / security logging); **ISO/IEC 42001** (AI system logging & monitoring) |
 | **PLAN → CONFIRM → EXECUTE + staging review** — no change reaches the working system without an explicit, recorded human approval of a specific plan. | Documented approve→act→record cycle for every change; an auditor can trace any modification back to the approval that authorized it. | **SOC 2 CC8** (change management); **ISO 9001 §8.5** (controlled production / service provision) |
 | **The approved plan as a documented artifact** — each unit of work is a versioned, inspectable plan stating scope, paths, and commands. | Versioned, retained documentation of intended work and its authorization. | **ISO 9001 §7.5** (documented information) |
 | **Hard-stop protocol + human-in-the-loop reviewer** — unexpected behavior halts for review; a human is the sole authorizing authority. | Demonstrated human oversight and a defined escalation path for anomalous AI behavior. | **ISO/IEC 42001** (human oversight of AI); **ISO 9001 §10.2** (nonconformity & corrective action) |

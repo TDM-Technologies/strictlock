@@ -85,27 +85,32 @@ of silent wildcard access is itself observable.
 ### B. Append-only decision log → SOC 2 CC7 (system monitoring / security logging)
 
 **Mechanism** ([`plan-gate`](plan-gate/)). When a decision-log directory is configured
-(`PLAN_GATE_LOG_DIR`), the gate appends every denial — and the design intent is the full
-allow/deny record — with timestamp, target, command, and the governing plan. The log is
-the *exhaust* of the gate doing its job; no separate logging feature was built. Durability
-of that record across stateless sessions is what [`externalized-memory`](externalized-memory/)
-provides for the surrounding state (see row E): decisions stop being ephemeral chat and
-become an on-disk trace.
+(`PLAN_GATE_LOG_DIR`), the gate appends every decision it makes on a gated surface — allow
+and deny alike — with timestamp, target, command, decision class, and the governing plan
+(`PLAN_GATE_LOG_DECISIONS=deny` opts down to denials plus emergency-bypass rows). Each row
+is hash-chained to the previous one and a bundled verifier (`plan-gate.py verify-log`)
+re-proves the chain; the gate refuses to authorize gated file-writes into its own log
+directory, no matter what a plan enumerates. The log is the *exhaust* of the gate doing its
+job; no separate logging feature was built. Durability of that record across stateless
+sessions is what [`externalized-memory`](externalized-memory/) provides for the surrounding
+state (see row E): decisions stop being ephemeral chat and become an on-disk trace.
 
-**Evidence it emits.** A continuous, append-only monitoring trail of system activity and
-policy-violation *attempts* — every time the agent tried to step outside its envelope and
-was stopped.
+**Evidence it emits.** A continuous, append-only monitoring trail of authorized activity and
+policy-violation *attempts* — every time the envelope let an action through, and every time
+the agent tried to step outside it and was stopped. Because allows are recorded too, a quiet
+log is distinguishable from a disabled control: the trail is positive evidence the gate was
+in the loop for every gated action, which is what operating-effectiveness testing asks for.
 
 **What an auditor can trace.** A timeline of authorized and attempted-unauthorized actions:
 *what was attempted, when, against what target, under which plan, and whether it was allowed
-or denied.* Denied actions are first-class evidence — they show the control engaging, not
-just nothing-bad-happened.
+or denied* — plus, via the hash chain, whether the record itself has been altered since it
+was written.
 
-> **Honest scope.** The shipped gate appends *denials* by default; capturing the full
-> allow-and-deny stream, and protecting the log against tampering (append-only storage,
-> off-host shipping, integrity sealing), are deployment responsibilities the module does
-> not perform for you. The mechanism produces the trail; making it tamper-*evident* in your
-> environment is your control to operate.
+> **Honest scope.** The chain makes edits and deletions *within* the record detectable; it is
+> integrity-without-secret, not armor. A host-level adversary can still truncate the tail or
+> re-forge the file wholesale — off-host shipping or externally anchoring the latest row hash
+> is a deployment control where that threat matters. And decisions made while the gate is
+> disabled (`PLAN_GATE` off) are, by definition, not witnessed.
 
 ### C. PLAN → CONFIRM → EXECUTE + staging review → SOC 2 CC8 / ISO 9001 §8.5
 
