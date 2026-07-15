@@ -1,6 +1,6 @@
 # Authorizations record — unified plan-gate decision log (spec)
 
-**Status:** ruled + spec'd 2026-07-15 (maintainer's calls recorded below) · build pending
+**Status:** ✅ SHIPPED 2026-07-15 — built, adversarially verified (2 blocking + 2 advisory findings, all fixed; postmortem below), merged to main via PR #11 (`554a3ce`, CI 8/8 green)
 **Owner module:** `plan-gate/`
 **Why:** `paper.md` §5–§6 publicly claim an append-only, tamper-evident log of *every* gate
 decision (allow and deny). The shipped code logs denials on every surface but allows only for
