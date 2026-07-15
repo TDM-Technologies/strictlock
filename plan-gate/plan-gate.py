@@ -28,7 +28,11 @@ CONFIGURATION (all via environment; no machine-specific defaults are baked in)
                             that are always writable regardless of plan state
                             (e.g. the plans dir itself, an agent-memory dir that
                             never ships). Same blast radius as plan files.
-  PLAN_GATE_LOG_DIR         optional directory for the append-only decision log.
+  PLAN_GATE_LOG_DIR         optional directory for the append-only, hash-chained
+                            decision log (plan-gate-decisions.log).
+  PLAN_GATE_LOG_DECISIONS   "all" (default) records every decision on a gated
+                            surface, allow and deny; "deny" records denials plus
+                            emergency-bypass rows only (volume opt-down).
   PLAN_GATE_MCP_WRITE_TOOLS optional comma-separated list of MCP tool names that
                             modify external state (e.g. a cloud-drive create/copy
                             tool). Default-denied when set; see the MCP section.
@@ -48,8 +52,11 @@ RULES
     the active-plan check (so a session with no active plan can still inspect
     state with `git log`, `pwd`, `Get-ChildItem`, etc.). Plan-scoped checks run
     AFTER the active-plan check.
-  - Every deny appends a JSONL row to the decision log. Best-effort; a logging
-    failure NEVER blocks the gate.
+  - Every decision on a gated surface (allow AND deny) appends a hash-chained
+    JSONL row to the decision log; `plan-gate.py verify-log [path]` checks the
+    chain. Best-effort; a logging failure NEVER changes a decision. The gate
+    never authorizes a gated file-write into PLAN_GATE_LOG_DIR itself (log
+    self-protection) — no plan entry or always-writable dir can override that.
 
 PATH RESOLUTION
   - allowed_paths may be absolute OR repo-root-relative.
@@ -67,6 +74,7 @@ PATH RESOLUTION
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -101,9 +109,16 @@ ALWAYS_WRITABLE_DIRS: list[Path] = [
 ]
 
 LOGS_DIR = _env_path("PLAN_GATE_LOG_DIR")
-DENY_LOG = (LOGS_DIR / "plan-gate-denies.log") if LOGS_DIR else None
-PS_CALLS_LOG = (LOGS_DIR / "powershell-calls.log") if LOGS_DIR else None
-MCP_FILE_WRITE_CALLS_LOG = (LOGS_DIR / "mcp-file-write-calls.log") if LOGS_DIR else None
+DECISIONS_LOG = (LOGS_DIR / "plan-gate-decisions.log") if LOGS_DIR else None
+
+# "all" (default): every decision on a gated surface is recorded, allow and
+# deny. "deny": denials + emergency-bypass rows only (volume opt-down).
+LOG_DECISIONS_MODE = (
+    os.environ.get("PLAN_GATE_LOG_DECISIONS", "").strip().lower() or "all"
+)
+
+# prev-hash of the first row in a fresh log.
+_GENESIS = "0" * 64
 
 # Commands that are always safe — investigation and navigation.
 # `git config` is intentionally only allowed in `--get` form because the 2-arg
@@ -196,126 +211,235 @@ def deny(reason: str) -> None:
     _emit("deny", reason)
 
 
-def _log_deny(tool: str, tool_input: dict, reason: str, plan: str | None) -> None:
-    """Append a JSONL row to the decision log. Best-effort; never raises.
+def _canonical_row_hash(prev: str, row_without_h: dict) -> str:
+    """sha256 over prev + newline + the canonical JSON of the row (minus `h`).
 
-    Lets a retro step surface deny patterns so a recurring block can be promoted
-    into READ_ONLY_BASH_PREFIXES or a plan template. This append-only trail is
-    also the SOC 2 CC7 / ISO 42001 monitoring evidence — produced as a byproduct
-    of the gate doing its job, not as a separate audit feature.
+    Canonical form = sort_keys + compact separators + ensure_ascii=False — the
+    exact serialization the writer emits, so a verifier can recompute the hash
+    from the parsed row with byte parity. All row values are strings (or dicts
+    of strings), so JSON round-tripping is exact.
     """
-    if DENY_LOG is None:
+    canon = json.dumps(
+        row_without_h, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256((prev + "\n" + canon).encode("utf-8")).hexdigest()
+
+
+class _Flock:
+    """Best-effort exclusive advisory lock so concurrent sessions can share one
+    log: POSIX fcntl.flock, msvcrt.locking on Windows, silent no-op elsewhere.
+    Lock failure never blocks — worst case is a detectable chain fork, which
+    verify-log surfaces; a wedged gate would be worse.
+    """
+
+    def __init__(self, fh):
+        self._fh = fh
+        self._impl = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+            self._impl = "fcntl"
+        except Exception:
+            try:
+                import msvcrt
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+                self._impl = "msvcrt"
+            except Exception:
+                self._impl = None
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self._impl == "fcntl":
+                import fcntl
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            elif self._impl == "msvcrt":
+                import msvcrt
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
+        return False
+
+
+def _read_prev_hash(fh) -> str:
+    """prev for the next row, from an open binary handle: `h` of the last row,
+    or — if the last line is unparseable (partial write, external damage) —
+    sha256 of its raw bytes, so the chain continues verifiably past the damage
+    and verify-log can pinpoint the damaged line.
+    """
+    try:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        if size == 0:
+            return _GENESIS
+        back = min(size, 65536)
+        fh.seek(size - back)
+        chunk = fh.read(back)
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        if not lines:
+            return _GENESIS
+        last = lines[-1]
+        try:
+            row = json.loads(last.decode("utf-8"))
+            h = row.get("h") if isinstance(row, dict) else None
+            if isinstance(h, str) and len(h) == 64:
+                return h
+        except Exception:
+            pass
+        return hashlib.sha256(last).hexdigest()
+    except Exception:
+        return _GENESIS
+
+
+def _log_decision(
+    decision: str,
+    surface: str,
+    class_: str,
+    tool: str,
+    tool_input: dict | None,
+    reason: str,
+    plan: str | None,
+) -> None:
+    """Append one hash-chained JSONL row to the unified decisions log.
+
+    Best-effort; never raises — telemetry is fail-open on a fail-closed gate: a
+    logging failure must never change a decision. This trail is the SOC 2 CC7 /
+    ISO 42001 monitoring evidence, produced as exhaust of the gate doing its
+    job. Privacy invariant: paths, truncated commands, and short field prefixes
+    only — file contents and full payloads are NEVER logged.
+    """
+    if DECISIONS_LOG is None:
+        return
+    if (
+        decision == "allow"
+        and LOG_DECISIONS_MODE == "deny"
+        and class_ != "emergency_bypass"
+    ):
         return
     try:
         LOGS_DIR.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+        tin = tool_input or {}
         target = ""
         command = ""
-        if tool in ("Edit", "Write", "NotebookEdit"):
-            target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
-        elif tool in ("Bash", "PowerShell"):
-            command = str(tool_input.get("command") or "")[:500]
+        extra: dict = {}
+        if surface == "file":
+            target = str(tin.get("file_path") or tin.get("notebook_path") or "")
+        elif surface in ("bash", "ps"):
+            command = str(tin.get("command") or "")[:500]
+        elif surface == "mcp":
+            summary_fields = ("title", "parentId", "fileId", "mimeType", "newTitle")
+            try:
+                for key in summary_fields:
+                    if key in tin:
+                        val = tin.get(key)
+                        extra[key] = str(val)[:80] if val is not None else None
+                extra["_keys"] = sorted(list(tin.keys()))[:20]
+            except Exception:
+                extra = {"_keys_error": True}
+        elif surface == "gate":
+            # Gate-level rows (emergency bypass): best-effort context from
+            # whatever payload shape was captured.
+            target = str(tin.get("file_path") or tin.get("notebook_path") or "")
+            command = str(tin.get("command") or "")[:500]
         try:
             cwd_str = str(Path(os.getcwd()))
         except OSError:
             cwd_str = ""
-        row = {
+        row: dict = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "decision": decision,
+            "surface": surface,
             "tool": tool,
-            "command": command,
             "target": target,
-            "reason": reason,
+            "command": command,
+            "class": class_,
+            "reason": reason[:300],
             "plan": plan or "",
             "cwd": cwd_str,
         }
-        with open(DENY_LOG, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row) + "\n")
+        if extra:
+            row["extra"] = extra
+        with open(DECISIONS_LOG, "a+b") as fh:
+            with _Flock(fh):
+                row["prev"] = _read_prev_hash(fh)
+                row["h"] = _canonical_row_hash(row["prev"], row)
+                fh.seek(0, os.SEEK_END)
+                fh.write(
+                    (
+                        json.dumps(
+                            row,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
+                fh.flush()
     except Exception:
         pass  # Never let logging failure break the gate.
 
 
-def _log_mcp_file_write_call(
-    decision: str,
-    bypass_class: str,
-    tool_name: str,
-    tool_input: dict,
-    reason: str,
-    plan: str | None,
-) -> None:
-    """Per-MCP-write-call telemetry. Best-effort; a log failure never blocks.
-
-    Logs every gated MCP write tool call (allow OR deny) so a retro can decide
-    whether the default-deny stance needs an opt-in surface. The summary records
-    only which fields a call carried plus a short prefix of any text content —
-    full payloads (especially file contents) are NOT logged.
+def verify_log(path_arg: str | None) -> int:
+    """Walk a decisions log and verify the hash chain. Exit 0 = intact; exit 2
+    = damage or tampering detected (report names the first bad lines). Mirrors
+    the writer's chaining rules: a parseable row anchors the chain at its `h`;
+    an unparseable line re-anchors at sha256 of its raw bytes; blank lines are
+    never written by the gate and are flagged without moving the anchor.
     """
-    if MCP_FILE_WRITE_CALLS_LOG is None:
-        return
-    try:
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+    p = Path(path_arg) if path_arg else DECISIONS_LOG
+    if p is None:
+        print(
+            "verify-log: no path given and PLAN_GATE_LOG_DIR is unset.",
+            file=sys.stderr,
+        )
+        return 2
+    if not p.exists():
+        print(f"verify-log: {p} does not exist.", file=sys.stderr)
+        return 2
+    raw_lines = p.read_bytes().split(b"\n")
+    if raw_lines and raw_lines[-1] == b"":
+        raw_lines.pop()  # trailing newline
+    expected = _GENESIS
+    problems: list[str] = []
+    rows = 0
+    for i, raw in enumerate(raw_lines, start=1):
+        if not raw.strip():
+            problems.append(f"line {i}: blank line (never written by the gate)")
+            continue
         try:
-            cwd_str = str(Path(os.getcwd()))
-        except OSError:
-            cwd_str = ""
-        summary_fields = ("title", "parentId", "fileId", "mimeType", "newTitle")
-        summary: dict = {}
-        try:
-            for key in summary_fields:
-                if key in tool_input:
-                    val = tool_input.get(key)
-                    summary[key] = str(val)[:80] if val is not None else None
-            summary["_keys"] = sorted(list(tool_input.keys()))[:20]
+            row = json.loads(raw.decode("utf-8"))
+            if not isinstance(row, dict):
+                raise ValueError("not an object")
         except Exception:
-            summary = {"_keys_error": True}
-        row = {
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "decision": decision,
-            "bypass_class": bypass_class,
-            "tool": tool_name,
-            "tool_input_summary": summary,
-            "reason": reason[:300],
-            "plan": plan or "",
-            "cwd": cwd_str,
-        }
-        with open(MCP_FILE_WRITE_CALLS_LOG, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except Exception:
-        pass  # never block on logging failure
-
-
-def _log_ps_call(
-    decision: str,
-    bypass_class: str,
-    cmd: str,
-    reason: str,
-    plan: str | None,
-) -> None:
-    """Per-PowerShell-call telemetry. Best-effort; a log failure never blocks.
-
-    Gives a retro hard data on PS usage so the no-compound-parser decision can
-    be revisited empirically. bypass_class is one of: read_only, allowed_command,
-    denied, empty_command, matcher_no_active.
-    """
-    if PS_CALLS_LOG is None:
-        return
-    try:
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
-        try:
-            cwd_str = str(Path(os.getcwd()))
-        except OSError:
-            cwd_str = ""
-        row = {
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "decision": decision,
-            "bypass_class": bypass_class,
-            "command_prefix": cmd[:200],
-            "reason": reason[:300],
-            "plan": plan or "",
-            "cwd": cwd_str,
-        }
-        with open(PS_CALLS_LOG, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except Exception:
-        pass  # never block on logging failure
+            problems.append(
+                f"line {i}: unparseable — damage detected; chain re-anchors after it"
+            )
+            expected = hashlib.sha256(raw).hexdigest()
+            continue
+        rows += 1
+        prev = row.get("prev")
+        h = row.get("h")
+        if prev != expected:
+            problems.append(
+                f"line {i}: prev-hash mismatch (expected {expected[:12]}…, "
+                f"found {str(prev)[:12]}…) — a row was altered, inserted, or removed"
+            )
+        row_without_h = {k: v for k, v in row.items() if k != "h"}
+        if _canonical_row_hash(str(prev), row_without_h) != h:
+            problems.append(f"line {i}: row hash invalid — row content was altered")
+        expected = h if isinstance(h, str) else hashlib.sha256(raw).hexdigest()
+    if problems:
+        print(f"verify-log: {p}: {len(problems)} problem(s) across {rows} row(s):")
+        for msg in problems[:50]:
+            print("  " + msg)
+        return 2
+    print(f"verify-log: {p}: chain intact — {rows} row(s) verified.")
+    return 0
 
 
 def norm(p: str) -> str:
@@ -811,8 +935,23 @@ def main() -> None:
     if gate_env != "on":
         allow("plan-gate: PLAN_GATE != 'on' — gate disabled.")
 
-    # Emergency bypass.
+    # Emergency bypass. Logged (class=emergency_bypass) even in the deny-only
+    # log mode — bypass usage is exception-class audit evidence. The payload
+    # parse here is best-effort context ONLY: any failure still allows (the
+    # bypass must never wedge), and an interactive TTY stdin is not consumed.
     if os.environ.get("PLAN_GATE_BYPASS", "").strip().lower() == "on":
+        b_tool, b_input = "", {}
+        try:
+            if sys.stdin is not None and not sys.stdin.isatty():
+                b_payload = json.load(sys.stdin)
+                b_tool = b_payload.get("tool_name", "") or ""
+                b_input = b_payload.get("tool_input") or {}
+        except Exception:
+            pass
+        _log_decision(
+            "allow", "gate", "emergency_bypass", b_tool, b_input,
+            "plan-gate: PLAN_GATE_BYPASS=on — emergency bypass.", None,
+        )
         allow("plan-gate: PLAN_GATE_BYPASS=on — emergency bypass.")
 
     try:
@@ -825,10 +964,27 @@ def main() -> None:
     tool_input = payload.get("tool_input") or {}
     plan_name: str | None = None
 
-    def gated_deny(reason: str) -> None:
-        """deny() + JSONL deny-log row. Plan name is set after active-plan check."""
-        _log_deny(tool, tool_input, reason, plan_name)
+    def _surface() -> str:
+        if tool in ("Edit", "Write", "NotebookEdit"):
+            return "file"
+        if tool == "Bash":
+            return "bash"
+        if tool == "PowerShell":
+            return "ps"
+        if tool in MCP_FILE_WRITE_TOOLS:
+            return "mcp"
+        return "gate"
+
+    def gated_deny(reason: str, class_: str = "denied") -> None:
+        """deny() + a unified-log row. Plan name is set after the active-plan
+        check; denies before it record plan=""."""
+        _log_decision("deny", _surface(), class_, tool, tool_input, reason, plan_name)
         deny(reason)
+
+    def gated_allow(reason: str, class_: str) -> None:
+        """allow() + a unified-log row (subject to PLAN_GATE_LOG_DECISIONS)."""
+        _log_decision("allow", _surface(), class_, tool, tool_input, reason, plan_name)
+        allow(reason)
 
     if tool not in ("Edit", "Write", "NotebookEdit", "Bash", "PowerShell") + MCP_FILE_WRITE_TOOLS:
         allow(f"plan-gate: tool {tool!r} is outside the gated set.")
@@ -842,36 +998,64 @@ def main() -> None:
     if tool in ("Edit", "Write", "NotebookEdit"):
         target = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         if not target:
-            gated_deny(f"plan-gate: no file_path in tool_input for {tool}.")
+            gated_deny(
+                f"plan-gate: no file_path in tool_input for {tool}.",
+                class_="empty_input",
+            )
         target_n = norm(str(target))
+        # Log self-protection — runs BEFORE the always-writable bypass and
+        # before allowed_paths matching, so neither can shadow it: the gate
+        # never authorizes a gated write to its own decision log.
+        if LOGS_DIR is not None and _under_any(target_n, [LOGS_DIR]):
+            gated_deny(
+                f"plan-gate: {target} is under PLAN_GATE_LOG_DIR; the gate "
+                f"never authorizes gated writes to its own decision log.",
+                class_="log_self_protect",
+            )
         if _under_any(target_n, ALWAYS_WRITABLE_DIRS):
-            allow("plan-gate: target is under an always-writable directory.")
+            gated_allow(
+                "plan-gate: target is under an always-writable directory.",
+                "always_writable",
+            )
 
     if tool == "Bash":
         cmd = (tool_input.get("command") or "").strip()
         if not cmd:
-            gated_deny("plan-gate: Bash tool_input has no 'command'.")
+            gated_deny(
+                "plan-gate: Bash tool_input has no 'command'.",
+                class_="empty_command",
+            )
         for prefix in READ_ONLY_BASH_PREFIXES:
             p = prefix.rstrip()
             if cmd == p or cmd.startswith(prefix):
-                allow(f"plan-gate: read-only bash bypass ({p!r}).")
+                gated_allow(
+                    f"plan-gate: read-only bash bypass ({p!r}).",
+                    "read_only_bypass",
+                )
         if _is_read_only_git_c(cmd):
-            allow("plan-gate: read-only bash bypass (git -C <path> <subcmd>).")
+            gated_allow(
+                "plan-gate: read-only bash bypass (git -C <path> <subcmd>).",
+                "read_only_bypass",
+            )
         # Bare `cd <path>` (no compound) is pure navigation. A compound
         # `cd <path> [&&|||;] <rest>` requires allowed_cmds; deferred below.
         if cmd.startswith("cd ") and not _has_compound_separator(cmd):
-            allow("plan-gate: bare cd (navigation).")
+            gated_allow("plan-gate: bare cd (navigation).", "navigation")
 
     if tool == "PowerShell":
         cmd = (tool_input.get("command") or "").strip()
         if not cmd:
-            _log_ps_call("deny", "empty_command", "", "no command", plan_name)
-            gated_deny("plan-gate: PowerShell tool_input has no 'command'.")
+            gated_deny(
+                "plan-gate: PowerShell tool_input has no 'command'.",
+                class_="empty_command",
+            )
         for prefix in READ_ONLY_PS_PREFIXES:
             p = prefix.rstrip()
             if cmd == p or cmd.startswith(prefix):
-                _log_ps_call("allow", "read_only", cmd, f"read-only PS bypass ({p!r})", plan_name)
-                allow(f"plan-gate: read-only PS bypass ({p!r}).")
+                gated_allow(
+                    f"plan-gate: read-only PS bypass ({p!r}).",
+                    "read_only_bypass",
+                )
         # No bare-cd / Set-Location bypass for PS: the quote-aware Bash splitter
         # does not model PS compound semantics. Any PS compound needs an explicit
         # allowed_commands entry.
@@ -880,11 +1064,10 @@ def main() -> None:
         # Distinguish "empty payload" from "non-empty, also denied" in telemetry.
         # No read-only equivalent: every external-state write is mutating.
         if not tool_input:
-            _log_mcp_file_write_call(
-                "deny", "empty_input", tool, tool_input,
-                "MCP file-write tool_input is empty.", plan_name,
+            gated_deny(
+                f"plan-gate: MCP tool {tool!r} has empty tool_input.",
+                class_="empty_input",
             )
-            gated_deny(f"plan-gate: MCP tool {tool!r} has empty tool_input.")
 
     # === Session-CWD-aware roots ===
     # Hoisted above the active-plan check so find_active_plans() can filter by
@@ -905,11 +1088,13 @@ def main() -> None:
                 "plan-gate: no plan file has `status: active` with allowed_paths "
                 f"under worktree {worktree_root} in the plans directory. Write one "
                 "(or add `worktree_bypass: true` for a cross-tree plan) and set "
-                "status: active."
+                "status: active.",
+                class_="no_active_plan",
             )
         gated_deny(
             "plan-gate: no plan file has `status: active` in the plans directory. "
-            "Write one and set status: active."
+            "Write one and set status: active.",
+            class_="no_active_plan",
         )
     if len(actives) > 1:
         name_parts: list[str] = []
@@ -930,7 +1115,8 @@ def main() -> None:
             )
         gated_deny(
             f"plan-gate: multiple active plans{scope_hint} ({names}).{bypass_hint} "
-            "Set all but one to `status: archived`."
+            "Set all but one to `status: archived`.",
+            class_="multiple_active_plans",
         )
 
     plan_path, fm = actives[0]
@@ -974,7 +1160,8 @@ def main() -> None:
                 f"plan-gate: session CWD {cwd} is under worktree {worktree_root}, "
                 f"but zero allowed_paths resolve under it (plan: {plan_path.name}). "
                 f"This matches the silent-drift pattern. Root allowed_paths at the "
-                f"worktree or use repo-root-relative paths."
+                f"worktree or use repo-root-relative paths.",
+                class_="silent_drift",
             )
 
     # === Disjoint paths check ===
@@ -985,13 +1172,16 @@ def main() -> None:
         global_actives = find_active_plans(worktree_root=None)
         ok, reason = validate_disjoint_paths(plan_path, resolved_paths, global_actives)
         if not ok:
-            gated_deny(reason)
+            gated_deny(reason, class_="disjoint_paths")
 
     if tool in ("Edit", "Write", "NotebookEdit"):
         # target / target_n already computed above (early-bypass block).
         for rp in resolved_paths:
             if norm(rp) == target_n:
-                allow(f"plan-gate: {target} matches allowed_paths entry {rp!r}.")
+                gated_allow(
+                    f"plan-gate: {target} matches allowed_paths entry {rp!r}.",
+                    "allowed_paths",
+                )
         gated_deny(
             f"plan-gate: {target} is NOT in allowed_paths of active plan "
             f"({plan_path.name}). Update the plan or stop."
@@ -1004,11 +1194,14 @@ def main() -> None:
         if cmd.startswith("cd ") and _has_compound_separator(cmd):
             ok, reason = _check_cd_compound(cmd, allowed_cmds)
             if ok:
-                allow(f"plan-gate: {reason}")
+                gated_allow(f"plan-gate: {reason}", "allowed_command")
             gated_deny(f"plan-gate: {reason}")
         for ac in allowed_cmds:
             if cmd.startswith(ac):
-                allow(f"plan-gate: matches allowed_command prefix {ac!r}.")
+                gated_allow(
+                    f"plan-gate: matches allowed_command prefix {ac!r}.",
+                    "allowed_command",
+                )
         gated_deny(
             f"plan-gate: Bash command not allowed by active plan "
             f"({plan_path.name}). Command: {cmd[:200]}"
@@ -1020,31 +1213,33 @@ def main() -> None:
         # branch.
         for ac in allowed_cmds:
             if cmd.startswith(ac):
-                _log_ps_call("allow", "allowed_command", cmd,
-                             f"matches allowed_command prefix {ac!r}", plan_name)
-                allow(f"plan-gate: matches allowed_command prefix {ac!r}.")
-        reason = (
+                gated_allow(
+                    f"plan-gate: matches allowed_command prefix {ac!r}.",
+                    "allowed_command",
+                )
+        gated_deny(
             f"plan-gate: PowerShell command not allowed by active plan "
             f"({plan_path.name}). Command: {cmd[:200]}"
         )
-        _log_ps_call("deny", "denied", cmd, reason, plan_name)
-        gated_deny(reason)
 
     if tool in MCP_FILE_WRITE_TOOLS:
         # Conservative default-DENY. No opt-in surface here; the premise is no
         # external-state writes during a gated unit of work. Telemetry falsifies
         # that premise — if legitimate usage appears, add an `allowed_mcp_tools`
         # opt-in surface (v2). The empty-input early-deny was applied above.
-        reason = (
+        gated_deny(
             f"plan-gate: MCP file-write tool {tool!r} is default-denied under "
             f"active plan ({plan_path.name}). Use a non-MCP write path or add an "
             f"opt-in surface."
         )
-        _log_mcp_file_write_call("deny", "denied", tool, tool_input, reason, plan_name)
-        gated_deny(reason)
 
 
 if __name__ == "__main__":
+    # Argv mode: `plan-gate.py verify-log [path]` checks the decision-log hash
+    # chain and exits 0 (intact) / 2 (damage or tampering). Hook mode (no args)
+    # reads tool-use JSON from stdin as usual.
+    if len(sys.argv) >= 2 and sys.argv[1] == "verify-log":
+        sys.exit(verify_log(sys.argv[2] if len(sys.argv) > 2 else None))
     try:
         main()
     except SystemExit:

@@ -19,7 +19,9 @@ Read the full argument in [`paper.md`](paper.md).
 - **Bash / PowerShell:** the command must *start with* an `allowed_commands` prefix, or be a
   known read-only command (`git status`, `ls`, `cat`, …) which is always permitted.
 - Emits `{"hookSpecificOutput": {"permissionDecision": "allow"|"deny", ...}}` on **stdout**.
-- Appends every denial to a decision log (when `PLAN_GATE_LOG_DIR` is set) — your audit trail.
+- Appends every decision, allow and deny, to a hash-chained decision log (when
+  `PLAN_GATE_LOG_DIR` is set) — your audit trail. `plan-gate.py verify-log` proves the
+  chain, and the gate never authorizes a gated write to the log itself.
 
 It **fails closed** for governance and **fails open for its own bugs**: an unhandled
 exception in the gate exits non-zero with a warning rather than wedging your agent.

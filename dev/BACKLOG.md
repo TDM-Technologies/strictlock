@@ -98,13 +98,14 @@ prefixes so a bare `git checkout` entry can't also authorize `git checkout -- .`
 close-out). A project-agnostic "plan-authoring" standard already exists privately and
 can be genericized into the repo (likely `plan-gate/AUTHORING.md`).
 
-### paper.md §6 ↔ shipped-log reconcile — *ready*
-`paper.md` §6 states the decision log records "every gate decision (allow *and* deny)" and is
-"tamper-evident". The shipped gate logs **denials by default** (`plan-gate-denies.log`); `CONFIG.md`
-and the new `COMPLIANCE.md` describe this accurately — so §6 is the lone overclaimer (surfaced by
-the Wave 0 verify-gate). Either reword §6 to match the shipped denials-by-default behavior, or build
-the opt-in allow/deny JSONL log to make "allow and deny" true (ties to the deferred memory-cap log
-and SOC 2 CC7). Docs-honesty item; do before §6 goes more public.
+### paper.md §6 ↔ shipped-log reconcile — *RESOLVED (built, 2026-07-15)*
+Ruled BUILD by the maintainer: shipped the **authorizations record** — one unified, hash-chained
+`plan-gate-decisions.log` (allow *and* deny, all gated surfaces, full-by-default with
+`PLAN_GATE_LOG_DECISIONS=deny` opt-down), a `verify-log` mode, and log-dir self-protection —
+replacing the three per-surface logs. §5/§6, `CONFIG.md`, `COMPLIANCE.md` §B, and the module
+README were reworded to exactly the shipped behavior, with honest tamper-evidence scope
+(integrity-without-secret; host-level adversary caveats stated, not implied away). Spec:
+[AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-RECORD-SPEC.md).
 
 ### reversibility-tiered authorization — *exploring* (harvest: later)
 Shift from pure prevention toward "prevent where reversibility runs out, account for
