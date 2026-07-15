@@ -16,6 +16,14 @@
 **❄ PAUSED 2026-07-05 (Tim's portfolio ruling):** StrictLock is **link-only evidence** during the 13-week
 HIPAAPath distribution push (to Oct 1). No new waves until Tim unpauses. State below is current and ready.
 
+**EXCEPTION (Tim, 2026-07-15) — the §6 paper reconcile is ruled BUILD, not reword:** ship the
+**authorizations record** — one unified, hash-chained `plan-gate-decisions.log` (allow+deny, all
+surfaces, full-by-default) + log-dir self-protection, replacing the three per-surface logs. Spec:
+[AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-RECORD-SPEC.md) (ruled decisions + coverage map +
+honest tamper-evidence scope). Work lives on `feat/authorizations-record`; paper §5/§6 rewording
+rides the same PR; **merge stays with Tim** (flagship module + public claims). This closes the
+`paper-§6-reconcile` thread below when it lands.
+
 1. **Wave 3 — DONE + LIVE** (PR #6, `d17e1a9`, 2026-06-25): scope-lease + sink-resolver + liveness-scan.
 2. **Wave 4 — 1 of 4 SHIPPED:** the **test-protection co-commit guard is DONE + MERGED** (PR #7, 43 tests,
    2026-06-30; this file previously still called it "next build" — stale, corrected 2026-07-05). The
