@@ -16,6 +16,14 @@
 **❄ PAUSED 2026-07-05 (Tim's portfolio ruling):** StrictLock is **link-only evidence** during the 13-week
 HIPAAPath distribution push (to Oct 1). No new waves until Tim unpauses. State below is current and ready.
 
+**➡ 2026-07-07 — claims-fix spec DECIDED, ready to build:** [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) —
+13-surface claims audit (56 confirmed stale/overclaimed, adversarially verified) triaged fix-first; Tim
+walked all 8 §5 design calls one-by-one on 2026-07-07 (rulings + rationale recorded in §5). Plan: PR 1 =
+zero-risk reword pass (repo reads true at merge — serves the link-only-evidence ruling directly); PR 2 =
+code fixes (allow+deny decision log with tamper-evident hash chain + memory-cap mirror; full
+compound-command segmentation; deny-on-crash posture; OS-matrix CI + small bugs + WP-age ceiling + CI
+sink-check job). Build order in spec §6. Not started — next session picks up at PR 1.
+
 1. **Wave 3 — DONE + LIVE** (PR #6, `d17e1a9`, 2026-06-25): scope-lease + sink-resolver + liveness-scan.
 2. **Wave 4 — 1 of 4 SHIPPED:** the **test-protection co-commit guard is DONE + MERGED** (PR #7, 43 tests,
    2026-06-30; this file previously still called it "next build" — stale, corrected 2026-07-05). The
