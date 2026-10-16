@@ -321,7 +321,7 @@ phrases (search for those three strings in `plan-gate/`, `scope-lease/`, `sink-r
 
 ## 8. PR 2 dispositions (2026-10-16)
 
-Branch `feat/claims-truth-code` (local, not pushed): `docs/claims-truth-reword` + four piece branches merged
+Branch `feat/claims-truth-code` (pushed; PR open, stacked on PR 1): `docs/claims-truth-reword` + four piece branches merged
 `--no-ff` (plan-gate, state-modules, hook-modules, ci; no conflicts), then the restore commit and the close-out
 commit. Each landed fix was checked against code and a test (not against the piece reports). Full suite
 green on macOS: 367 Python tests + 30 shell checks. **Windows and macOS CI legs are unproven until the PR's
@@ -333,7 +333,7 @@ first CI run.**
   drift diagnostic. Empty `allowed_commands` entries match nothing.
 - memory-cap: hash-chained decision log + `verify-log`; `NotebookEdit` baselines on-disk content; opt-in
   `MEMORY_CAP_MAX_ENTRIES` / `MEMORY_CAP_TOTAL_CHARS`.
-- scope-lease: `release` runs the refstore check (exit 6); release rows carry owner; reclaim detail on acquire rows.
+- scope-lease: `release` runs the refstore check (exit 6); release rows carry the lock's owner + `released_by`; reclaim detail on acquire rows.
 - sink-resolver: `check` outcomes and repo-root failure log rows; coverage guard restores all configured sinks.
 - test-protection-guard: `GIT_INDEX_FILE` preserved in precommit mode; `-C <dir>` retargets the analysis.
 - commit-msg-gate: `plan:` matched in the body only; opt-in `COMMIT_MSG_GATE_PLANS_DIR`; example CI job.
@@ -350,7 +350,8 @@ scope-lease acquire/fence already ran the refstore check; liveness `_env_int` al
 - scope-lease: a denied acquire still writes no row.
 - sink-resolver: a no-conflict `resolve` and a dry-run that would auto-resolve still write no row.
 - memory-cap total caps are not evaluated for `NotebookEdit`.
-- Edit/Write always-writable check compares lexically (`..` can escape); wider bypass-hunt families not run;
+- Edit/Write always-writable check: symlink escape unverified (a `..` escape did not reproduce); a dedicated wider
+  bypass-hunt pass not run (a ~70-payload hand probe found no smuggle);
   shellcheck not run locally; commit-msg-gate subject-as-first-paragraph left as is.
 
 **Design calls recorded by the pieces** (re-arguable): pre-plan `cd x && <read-only>` is now allowed; a plan entry
