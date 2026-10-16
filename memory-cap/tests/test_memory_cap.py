@@ -269,6 +269,14 @@ class MemoryCapTests(unittest.TestCase):
         self.assertEqual(decision(p), "deny")
         self.assertIn("entries", p.stdout)
 
+    def test_invalid_total_cap_value_announced_on_stderr_and_stays_off(self):
+        content = "".join(f"- e{i}\n" for i in range(6))
+        for bad in ("1e3", "50k", "0", "-4"):
+            p = run_gate(self._write(self.index, content), MEMORY_CAP_MAX_ENTRIES=bad)
+            self.assertEqual(decision(p), "allow")
+            self.assertIn("MEMORY_CAP_MAX_ENTRIES", p.stderr)
+            self.assertIn("OFF", p.stderr)
+
     def test_max_entries_at_cap_allowed(self):
         content = "".join(f"- e{i}\n" for i in range(5))
         p = run_gate(self._write(self.index, content), MEMORY_CAP_MAX_ENTRIES="5")

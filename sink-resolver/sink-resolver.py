@@ -458,8 +458,8 @@ def resolve_merge(
     # CONFLICT but is byte-IDENTICAL to its 'ours' bytes after regenerate means the generator did
     # not actually rewrite it — so it does not cover this sink, and `git add`-ing it here would
     # silently stage 'ours' and DROP the peer's edit. We refuse rather than trust that the
-    # configured generator/oracle covers every configured sink. Restore the conflicted sinks to
-    # 'ours' so the merge state is left exactly as we found it, then escalate.
+    # configured generator/oracle covers every configured sink. Restore every configured sink to
+    # its pre-regenerate bytes so the merge state is left exactly as we found it, then escalate.
     unchanged = [rel for rel in conflicted_sinks
                  if (root / rel).is_file() and (root / rel).read_bytes() == ours_before.get(rel)]
     if unchanged:

@@ -97,8 +97,13 @@ def _opt_in_limit(name: str):
     try:
         val = int(raw)
     except ValueError:
+        val = 0
+    if val <= 0:
+        # Keep the cap OFF, but say so: a typo must not silently disable a requested gate.
+        print(f"memory-cap: {name}={raw!r} is not a positive integer; this total cap is OFF.",
+              file=sys.stderr)
         return None
-    return val if val > 0 else None
+    return val
 
 
 # Opt-in total-size caps over the index's `- ` entries (both off by default).

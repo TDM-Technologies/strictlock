@@ -454,6 +454,26 @@ class MachineBoundaryTests(unittest.TestCase):
             sl.release_lease(root=self.root, lock_id="local", paths=["src/x.py"])
         self.assertEqual(sl._ref_oid(self.root, ref), oid, "foreign lock must be left in place")
 
+    def test_release_foreign_refstore_changes_nothing_either_path_order(self):
+        # Regression: release raised mid-loop AFTER deleting earlier owned locks (unlogged), and
+        # path order decided what survived. Decide for every path first; fail loud = no change.
+        for order in (["src/a.py", "src/b.py"], ["src/b.py", "src/a.py"]):
+            sl.acquire_lease(root=self.root, lock_id="mine", owner="me",
+                             paths=["src/a.py"], deadline=future())
+            self._mint_foreign("src/b.py")
+            logs = Path(self._tmp.name) / "logs"
+            a_ref = sl._lease_ref(sl._normalize_paths(self.root, ["src/a.py"])[0])
+            with self.assertRaises(sl.MachineBoundaryError):
+                sl.release_lease(root=self.root, lock_id="mine", paths=order,
+                                 log_dir=logs, owner="me")
+            self.assertIsNotNone(sl._ref_oid(self.root, a_ref),
+                                 "owned lock must survive a fail-loud release (%s)" % order)
+            self.assertFalse((logs / "scope-lease.log").exists())
+            # reset for next order
+            b_ref = sl._lease_ref(sl._normalize_paths(self.root, ["src/b.py"])[0])
+            _git(self.root, "update-ref", "-d", b_ref)
+            _git(self.root, "update-ref", "-d", a_ref)
+
     def test_release_cli_foreign_refstore_exits_6(self):
         self._mint_foreign()
         env = dict(os.environ)

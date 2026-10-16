@@ -221,7 +221,7 @@ def _assert_same_refstore(blob: dict, refstore: dict, path: str) -> None:
             f"(blob host={blob.get('host')!r} git_dir={blob.get('git_dir')!r}; "
             f"here host={refstore['host']!r} git_dir={refstore['git_dir']!r}). "
             "Cross-machine exclusion is not real on a per-clone ref store — refusing to "
-            "acquire/fence on a guarantee we don't have (the fix is push-CAS to origin)."
+            "acquire/fence/release on a guarantee we don't have (the fix is push-CAS to origin)."
         )
 
 
@@ -480,18 +480,22 @@ def release_lease(
     norm = _normalize_paths(root, paths)
     refstore = _refstore(root)
     released: list[str] = []
+    # Pass 1 (decide, change nothing): read every path and fail loud on a foreign-store lock
+    # BEFORE any delete, like acquire — a raise mid-loop would strand earlier deletions
+    # unlogged and leave later owned locks held. Foreign STORE is not a silent no-op.
+    owned: list[tuple[str, str, str]] = []
     for p in norm:
         ref = _lease_ref(p)
         oid = _ref_oid(root, ref)
         if oid is None:
             continue
         blob = _read_lease_blob(root, oid)
-        # Fail loud on a foreign-store lock BEFORE the ownership test, like acquire and
-        # fence-check: a lock minted elsewhere is not a lock we can reason about, so
-        # "absent or foreign is a silent no-op" must not extend to a foreign STORE.
         _assert_same_refstore(blob, refstore, p)
         if blob.get("lock_id") != lock_id:
             continue  # never release a lock we don't own
+        owned.append((p, ref, oid))
+    # Pass 2: delete.
+    for p, ref, oid in owned:
         # CAS-pinned delete; check_rc=False so a concurrent reclaim of THIS path (oid moved)
         # fails this one delete without aborting the others.
         proc = _git_run(root, "update-ref", "-d", ref, oid, check_rc=False)
