@@ -45,19 +45,29 @@ import traceback
 from pathlib import Path
 
 # --- environment variable names (consistently GENERATED_SINK_COMMIT_GATE_*-prefixed) ----
-ENV_ENABLE = "GENERATED_SINK_COMMIT_GATE"           # "on" enables the gate; else inert.
+ENV_ENABLE = "GENERATED_SINK_COMMIT_GATE"           # on/1/true/yes enables the gate; else inert.
 ENV_GENERATOR = "GENERATED_SINK_COMMIT_GATE_GENERATOR"   # the generator --check command.
 ENV_SOURCE_PATHS = "GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS"  # os.pathsep list of source path prefixes (trigger).
 ENV_GENERATOR_CWD = "GENERATED_SINK_COMMIT_GATE_GENERATOR_CWD"  # cwd for the generator (repo-root-relative or absolute).
 ENV_TIMEOUT = "GENERATED_SINK_COMMIT_GATE_TIMEOUT"  # seconds before the generator is treated as a fail-closed timeout.
 ENV_LOG_DIR = "GENERATED_SINK_COMMIT_GATE_LOG_DIR"  # optional dir for the append-only decision log.
-ENV_BYPASS = "GENERATED_SINK_COMMIT_GATE_BYPASS"    # "1" = single-use-by-convention, log-on-use bypass (uniquely-named).
+ENV_BYPASS = "GENERATED_SINK_COMMIT_GATE_BYPASS"    # on/1/true/yes = single-use-by-convention, log-on-use bypass (uniquely-named).
 
 DEFAULT_TIMEOUT_S = 120
 
 # Block exit code (the loud refusal). 0 = allow.
 EXIT_ALLOW = 0
 EXIT_BLOCK = 1
+
+
+_TRUTHY = ("on", "1", "true", "yes")
+
+
+def _env_truthy(name: str) -> bool:
+    """True when the env var is on/1/true/yes (case-insensitive, whitespace-trimmed).
+    Every other value, including unset and empty, is off. (Copied per module on
+    purpose: each module is a standalone single file.)"""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
 
 
 def _log(repo_root: Path | None, decision: str, reason: str) -> None:
@@ -296,14 +306,14 @@ def run_check(repo_root: Path) -> None:
 def main() -> None:
     # Master switch — inert unless explicitly enabled. Same posture as the rest
     # of StrictLock: opt-in, no surprise behavior on import.
-    if os.environ.get(ENV_ENABLE, "").strip().lower() != "on":
+    if not _env_truthy(ENV_ENABLE):
         # Not enabled => allow (exit 0). No repo resolution needed.
         print(f"generated-sink-commit-gate: {ENV_ENABLE} != 'on' — gate disabled.", file=sys.stderr)
         sys.exit(EXIT_ALLOW)
 
     # Uniquely-named, single-use-by-convention, log-on-use bypass. Deliberately NOT a shared
     # bypass: disabling THIS gate must never collaterally disable a sibling gate.
-    if os.environ.get(ENV_BYPASS, "").strip() == "1":
+    if _env_truthy(ENV_BYPASS):
         print(
             f"generated-sink-commit-gate: {ENV_BYPASS}=1 — freshness gate DELIBERATELY "
             f"bypassed for this commit (logged on use). Use only for a documented, "

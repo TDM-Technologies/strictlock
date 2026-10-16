@@ -978,6 +978,62 @@ class BashSegmentTests(unittest.TestCase):
         ])
 
 
+class SwitchValueTests(unittest.TestCase):
+    """PLAN_GATE / PLAN_GATE_BYPASS accept on/1/true/yes, case-insensitive and
+    whitespace-trimmed; every other value is off."""
+
+    TRUTHY = ["on", "1", "true", "yes", "ON", "True", " yes ", "\ton\n"]
+    FALSY = ["0", "off", "false", "no", "", "garbage", "onn"]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.plans = root / "plans"
+        self.plans.mkdir()
+        self.work = root / "work"
+        self.work.mkdir()
+        self.allowed = self.work / "allowed_file.txt"
+        write_active_plan(self.plans, str(self.allowed))
+        self.denied_payload = {
+            "tool_name": "Edit", "tool_input": {"file_path": str(self.work / "other.txt")}}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_bypass_truthy_values_bypass(self):
+        for v in self.TRUTHY:
+            p = run_gate(self.denied_payload, self.plans, cwd=self.work,
+                         extra_env={"PLAN_GATE_BYPASS": v})
+            self.assertEqual(decision(p), "allow", msg=f"PLAN_GATE_BYPASS={v!r}")
+
+    def test_bypass_other_values_do_not_bypass(self):
+        for v in self.FALSY:
+            p = run_gate(self.denied_payload, self.plans, cwd=self.work,
+                         extra_env={"PLAN_GATE_BYPASS": v})
+            self.assertEqual(decision(p), "deny", msg=f"PLAN_GATE_BYPASS={v!r}")
+
+    def test_master_switch_truthy_values_enable(self):
+        for v in self.TRUTHY:
+            p = run_gate(self.denied_payload, self.plans, cwd=self.work,
+                         extra_env={"PLAN_GATE": v})
+            self.assertEqual(decision(p), "deny", msg=f"PLAN_GATE={v!r}")
+
+    def test_master_switch_other_values_are_inert(self):
+        for v in self.FALSY:
+            p = run_gate(self.denied_payload, self.plans, cwd=self.work,
+                         extra_env={"PLAN_GATE": v})
+            self.assertEqual(decision(p), "allow", msg=f"PLAN_GATE={v!r}")
+
+    def test_crash_path_honors_truthy_bypass(self):
+        for v in ("yes", "1", "TRUE"):
+            p = run_gate(self.denied_payload, self.plans, cwd=self.work,
+                         extra_env={"PLAN_GATE_BYPASS": v, "_PLAN_GATE_TEST_CRASH": "early"})
+            self.assertEqual(decision(p), "allow", msg=f"PLAN_GATE_BYPASS={v!r}")
+        p = run_gate(self.denied_payload, self.plans, cwd=self.work,
+                     extra_env={"PLAN_GATE_BYPASS": "garbage", "_PLAN_GATE_TEST_CRASH": "early"})
+        self.assertEqual(decision(p), "deny")
+
+
 class CrashPostureTests(unittest.TestCase):
     """Q5: a gate fault DENIES (exit 0 + deny JSON), honors PLAN_GATE_BYPASS in
     the crash path, and still allows when PLAN_GATE != on."""

@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -714,6 +715,29 @@ class CLITests(unittest.TestCase):
         self.assertEqual(_run_cli(["fence-check", *args], env), 0)
         self.assertEqual(_run_cli(["release", *args], env), 0)
         self.assertEqual(lock_refs(self.root), [])
+
+
+class EnabledSwitchValueTests(unittest.TestCase):
+    """SCOPE_LEASE opt-out switch: unset runs; on/1/true/yes (any case, trimmed) run;
+    any other value disables."""
+
+    def _enabled(self, value):
+        env = {k: v for k, v in os.environ.items() if k != "SCOPE_LEASE"}
+        if value is not None:
+            env["SCOPE_LEASE"] = value
+        with mock.patch.dict(os.environ, env, clear=True):
+            return sl._enabled()
+
+    def test_unset_runs(self):
+        self.assertTrue(self._enabled(None))
+
+    def test_truthy_values_run(self):
+        for v in ("on", "1", "true", "yes", "ON", "True", " yes "):
+            self.assertTrue(self._enabled(v), msg=repr(v))
+
+    def test_other_values_disable(self):
+        for v in ("0", "off", "false", "", "garbage"):
+            self.assertFalse(self._enabled(v), msg=repr(v))
 
 
 if __name__ == "__main__":

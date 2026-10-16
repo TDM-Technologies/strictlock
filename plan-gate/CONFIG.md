@@ -1,20 +1,20 @@
 # plan-gate configuration
 
 Everything is configured through **environment variables** — no machine-specific defaults
-are baked into the script. If `PLAN_GATE` is not `on`, the hook is inert and allows
+are baked into the script. If `PLAN_GATE` is not `on` / `1` / `true` / `yes`, the hook is inert and allows
 everything.
 
 ## Environment variables
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `PLAN_GATE` | yes | Set to `on` (case-insensitive) to enable the gate. Anything else makes the hook inert (allow-all). |
+| `PLAN_GATE` | yes | Set to `on` / `1` / `true` / `yes` (case-insensitive, whitespace-trimmed) to enable the gate. Anything else makes the hook inert (allow-all). |
 | `PLAN_GATE_PLANS_DIR` | yes | Directory holding plan files. Exactly one plan may be `status: active` at a time (scoped per git worktree). |
 | `PLAN_GATE_ALWAYS_WRITABLE` | no | `os.pathsep`-separated list of directories that are *always* writable regardless of plan state. Intended for the plans dir itself and any agent-memory dir that never ships. Same blast radius as plan files — keep it tight. |
 | `PLAN_GATE_LOG_DIR` | no | Directory for the append-only, hash-chained decision log (`plan-gate-decisions.log`). This log is your audit trail; if unset, no log is written. |
 | `PLAN_GATE_LOG_DECISIONS` | no | `all` (default) records every decision on a gated surface, allow and deny; `deny` records denials plus emergency-bypass rows only. |
 | `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated list of MCP tool names that modify external state (e.g. a cloud-drive create/copy tool). When set, those tools are **default-denied** so they can't evade the gate. |
-| `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` disables the gate for the call (set it inline per command; every use is logged). Also honored when the gate itself faults. Use deliberately. |
+| `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` / `1` / `true` / `yes` (case-insensitive) disables the gate for the call (set it inline per command; every use is logged). Also honored when the gate itself faults. Use deliberately. |
 | `_PLAN_GATE_TEST_PLANS_DIR` | no | Test-only override that redirects the plans scan to a temp dir. Not a security boundary — used by the test suite. |
 
 `os.pathsep` is `;` on Windows and `:` on Linux/macOS — it applies to

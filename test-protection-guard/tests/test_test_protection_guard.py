@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -646,6 +647,42 @@ class DashCRetargetTests(GuardTestBase):
         dec, reason, _e, _c = self.run_pretooluse("git -C does-not-exist commit -m fix", cwd=self.root)
         self.assertEqual(dec, "allow")
         self.assertIn("not inside a git repo", reason.lower())
+
+
+TRUTHY_VALUES = ["on", "1", "true", "yes", "ON", "On", "TRUE", "Yes", " yes ", "\ton\n"]
+FALSY_VALUES = ["0", "off", "false", "no", "", "garbage", "onn", "yes please", "2", "  "]
+
+
+class BypassValueTests(unittest.TestCase):
+    """Switch values: on/1/true/yes (case-insensitive, whitespace-trimmed) are truthy;
+    everything else, including empty and garbage, is off."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("bypass_values_under_test", Path(__file__).resolve().parent.parent / "test-protection-guard.py")
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def _truthy(self, var, value):
+        with mock.patch.dict(os.environ, {var: value}):
+            return self.m._env_truthy(var)
+
+    def test_truthy_values(self):
+        for var in ['TEST_PROTECTION_GUARD']:
+            for v in TRUTHY_VALUES:
+                self.assertTrue(self._truthy(var, v), msg=f"{var}={v!r} should be truthy")
+
+    def test_falsy_values(self):
+        for var in ['TEST_PROTECTION_GUARD']:
+            for v in FALSY_VALUES:
+                self.assertFalse(self._truthy(var, v), msg=f"{var}={v!r} should be off")
+
+    def test_unset_is_off(self):
+        env = {k: v for k, v in os.environ.items() if k not in ['TEST_PROTECTION_GUARD']}
+        with mock.patch.dict(os.environ, env, clear=True):
+            for var in ['TEST_PROTECTION_GUARD']:
+                self.assertFalse(self.m._env_truthy(var))
 
 
 if __name__ == "__main__":

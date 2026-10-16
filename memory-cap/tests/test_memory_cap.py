@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -94,6 +95,21 @@ class MemoryCapTests(unittest.TestCase):
     def test_bypass_allows_over_cap(self):
         p = run_gate(self._write(self.index, OVER_CAP_LINE), MEMORY_CAP_BYPASS="1")
         self.assertEqual(decision(p), "allow")
+
+    def test_bypass_accepts_on_true_yes_any_case(self):
+        for v in ("on", "ON", "true", "Yes", " yes "):
+            p = run_gate(self._write(self.index, OVER_CAP_LINE), MEMORY_CAP_BYPASS=v)
+            self.assertEqual(decision(p), "allow", msg=f"MEMORY_CAP_BYPASS={v!r}")
+
+    def test_non_truthy_bypass_does_not_bypass(self):
+        for v in ("0", "off", "false", "garbage"):
+            p = run_gate(self._write(self.index, OVER_CAP_LINE), MEMORY_CAP_BYPASS=v)
+            self.assertEqual(decision(p), "deny", msg=f"MEMORY_CAP_BYPASS={v!r}")
+
+    def test_master_switch_accepts_truthy_values(self):
+        for v in ("1", "true", "yes", "ON"):
+            p = run_gate(self._write(self.index, OVER_CAP_LINE), MEMORY_CAP=v)
+            self.assertEqual(decision(p), "deny", msg=f"MEMORY_CAP={v!r} should enable the gate")
 
     def test_edit_reconstruction_denied(self):
         self.index.write_text("# Heading\n- a\n", encoding="utf-8")
@@ -418,6 +434,42 @@ class DecisionLogTests(unittest.TestCase):
         p = self._run(self._w("- a\n- b\n- c\n"), MEMORY_CAP_MAX_ENTRIES="2")
         self.assertEqual(decision(p), "deny")
         self.assertEqual(self._rows()[0]["class"], "total_cap")
+
+
+TRUTHY_VALUES = ["on", "1", "true", "yes", "ON", "On", "TRUE", "Yes", " yes ", "\ton\n"]
+FALSY_VALUES = ["0", "off", "false", "no", "", "garbage", "onn", "yes please", "2", "  "]
+
+
+class BypassValueTests(unittest.TestCase):
+    """Switch values: on/1/true/yes (case-insensitive, whitespace-trimmed) are truthy;
+    everything else, including empty and garbage, is off."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("bypass_values_under_test", Path(__file__).resolve().parent.parent / "memory-cap.py")
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def _truthy(self, var, value):
+        with mock.patch.dict(os.environ, {var: value}):
+            return self.m._env_truthy(var)
+
+    def test_truthy_values(self):
+        for var in ['MEMORY_CAP', 'MEMORY_CAP_BYPASS', 'MEMORY_CAP_DECISION_LOG']:
+            for v in TRUTHY_VALUES:
+                self.assertTrue(self._truthy(var, v), msg=f"{var}={v!r} should be truthy")
+
+    def test_falsy_values(self):
+        for var in ['MEMORY_CAP', 'MEMORY_CAP_BYPASS', 'MEMORY_CAP_DECISION_LOG']:
+            for v in FALSY_VALUES:
+                self.assertFalse(self._truthy(var, v), msg=f"{var}={v!r} should be off")
+
+    def test_unset_is_off(self):
+        env = {k: v for k, v in os.environ.items() if k not in ['MEMORY_CAP', 'MEMORY_CAP_BYPASS', 'MEMORY_CAP_DECISION_LOG']}
+        with mock.patch.dict(os.environ, env, clear=True):
+            for var in ['MEMORY_CAP', 'MEMORY_CAP_BYPASS', 'MEMORY_CAP_DECISION_LOG']:
+                self.assertFalse(self.m._env_truthy(var))
 
 
 if __name__ == "__main__":

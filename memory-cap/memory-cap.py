@@ -25,17 +25,18 @@ WHAT COUNTS
   intended offload destination.
 
 FAIL-CLOSED
-  - Master switch MEMORY_CAP must be "on" (case-insensitive) or the hook is inert
+  - Master switch MEMORY_CAP must be on/1/true/yes (case-insensitive) or the hook is inert
     (allow-all).
-  - A uniquely-named bypass MEMORY_CAP_BYPASS=1 skips the cap. It is single-use
+  - A uniquely-named bypass MEMORY_CAP_BYPASS=on (or 1/true/yes) skips the cap. It is single-use
     by convention: set inline per command; every use is announced on stderr, so a
     lingering bypass is visible in the trail. A distinct bypass per gate is
     deliberate: bypassing one fail-closed gate must never silently disable another.
   - On a stdin parse error or an unhandled crash the hook DENIES (fail-closed).
 
 CONFIGURATION (all via environment)
-  MEMORY_CAP            "on" to enable; anything else makes the hook inert.
-  MEMORY_CAP_BYPASS     "1" to bypass the cap (single-use by convention: set inline
+  MEMORY_CAP            on/1/true/yes (case-insensitive) to enable; anything else
+                        makes the hook inert.
+  MEMORY_CAP_BYPASS     on/1/true/yes to bypass the cap (single-use by convention: set inline
                         per command; every use is announced on stderr).
   MEMORY_CAP_CHARS      integer cap on a `- ` line, whole-line excluding trailing
                         whitespace (what the model actually loads). Default 200.
@@ -51,7 +52,7 @@ CONFIGURATION (all via environment)
                         the pre-existing file, so an index already over a cap is
                         never wedged (shrinking / level edits pass). Not evaluated
                         for NotebookEdit (one cell's source is not the whole file).
-  MEMORY_CAP_DECISION_LOG "1" to record every decision (allow, deny, bypass) on the
+  MEMORY_CAP_DECISION_LOG on/1/true/yes to record every decision (allow, deny, bypass) on the
                         capped index to a hash-chained JSONL log (best-effort,
                         never blocks; paths/sizes/reasons only). Requires:
   MEMORY_CAP_LOG_DIR    directory for memory-cap-decisions.log.
@@ -72,6 +73,16 @@ from pathlib import Path
 # Master gate + own uniquely-named bypass.
 MASTER_GATE_ENV = "MEMORY_CAP"
 OWN_BYPASS_ENV = "MEMORY_CAP_BYPASS"
+
+_TRUTHY = ("on", "1", "true", "yes")
+
+
+def _env_truthy(name: str) -> bool:
+    """True when the env var is on/1/true/yes (case-insensitive, whitespace-trimmed).
+    Every other value, including unset and empty, is off. (Copied per module on
+    purpose: each module is a standalone single file.)"""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
+
 
 
 def _cap_chars() -> int:
@@ -163,7 +174,7 @@ _CTX = {"tool": "", "target": "", "surface": "file"}
 
 def _decision_log_path():
     """Path of the decision log, or None when logging is not enabled."""
-    if os.environ.get(DECISION_LOG_FLAG_ENV, "").strip() != "1":
+    if not _env_truthy(DECISION_LOG_FLAG_ENV):
         return None
     d = os.environ.get(LOG_DIR_ENV, "").strip()
     if not d:
@@ -559,12 +570,12 @@ def reconstruct_edit_content(
 
 def main() -> None:
     # Master gate — inert unless explicitly turned on.
-    if os.environ.get(MASTER_GATE_ENV, "").strip().lower() != "on":
+    if not _env_truthy(MASTER_GATE_ENV):
         allow(f"memory-cap: {MASTER_GATE_ENV} != 'on' — gate disabled.")
 
     # Uniquely-named bypass; single-use by convention (set inline per command),
     # announced on stderr on every use.
-    if os.environ.get(OWN_BYPASS_ENV, "").strip() == "1":
+    if _env_truthy(OWN_BYPASS_ENV):
         print(
             f"memory-cap: {OWN_BYPASS_ENV}=1 — cap DELIBERATELY bypassed for this "
             f"tool call (every use is logged on stderr; single-use by convention).",

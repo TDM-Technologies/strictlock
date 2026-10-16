@@ -31,6 +31,12 @@ check "docs prefix passes"        0 "$(printf 'docs: update readme\n')"
 check "ci prefix passes"          0 "$(printf 'ci: cache pip\n')"
 check "no plan no prefix fails"   1 "$(printf 'feat: sneaky change\n')"
 check "bypass passes"             0 "$(printf 'feat: sneaky change\n')" COMMIT_MSG_GATE_BYPASS=on
+for v in 1 true yes ON On TRUE Yes " yes " " on"; do
+  check "bypass truthy value '$v' passes" 0 "$(printf 'feat: sneaky change\n')" "COMMIT_MSG_GATE_BYPASS=$v"
+done
+for v in 0 off false no "" garbage "onn" "yes please" 2; do
+  check "bypass non-truthy value '$v' does not bypass" 1 "$(printf 'feat: sneaky change\n')" "COMMIT_MSG_GATE_BYPASS=$v"
+done
 check "custom prefix override"    0 "$(printf 'wip: scratch\n')" COMMIT_MSG_GATE_PREFIXES='^wip:'
 check "custom prefix still gates" 1 "$(printf 'feat: thing\n')" COMMIT_MSG_GATE_PREFIXES='^wip:'
 

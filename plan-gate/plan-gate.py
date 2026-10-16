@@ -37,8 +37,9 @@ FAULT POSTURE (fail closed, deliberately)
     safe failure; a silent allow is not.
 
 CONFIGURATION (all via environment; no machine-specific defaults are baked in)
-  PLAN_GATE                 "on" to enable; anything else makes the hook inert.
-  PLAN_GATE_BYPASS          "on" is an emergency escape hatch.
+  PLAN_GATE                 on/1/true/yes (case-insensitive) to enable; anything
+                            else makes the hook inert.
+  PLAN_GATE_BYPASS          on/1/true/yes is an emergency escape hatch.
   PLAN_GATE_PLANS_DIR       directory holding plan files (one active at a time).
   PLAN_GATE_ALWAYS_WRITABLE optional os.pathsep-separated list of directories
                             that are always writable regardless of plan state
@@ -116,6 +117,16 @@ import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+_TRUTHY = ("on", "1", "true", "yes")
+
+
+def _env_truthy(name: str) -> bool:
+    """True when the env var is on/1/true/yes (case-insensitive, whitespace-trimmed).
+    Every other value, including unset and empty, is off. (Copied per module on
+    purpose: each module is a standalone single file.)"""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
 
 
 def _env_path(name: str) -> Path | None:
@@ -1612,9 +1623,9 @@ def _handle_crash(exc: BaseException) -> None:
         traceback.print_exc(file=sys.stderr)
     except Exception:
         pass
-    if os.environ.get("PLAN_GATE", "").strip().lower() != "on":
+    if not _env_truthy("PLAN_GATE"):
         allow("plan-gate: PLAN_GATE != 'on' — gate disabled.")
-    if os.environ.get("PLAN_GATE_BYPASS", "").strip().lower() == "on":
+    if _env_truthy("PLAN_GATE_BYPASS"):
         reason = "plan-gate: PLAN_GATE_BYPASS=on — emergency bypass (gate fault path)."
         _log_decision(
             "allow", "gate", "emergency_bypass", _CALL_CTX["tool"],
@@ -1635,15 +1646,14 @@ def main() -> None:
         raise RuntimeError("injected test crash (early)")
 
     # Master gate switch. If off or unset, this hook is inert.
-    gate_env = os.environ.get("PLAN_GATE", "").strip().lower()
-    if gate_env != "on":
+    if not _env_truthy("PLAN_GATE"):
         allow("plan-gate: PLAN_GATE != 'on' — gate disabled.")
 
     # Emergency bypass. Logged (class=emergency_bypass) even in the deny-only
     # log mode — bypass usage is exception-class audit evidence. The payload
     # parse here is best-effort context ONLY: any failure still allows (the
     # bypass must never wedge), and an interactive TTY stdin is not consumed.
-    if os.environ.get("PLAN_GATE_BYPASS", "").strip().lower() == "on":
+    if _env_truthy("PLAN_GATE_BYPASS"):
         b_tool, b_input = "", {}
         try:
             if sys.stdin is not None and not sys.stdin.isatty():
