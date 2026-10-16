@@ -147,7 +147,7 @@ Merged: introduced/modified `- `-line multiset delta, CRLF/LF-agnostic, +4 tests
 good-property-kept · CRLF · Edit-introduces-deny). The optional env-gated JSONL decision log stays
 **deferred and still open** (ties to the CC7 "allow and deny" log; the plan-gate half shipped as
 PR #11 — see `paper.md §6 ↔ shipped-log reconcile` — and the memory-cap mirror,
-`MEMORY_CAP_DECISION_LOG=1`, is decided but not built: CLAIMS-FIX-SPEC §5 Q3).
+`MEMORY_CAP_DECISION_LOG=1`, **was built 2026-10-16 (Stage 2 / PR 2)** — see [Done](#done)).
 Original scoping below.
 
 The shipped cap scans the whole file, which can **self-wedge**: once any over-cap `- `
@@ -189,7 +189,7 @@ Default = the vault's git-native shape; `conductor-resolve.py` documented as the
 ### liveness-scan — read-only fleet-liveness reporter — *SHIPPED 2026-06-25* (Wave 3)
 Ported from HIPAAPath `conductor-scan.py`, decoupled from its machine-specific defaults. Classifies each git
 worktree (running/stalled/done-unmerged/ambiguous/idle/clean) on a heartbeat-or-commit-mtime signal,
-attributing worktrees to plan-gate sessions (absolute `allowed_paths`; `worktree_bypass` plans are meant to be excluded, not yet enforced in code — CLAIMS-FIX-SPEC §3 C2). Report-only:
+attributing worktrees to plan-gate sessions (absolute `allowed_paths`; `worktree_bypass` plans are excluded). Report-only:
 never reaps, exits 0 always; ambiguous stalls escalate with a non-destructive recovery command. env-configured
 (`LIVENESS_SCAN_*`), no machine paths. 31 tests; 2 adversarial lenses clean (zero blocking; 4 safe-direction
 polish items folded in). Closes the concurrency family (plan-gate enumerates → scope-lease makes exclusive →
@@ -241,10 +241,13 @@ eliminates, spill risk).
 
 ## ci
 
-### OS test matrix — *ready*
-CI (`.github/workflows/ci.yml`) runs ubuntu-only. Add `windows-latest` + `macos-latest` to the
+### OS test matrix — *built 2026-10-16 (Stage 2 / PR 2); first real run pending*
+The matrix is in `.github/workflows/ci.yml` (see [Done](#done)). **Open:** the Windows and macOS legs have
+not yet run on a real runner; the claim is "proven" only once the PR's first CI run is green, and any real
+failure there is iterated to green. The `macos-15-intel` runner choice for Python 3.8 is unverified.
+Original scoping: CI ran ubuntu-only; add `windows-latest` + `macos-latest` to the
 Python matrix so the suite's OS-agnostic claim is **proven**, not just reviewed (the memory-cap
-CRLF test then runs on a real Windows box). Low effort; land with/just before any OS-sensitive change.
+CRLF test then runs on a real Windows box).
 (Action refresh — the `actions/checkout` / `setup-python` / `setup-node` Node-20 deprecation — was done
 2026-07-05: bumped to `checkout@v7` / `setup-python@v6` / `setup-node@v6`.)
 
@@ -260,15 +263,40 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 
 ---
 
+## Open after Stage 2 (2026-10-16)
+Built-but-narrower or deliberately not built in PR 2; each keeps its interim wording where a claim depends on it.
+- **plan-gate PowerShell segment + redirect handling** — not built. PowerShell stays prefix-match with no
+  compound parsing (`Get-Content x > f` still passes the read-only prefix). Needs its own scanner; docs name the gap.
+- **plan-gate Edit/Write always-writable check** compares lexically, so a `..`-laundered path can escape an
+  always-writable directory (the new redirect path normalizes and is not affected). Reported, not changed.
+- **plan-gate bypass-hunt wider families** (`eval`, `bash -c`, env prefixes, `xargs`, `git -c`, unicode, long
+  input) — a follow-up verify pass against the new scanner; not run.
+- **scope-lease denied-acquire logging** — a decision, not built; denied acquires still write no row.
+- **sink-resolver no-conflict `resolve` and dry-run rows** — not built; they still write no row.
+- **memory-cap total caps for `NotebookEdit`** — not evaluated (a notebook edit carries one cell, not the file).
+- **commit-msg-gate subject = first paragraph vs line 1** — unchanged (line 2+ is body); Tim's call.
+- **shellcheck on the commit-msg-gate additions** — not run locally; CI's shellcheck job is the first check.
+
 ## Done
+- **2026-10-16** — **Claims-truth PR 2 (Stage 2) — code that makes the interim claims true.** Built: plan-gate
+  segment-wise Bash checking + redirection-as-write + read-only list audit + deny-on-crash + worktree no-claim
+  diagnostic; memory-cap decision log (`verify-log`), `NotebookEdit` baseline, opt-in total caps; scope-lease
+  release refstore check + owner on release rows; sink-resolver `check`/repo-root log rows + all-sinks
+  coverage-guard restore; test-protection-guard `GIT_INDEX_FILE` + `-C` retarget; commit-msg-gate body-only
+  `plan:` + `COMMIT_MSG_GATE_PLANS_DIR` + CI example; liveness-scan bypass exclusion, `<= 0` notice, sample plan,
+  per-worktree `--explain`, true WP-age ceiling; generated-sink-prepush-gate CI example. Strong wording restored
+  where code + a test back it. See CLAIMS-FIX-SPEC §8.
+- **2026-10-16** — **ci-os-matrix** — built: Python job is a 9-entry matrix (ubuntu 3.8–3.12, windows 3.8 + 3.12,
+  macOS 3.8 + 3.12), shell job on ubuntu + macOS; **first real run on Windows/macOS is the PR's first CI run**.
+- **2026-10-16** — **memory-cap decision-log mirror** — built (`MEMORY_CAP_DECISION_LOG=1`, hash-chained, `verify-log`).
 - **2026-10-16** — **COMPLIANCE.md discoverability** — closed: cross-linked from the root `README.md`
   (Design principles) and `roadmap.md`; moved here from the docs section (it had been marked *ready* long
   after it shipped).
 - **2026-07-15** — **paper.md §6 ↔ shipped-log reconcile — built (PR #11, `554a3ce`)**: the authorizations
   record — one unified hash-chained `plan-gate-decisions.log`, allow + deny, all gated surfaces,
   full-by-default, `verify-log`, log-dir self-protection; CI 8/8 green. Spec:
-  [AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-RECORD-SPEC.md). (The memory-cap decision-log mirror stays
-  open under *memory-cap*.)
+  [AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-RECORD-SPEC.md). (The memory-cap decision-log mirror was
+  built later the same year: 2026-10-16, Stage 2.)
 - **2026-07-05** — **`eslint-plugin-strictlock` published to npm** — `0.1.0` (2026-06-25) then `0.1.1`
   (2026-07-05), acct `downsmullen`: <https://www.npmjs.com/package/eslint-plugin-strictlock>. Closes the
   `eslint-plugin-publish` item (the last open thread from Wave 1). The action refresh (`checkout@v7` /
