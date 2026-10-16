@@ -57,6 +57,7 @@ Works on ESLint 8.57+ (ESLint 8 loads plugins with `require()`, served by the Co
 
 ```jsonc
 {
+  "parserOptions": { "ecmaVersion": 2022, "sourceType": "module" },
   "plugins": ["strictlock"],
   "extends": ["plugin:strictlock/recommended-legacy"]
 }
@@ -66,6 +67,7 @@ Works on ESLint 8.57+ (ESLint 8 loads plugins with `require()`, served by the Co
 
 ```jsonc
 {
+  "parserOptions": { "ecmaVersion": 2022, "sourceType": "module" },
   "plugins": ["strictlock"],
   "rules": {
     "strictlock/no-smoke-only-assertions": "error"

@@ -41,6 +41,27 @@ function makeScratchProject() {
   return dir;
 }
 
+// The n-th ```jsonc block under the README's "Legacy config" heading, parsed.
+function readmeLegacyExample(n) {
+  const md = fs.readFileSync(path.join(pkgRoot, 'README.md'), 'utf8');
+  const section = md.split('### Legacy config')[1].split('\n## ')[0];
+  const blocks = [...section.matchAll(/```jsonc\n([\s\S]*?)```/g)].map((m) => JSON.parse(m[1]));
+  return blocks[n];
+}
+
+test('README legacy examples parse and set parserOptions', () => {
+  for (const n of [0, 1]) {
+    const cfg = readmeLegacyExample(n);
+    assert.deepEqual(cfg.plugins, ['strictlock']);
+    assert.equal(cfg.parserOptions.ecmaVersion, 2022);
+  }
+});
+
+test('ESM and CJS entries are the very same plugin object', () => {
+  assert.equal(esmPlugin, cjsPlugin);
+  assert.deepEqual(Object.keys(esmPlugin.rules), Object.keys(cjsPlugin.rules));
+});
+
 test('package.json exports: import -> index.mjs, require -> index.cjs; main is CJS', () => {
   assert.deepEqual(pkgJson.exports['.'], { import: './index.mjs', require: './index.cjs' });
   assert.equal(pkgJson.main, './index.cjs');
@@ -96,13 +117,10 @@ test(
         cwd: dir,
         useEslintrc: false,
         resolvePluginsRelativeTo: dir,
-        overrideConfig: {
-          root: true,
-          parserOptions: { ecmaVersion: 2022, sourceType: 'module' },
-          plugins: ['strictlock'],
-          extends: ['plugin:strictlock/recommended-legacy'],
-        },
+        // Exactly the README's first legacy example, so docs and test can't drift.
+        overrideConfig: { root: true, ...readmeLegacyExample(0) },
       });
+      assert.deepEqual(readmeLegacyExample(0).extends, ['plugin:strictlock/recommended-legacy']);
       const [bad] = await eslint.lintText(SMOKE_ONLY, { filePath: path.join(dir, 'a.test.js') });
       assert.equal(bad.messages.length, 1);
       assert.equal(bad.messages[0].ruleId, 'strictlock/no-smoke-only-assertions');

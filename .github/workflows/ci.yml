@@ -102,6 +102,15 @@ jobs:
       - name: install eslint ${{ matrix.eslint }}
         if: matrix.eslint != 'locked'
         run: npm install --no-save eslint@${{ matrix.eslint }}
+      - name: verify installed eslint version
+        run: |
+          installed="$(node -p "require('eslint/package.json').version")"
+          expected="${{ matrix.eslint }}"
+          if [ "$expected" != "locked" ] && [ "$installed" != "$expected" ]; then
+            echo "::error::expected eslint $expected, found $installed"
+            exit 1
+          fi
+          echo "eslint $installed"
       - name: eslint-plugin-strictlock tests
         run: npm test
 
