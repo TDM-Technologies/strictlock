@@ -432,6 +432,11 @@ def acquire_lease(
         _log_reclaim(p, holder, token, deadline)
     _log_decision(log_dir, {"event": "acquire", "lock_id": lock_id, "owner": owner,
                             "leased": norm, "reclaimed": [r[0] for r in reclaimed],
+                            "reclaimed_detail": [
+                                {"path": rp, "was_lock_id": rh.get("lock_id", ""),
+                                 "was_owner": rh.get("owner", ""),
+                                 "was_deadline": rh.get("deadline", ""), "token": rt}
+                                for rp, rh, rt in reclaimed],
                             "deadline": deadline})
     return {"deadline": deadline, "leased": norm, "reclaimed": reclaimed}
 
@@ -461,7 +466,8 @@ def fence_check(
 
 
 def release_lease(
-    *, root: Path, lock_id: str, paths: list[str] | None, log_dir: Path | None = None
+    *, root: Path, lock_id: str, paths: list[str] | None, log_dir: Path | None = None,
+    owner: str | None = None,
 ) -> list[str]:
     """Delete only the locks THIS lock_id owns (blob.lock_id == lock_id), CAS-pinned to the exact
     oid so a concurrent reclaim is never clobbered. Idempotent: an absent or foreign lock is a
@@ -472,6 +478,7 @@ def release_lease(
     still drops — a batch would abort wholesale and strand the rest until their deadline."""
     root = Path(root)
     norm = _normalize_paths(root, paths)
+    refstore = _refstore(root)
     released: list[str] = []
     for p in norm:
         ref = _lease_ref(p)
@@ -479,6 +486,10 @@ def release_lease(
         if oid is None:
             continue
         blob = _read_lease_blob(root, oid)
+        # Fail loud on a foreign-store lock BEFORE the ownership test, like acquire and
+        # fence-check: a lock minted elsewhere is not a lock we can reason about, so
+        # "absent or foreign is a silent no-op" must not extend to a foreign STORE.
+        _assert_same_refstore(blob, refstore, p)
         if blob.get("lock_id") != lock_id:
             continue  # never release a lock we don't own
         # CAS-pinned delete; check_rc=False so a concurrent reclaim of THIS path (oid moved)
@@ -487,7 +498,8 @@ def release_lease(
         if proc.returncode == 0:
             released.append(p)
     if released:
-        _log_decision(log_dir, {"event": "release", "lock_id": lock_id, "released": released})
+        _log_decision(log_dir, {"event": "release", "lock_id": lock_id,
+                                "owner": owner or "", "released": released})
     return released
 
 
@@ -825,7 +837,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "release":
         try:
-            released = release_lease(root=root, lock_id=lock_id, paths=paths, log_dir=log_dir)
+            released = release_lease(root=root, lock_id=lock_id, paths=paths, log_dir=log_dir,
+                                     owner=owner)
+        except MachineBoundaryError as exc:
+            print(f"scope-lease: FAIL-LOUD: {exc}", file=sys.stderr)
+            return 6
         except LeaseError as exc:
             print(f"scope-lease: ERROR: {exc}", file=sys.stderr)
             return 1
