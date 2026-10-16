@@ -157,6 +157,11 @@ Add a CommonJS entry (`index.cjs`) behind conditional exports (`"require"`) that
 flat config on ESLint 9. Bump the version to `0.1.2`. **Publishing to npm is the maintainer's
 step.**
 
+**Coordination (2026-10-16):** a parallel branch is adding two ESLint rules
+(`no-tautological-assertions`, `no-unasserted-result`). It edits `index.mjs`, `package.json` `"files"`
+and README. This track owns `index.cjs`, `package.json` `"exports"` and the version. Whichever PR
+merges second must register every rule in both entries.
+
 ---
 
 ## Build order, verify, cost
