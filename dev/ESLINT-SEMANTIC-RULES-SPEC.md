@@ -3,7 +3,7 @@
 Date: 2026-10-16. Status: **draft for Tim's read — no code written, nothing decided.** Direction
 calls are listed in §8 as open questions.
 
-Starting point: `/Users/tim/StrictLock/eslint-plugin-strictlock/rules/no-smoke-only-assertions.mjs`
+Starting point: `eslint-plugin-strictlock/rules/no-smoke-only-assertions.mjs`
 (wave 1) catches tests whose assertions are all *weak by shape*. Its README "Can't address"
 section names what is left: tautologies, wrong-value assertions, unasserted behavior. This spec
 covers four lint rules for most of that gap (§3–§6) and explains why the remainder (wrong values)
@@ -48,7 +48,7 @@ that make the rule inert for that file. Rule-specific, so adopting rule 1 on a l
 not force baselining rule 4's findings. Baseline = remediation worklist; drain it, don't grow it.
 
 **Packaging.** Each rule is its own file + `.test.mjs` (RuleTester), registered in
-`/Users/tim/StrictLock/eslint-plugin-strictlock/index.mjs`. Whether new rules join `recommended`
+`eslint-plugin-strictlock/index.mjs`. Whether new rules join `recommended`
 is a staging call (§8 Q3).
 
 **Test-framework scope.** Wave 1 recognizes `it`/`test` and `expect(...)` chains (Jest / Vitest /
