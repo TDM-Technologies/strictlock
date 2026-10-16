@@ -615,6 +615,29 @@ class DashCRetargetTests(GuardTestBase):
         _d, reason, _e, _c = self.run_pretooluse("git -C repo commit -m fix", cwd=self.root)
         self.assertIn("flagged", reason.lower())
 
+    def test_dash_C_expands_env_var_like_the_shell(self):
+        self.seed("js"); self.stage("js", "change")
+        foreign = self.root / "foreign"; foreign.mkdir()
+        env = self.guard_env(); env["SL_TARGET_REPO"] = str(self.repo)
+        _d, reason, _e, _c = self.run_pretooluse('git -C "$SL_TARGET_REPO" commit -m fix',
+                                                 env=env, cwd=foreign)
+        self.assertIn("flagged", reason.lower())
+
+    def test_dash_C_expands_tilde_like_the_shell(self):
+        self.seed("js"); self.stage("js", "change")
+        foreign = self.root / "foreign"; foreign.mkdir()
+        env = self.guard_env(); env["HOME"] = str(self.root); env["USERPROFILE"] = str(self.root)
+        _d, reason, _e, _c = self.run_pretooluse("git -C ~/repo commit -m fix", env=env, cwd=foreign)
+        self.assertIn("flagged", reason.lower())
+
+    def test_cd_target_expands_env_var(self):
+        self.seed("js"); self.stage("js", "change")
+        foreign = self.root / "foreign"; foreign.mkdir()
+        env = self.guard_env(); env["SL_TARGET_REPO"] = str(self.repo)
+        _d, reason, _e, _c = self.run_pretooluse('cd "$SL_TARGET_REPO" && git commit -m fix',
+                                                 env=env, cwd=foreign)
+        self.assertIn("flagged", reason.lower())
+
     def test_dash_C_nonexistent_dir_allows(self):
         dec, reason, _e, _c = self.run_pretooluse("git -C does-not-exist commit -m fix", cwd=self.root)
         self.assertEqual(dec, "allow")

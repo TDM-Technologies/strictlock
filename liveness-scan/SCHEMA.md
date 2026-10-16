@@ -37,7 +37,8 @@ is the worktree main / master / detached?
   the **WP age** (time since the earliest branch commit not on base, `git log <base>..HEAD
   --reverse`) crossing it escalates even on a fresh signal, and the age of the signal itself
   crossing it escalates too. WP age is a committer-date proxy, so a rebase/amend/squash restarts
-  the clock (under-reports; never invents an escalation); unresolvable base or no commits beyond
+  the clock (under-reports), while a branch stacked on older unmerged work or cut from a stale
+  base ref inherits that older start (over-reports: an early, report-only escalation); unresolvable base or no commits beyond
   base ⇒ WP age unknown ⇒ only the signal bound applies.
 
 ## The two activity signals

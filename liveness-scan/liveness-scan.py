@@ -27,8 +27,9 @@ WHERE THE SIGNAL COMES FROM (two-tier, degrades gracefully):
   work-package ceiling: time since the EARLIEST branch commit not on base — `git log
   base..HEAD --reverse`, first commit time. An owned worktree past it escalates EVEN ON A FRESH
   SIGNAL; a signal itself older than the ceiling escalates too). Caveat: that start time is a
-  committer date, so a rebase / amend / squash rewrites it and restarts the WP clock (the
-  proxy under-reports long-running work; a report-only tool, so noise rather than a block).
+  committer date, so a rebase / amend / squash rewrites it and restarts the WP clock (under-
+  report). Conversely, a branch stacked on older UNMERGED work, or cut while the base ref is
+  stale, inherits that older start (over-report). A report-only tool, so noise, not a block.
 
 WHO OWNS A WORKTREE (attribution): if you run plan-gate, the scanner maps a worktree to the
 session running in it via the active/executed plan whose **absolute** allowed_paths resolve under
@@ -329,7 +330,9 @@ class GitProbe:
         """Committer time of the EARLIEST commit reachable from sha but not from base
         (`git log base..sha --reverse`, first line) — the proxy for when the unit of work began.
         None if unknown (base unresolvable) or the branch has no commits beyond base.
-        CAVEAT: committer time, so a rebase / amend / squash rewrites it and restarts the clock."""
+        CAVEAT: committer time, so a rebase / amend / squash rewrites it and restarts the clock
+        (under-report); a branch stacked on unmerged work or a stale base inherits the older
+        start (over-report)."""
         if not sha:
             return None
         out = self._run(["log", "--reverse", "--format=%ct", f"{base}..{sha}"])

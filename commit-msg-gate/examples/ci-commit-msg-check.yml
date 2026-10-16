@@ -39,10 +39,24 @@ jobs:
           # Deliberately NOT honouring COMMIT_MSG_GATE_BYPASS in CI.
           unset COMMIT_MSG_GATE_BYPASS
           fails=0
+          # Resolve the range first and fail closed: a failure inside a `for ... in $(...)`
+          # list is swallowed, which would turn an unresolvable base into a green job.
           # --no-merges: merge commits carry git-generated subjects, not authored ones.
-          for sha in $(git rev-list --no-merges "origin/${BASE}..HEAD"); do
+          shas="$(git rev-list --no-merges "origin/${BASE}..HEAD")" || {
+            echo "::error::cannot resolve origin/${BASE}"
+            exit 1
+          }
+          for sha in $shas; do
             msg="$(mktemp)"
             git log -1 --format=%B "$sha" > "$msg"
+            # The gate exits 0 on an empty message (git rejects those locally), but
+            # --no-verify --allow-empty-message gets past git, so CI rejects them here.
+            if [ -z "$(tr -d '[:space:]' < "$msg")" ]; then
+              echo "::error::commit $sha has an empty message"
+              fails=$((fails + 1))
+              rm -f "$msg"
+              continue
+            fi
             if ! bash "$GATE" "$msg"; then
               echo "::error::commit $sha was rejected by commit-msg-gate"
               fails=$((fails + 1))

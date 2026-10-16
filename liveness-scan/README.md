@@ -53,10 +53,13 @@ package is older than that escalates **even on a fresh signal**, because a unit 
 long deserves a human glance however busy it looks. A signal that is itself older than the ceiling
 escalates too.
 
-> **Caveat — rebase rewrites the proxy.** The branch start is a *committer* date. A rebase, amend,
-> or squash rewrites it, so the WP clock restarts and a long-running branch can read younger than it
-> is. That under-reports (it can miss an escalation, never invent one); it is a proxy, not a
-> ledger. When the base ref is unresolvable or the branch has no commits beyond base, the WP age
+> **Caveat — the WP age is a proxy that can err in both directions.** The branch start is a
+> *committer* date. A rebase, amend, or squash rewrites it, so the WP clock restarts and a
+> long-running branch can read younger than it is (under-report: a missed escalation). In the
+> other direction, `<base>..HEAD` includes every commit not on the base ref, so a branch stacked on
+> older *unmerged* work, or cut while the local base ref is stale, inherits that older work's start
+> time and can read older than it is (over-report: an early escalation as `ambiguous`). Because the
+> scanner only reports, the over-report costs noise, not a block. It is a proxy, not a ledger. When the base ref is unresolvable or the branch has no commits beyond base, the WP age
 > is unknown and only the signal-age bound applies.
 
 ## Who owns a worktree (attribution)

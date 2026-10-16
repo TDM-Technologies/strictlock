@@ -64,7 +64,9 @@ A local hook can be skipped (`git commit --no-verify`) or never installed. To ch
 of every commit a PR adds, copy [`examples/ci-commit-msg-check.yml`](examples/ci-commit-msg-check.yml)
 into your repo's `.github/workflows/`. It checks out the PR head with full history and runs the
 same `commit-msg-gate.sh` over each commit message in `origin/<base>..HEAD` (merge commits skipped,
-`COMMIT_MSG_GATE_BYPASS` ignored). Pair it with `COMMIT_MSG_GATE_PLANS_DIR` (the plans must then be
+`COMMIT_MSG_GATE_BYPASS` ignored). It also rejects empty-message commits (which the gate itself
+passes through to git, and which `--no-verify --allow-empty-message` gets past git) and fails
+closed if the base ref cannot be resolved. Pair it with `COMMIT_MSG_GATE_PLANS_DIR` (the plans must then be
 checked in to the repo CI sees). This is a copyable example — it is not enabled in StrictLock's
 own CI, whose commits don't follow the gate's defaults.
 

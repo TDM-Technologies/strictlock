@@ -276,9 +276,16 @@ def _apply_dash_C(cwd, dirs):
     for d in dirs:
         if not d:
             continue  # git treats `-C ""` as a no-op
-        p = Path(d)
+        p = Path(_expand_shell_path(d))
         cwd = p if p.is_absolute() else Path(cwd) / p
     return cwd
+
+
+def _expand_shell_path(d):
+    """Expand `~` and `$VAR` the way the shell would before git sees the path (shlex does
+    not). Approximation: a single-quoted '$VAR' (which the shell leaves literal) is expanded
+    too, since the quoting is gone by this point."""
+    return os.path.expanduser(os.path.expandvars(d))
 
 
 # ------------------------------------------------------------------------------
@@ -482,7 +489,7 @@ def run_pretooluse(raw):
 
     try:
         if cd_target is not None:
-            target = Path(cd_target)
+            target = Path(_expand_shell_path(cd_target))
             if not target.is_absolute():
                 target = Path(os.getcwd()) / target
             cwd = target.resolve()

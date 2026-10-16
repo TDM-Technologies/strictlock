@@ -64,6 +64,32 @@ else
   echo "skip - unreadable-dir case (root or chmod unsupported)"
 fi
 
+# --- CI example job (examples/ci-commit-msg-check.yml): run its `run:` block for real ----
+YML="$HERE/../examples/ci-commit-msg-check.yml"
+ci_script="$tmp/ci-run.sh"
+awk '/^        run: \|/{f=1;next} f{ if ($0 ~ /^          /) print substr($0,11); else if ($0 !~ /^[[:space:]]*$/) f=0 }' "$YML" > "$ci_script"
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
+ci_repo="$tmp/ci-upstream"; ci_clone="$tmp/ci-clone"
+git init -q -b main "$ci_repo" && git -C "$ci_repo" commit -q --allow-empty -m 'chore: base'
+git clone -q "$ci_repo" "$ci_clone" && git -C "$ci_clone" checkout -q -b feature
+# ci_run <expected_exit> <description> [BASE]
+ci_run() {
+  want="$1"; desc="$2"; base="${3:-main}"
+  (cd "$ci_clone" && GATE="$GATE" BASE="$base" bash "$ci_script") >/dev/null 2>&1
+  got=$?
+  if [ "$got" -eq "$want" ]; then echo "ok   - $desc"; else echo "FAIL - $desc (want exit $want, got $got)"; fails=$((fails + 1)); fi
+}
+ci_run 0 "ci: no commits in range passes"
+git -C "$ci_clone" commit -q --allow-empty -m 'feat: x' -m 'plan: real-plan'
+ci_run 0 "ci: compliant commit passes"
+git -C "$ci_clone" commit -q --allow-empty --allow-empty-message --no-verify -m ''
+ci_run 1 "ci: empty-message commit (--no-verify) fails"
+git -C "$ci_clone" reset -q --hard HEAD~1
+git -C "$ci_clone" commit -q --allow-empty --no-verify -m 'feat: no plan'
+ci_run 1 "ci: planless commit fails"
+git -C "$ci_clone" reset -q --hard HEAD~1
+ci_run 1 "ci: unresolvable base fails closed" nonexistent
+
 if [ "$fails" -gt 0 ]; then
   echo "$fails commit-msg-gate test(s) failed"
   exit 1

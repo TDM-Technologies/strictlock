@@ -501,6 +501,25 @@ class TestRealGit(unittest.TestCase):
         # unresolvable base -> unknown (fail toward no escalation, never a crash)
         self.assertIsNone(probe.branch_start_unixtime(head, "origin/nonexistent"))
 
+    def test_probe_branch_start_inherits_from_stacked_unmerged_parent(self):
+        # Documented caveat (over-report): a branch stacked on older UNMERGED work inherits
+        # that work's start time, because `base..HEAD` includes the parent's commits.
+        self._seed()
+        def commit(name, date):
+            (self.root / f"{name}.txt").write_text(name + "\n")
+            self._git("add", "-A")
+            subprocess.run(["git", "-C", str(self.root), "-c", "commit.gpgsign=false", "-c",
+                            "user.name=T", "-c", "user.email=t@example.com", "commit", "-q",
+                            "-m", name], check=True, capture_output=True,
+                           env={**os.environ, "GIT_COMMITTER_DATE": date})
+        self._git("checkout", "-q", "-b", "old-feature")
+        commit("old", "2026-02-01T00:00:00Z")
+        self._git("checkout", "-q", "-b", "new-work")
+        commit("new", "2026-10-01T00:00:00Z")
+        probe = ls.GitProbe(str(self.root))
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(probe.branch_start_unixtime(head, "main"), 1769904000)  # 2026-02-01Z
+
     def test_cli_exits_zero(self):
         self._seed()
         rc = ls.safe_main(["--root", str(self.root), "--dry-run"])
