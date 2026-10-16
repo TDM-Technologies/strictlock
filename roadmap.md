@@ -1,6 +1,6 @@
 # StrictLock roadmap
 
-StrictLock ships as an umbrella that grows. The shipped suite now spans three families —
+StrictLock ships as an umbrella that grows. The shipped suite now spans four families —
 **Gates** ([`plan-gate`](plan-gate/), [`commit-msg-gate`](commit-msg-gate/),
 [`generated-sink-commit-gate`](generated-sink-commit-gate/) /
 [`generated-sink-prepush-gate`](generated-sink-prepush-gate/),
@@ -8,7 +8,8 @@ StrictLock ships as an umbrella that grows. The shipped suite now spans three fa
 [`eslint-plugin-strictlock`](eslint-plugin-strictlock/)), **Hygiene**
 ([`memory-cap`](memory-cap/), [`externalized-memory`](externalized-memory/) and its projection
 bundle), and **Concurrency** ([`scope-lease`](scope-lease/), [`sink-resolver`](sink-resolver/),
-[`liveness-scan`](liveness-scan/)) — plus a suite-wide [compliance mapping](COMPLIANCE.md). The README [Modules table](README.md#modules) is the
+[`liveness-scan`](liveness-scan/)), and **Rituals** ([`rituals`](rituals/), prose-only
+checklists the gates can't enforce mechanically) — plus a suite-wide [compliance mapping](COMPLIANCE.md). The README [Modules table](README.md#modules) is the
 authoritative shipped list; below are the siblings and docs still on deck.
 
 These are honest slots, not promises with dates. Each is marked:
@@ -46,18 +47,19 @@ These are honest slots, not promises with dates. Each is marked:
   alongside source, no `TEST-CORRECTNESS:` justification). Always allows, never blocks; the
   teeth are the close-out log review. Dual-mode (Claude Code `PreToolUse` *or* git `pre-commit`).
   The detective complement to the born-weak `eslint-plugin-strictlock`.
+- **rituals** ([`rituals/`](rituals/)) — prose, not a gate: the session **kickoff** and
+  **close-out** checklists (each step with a "why this step exists" note and a distilled
+  lessons section), the **unit-of-work interaction analysis** (prior-unit deferred-marker grep +
+  peer-unit collision pass, with the note that plan-gate's disjoint check now structurally backs
+  the shared-file case), and the **pre-work currency check** (three questions, three verdicts).
+  Wired to the gates that can back each step: plan-gate, commit-msg-gate, externalized-memory,
+  scope-lease.
 - **compliance mapping** ([`COMPLIANCE.md`](COMPLIANCE.md)) — SOC 2 / ISO 42001 / ISO 9001; the
   paper's §6 expanded suite-wide, mapping each gate mechanism to the control it evidences.
 
 ---
 
 ## Planned
-
-### Session-ritual checklists (kickoff / close-out)
-Genericized versions of the start-of-work and end-of-work checklists that make the
-PLAN → CONFIRM → EXECUTE loop a habit rather than a hope: verify the gate environment, read
-the prior handoff, author the plan, and at close-out confirm the work landed and archive the
-plan. Ships as templates + prose, not as anyone's real checklists.
 
 ### Governance-of-governance (the marquee)
 Rule-archaeology / "Cleanup Day" — the reverse audit that asks whether your own agent-control
