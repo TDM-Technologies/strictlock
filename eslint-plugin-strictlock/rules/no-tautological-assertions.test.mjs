@@ -41,6 +41,12 @@ ruleTester.run('no-tautological-assertions', rule, {
     { code: t(`expect.assertions(1); expect(f()).toBe(1);`), filename: FN },
     // Constant subject but the matcher argument is real input.
     { code: t(`expect(1).toBe(compute());`), filename: FN },
+    // each-table bodies are analyzed: a real assertion stays clean.
+    { code: `it.each([[1, 2]])('x', (a, b) => { expect(add(a, 1)).toBe(b); });`, filename: FN },
+    // Not a test block: test.describe bodies are not analyzed.
+    { code: `test.describe('s', () => { expect(1).toBe(1); });`, filename: FN },
+    // Dynamic import is impure → identical text is not self-comparison.
+    { code: t(`expect(import('./a.js')).toEqual(import('./a.js'));`), filename: FN },
     // Outside a test block → not analyzed.
     { code: `expect(1).toBe(1);`, filename: FN },
     // Not a test file → inert.
@@ -102,6 +108,24 @@ ruleTester.run('no-tautological-assertions', rule, {
       filename: FN,
       errors: [{ messageId: 'literalVsLiteral' }],
     },
+    // each forms are analyzed.
+    {
+      code: `it.each([1, 2])('x', (n) => { expect(5).toBe(5); });`,
+      filename: FN,
+      errors: [{ messageId: 'literalVsLiteral' }],
+    },
+    {
+      code: "test.each`\n a\n ${1}\n`('x', ({ a }) => { expect(v).toBe(v); });",
+      filename: FN,
+      errors: [{ messageId: 'selfComparison' }],
+    },
+    {
+      code: `it.concurrent.each([1])('x', (n) => { expect(true).toBeTruthy(); });`,
+      filename: FN,
+      errors: [{ messageId: 'constantSubject' }],
+    },
+    // Negated / resolves chains are reported (outcome is fixed either way).
+    { code: t(`expect(x).not.toEqual(x);`), filename: FN, errors: [{ messageId: 'selfComparison' }] },
     // Negated chain still tautological.
     { code: t(`expect(1).not.toBe(2);`), filename: FN, errors: [{ messageId: 'literalVsLiteral' }] },
     // Member-form test block; two findings reported separately.

@@ -26,15 +26,35 @@ export function relForward(cwd, filename) {
   return rel.split('\\').join('/');
 }
 
-// `it(...)`, `test.only(...)`, `it.skip(...)` — and only with a function arg.
+// Modifier members that keep a call a test block: `test.only`, `it.concurrent.each`, …
+const TEST_MODIFIERS = new Set([
+  'only', 'skip', 'todo', 'fixme', 'fails', 'failing', 'concurrent', 'sequential',
+  'each', 'for', 'runIf', 'skipIf',
+]);
+
+// `it` / `test` / `it.only` / `test.concurrent.skip` — a bare name or a chain of
+// known modifiers. Anything else (`test.describe`, `test.step`) is not a test block.
+function isTestName(node) {
+  if (node.type === 'Identifier') return TEST_FNS.has(node.name);
+  if (node.type === 'MemberExpression' && !node.computed && node.property?.name) {
+    return TEST_MODIFIERS.has(node.property.name) && isTestName(node.object);
+  }
+  return false;
+}
+
+// The `.each` factory forms: `it.each([...])` and tagged-template `it.each\`...\``.
+function isEachFactory(node) {
+  if (node.type === 'CallExpression') return isTestName(node.callee);
+  if (node.type === 'TaggedTemplateExpression') return isTestName(node.tag);
+  return false;
+}
+
+// `it(...)`, `test.only(...)`, `it.concurrent(...)`, and the curried
+// `it.each(table)(name, fn)` / `it.each\`...\`(name, fn)` — only with a function arg.
 export function isTestBlockCall(node) {
   const callee = node.callee;
   if (!callee) return false;
-  let named = false;
-  if (callee.type === 'Identifier') named = TEST_FNS.has(callee.name);
-  else if (callee.type === 'MemberExpression' && callee.object?.type === 'Identifier') {
-    named = TEST_FNS.has(callee.object.name);
-  }
+  const named = isTestName(callee) || isEachFactory(callee);
   return (
     named &&
     node.arguments.some(

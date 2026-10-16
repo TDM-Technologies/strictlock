@@ -122,5 +122,6 @@ invented here. Every decision from D-008 forward is recorded at the time it is m
   semantic lint rules plus a separate mutation-testing gate for wrong-value assertions.
 - **Decision:** build `no-tautological-assertions` and `no-unasserted-result` first. The other
   two (`no-oracle-reuse`, `no-mock-echo`) and the mutation gate (spec §7) are not built now.
+- **2026-10-16 — version:** the plugin moves to **0.2.0** (new rules = minor). Tim's call.
 - **Re-arguable:** yes — the remaining rules and the mutation gate stay open; the backlog carries
   the mutation gate as a not-now item.

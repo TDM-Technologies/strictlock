@@ -40,6 +40,7 @@ const IMPURE = new Set([
   'NewExpression',
   'AwaitExpression',
   'YieldExpression',
+  'ImportExpression',
   'TaggedTemplateExpression',
   'UpdateExpression',
   'AssignmentExpression',
@@ -113,7 +114,8 @@ const rule = {
     ],
     messages: {
       selfComparison:
-        'This assertion compares `{{text}}` with itself, so it can never fail. ' +
+        'This assertion compares `{{text}}` with itself, so its outcome is fixed by the test text ' +
+        'and never depends on the code under test. ' +
         'Assert against an independently stated expected value, or justify it with an inline ' +
         '`// {{marker}} <reason>` comment.',
       literalVsLiteral:

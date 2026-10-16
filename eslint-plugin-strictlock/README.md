@@ -178,9 +178,14 @@ on one, or a `const` bound to one.
 
 Deliberately **not** flagged: anything with a call, `await` or `new` (`expect(next()).toBe(next())`
 — two calls can differ), arithmetic (`expect(0.1 + 0.2).toBeCloseTo(0.3)`), parameters and
-`let` bindings (`it.each` tables), and function subjects (`expect(() => f()).toThrow()`).
+`let` bindings (`it.each` table parameters), and function subjects
+(`expect(() => f()).toThrow()`).
 
-Like the other rules it only looks inside `it` / `test` blocks of test files.
+It only looks inside `it` / `test` blocks of test files, including `.only` / `.skip` /
+`.concurrent` forms and the `.each` forms (`it.each([...])(name, fn)` and the tagged-template
+`test.each\`...\`(name, fn)`). `test.describe` / `test.step` bodies are not test blocks. The
+message wording is neutral on purpose: under `.not`, `expect(x).not.toEqual(x)` can never
+*pass*, and the rule reports it all the same — the outcome is fixed by the test text.
 
 ### Options
 
@@ -219,6 +224,19 @@ sketched in the design spec, `dev/ESLINT-SEMANTIC-RULES-SPEC.md` §6).
 |---|---|---|---|
 | `baseline` | `string[]` | `[]` | Grandfather known files (rule inert for them). |
 | `marker` | `string` | `"TEST-CORRECTNESS:"` | Inline comment that justifies the exception. |
+| `extraMockRoots` | `string[]` | `[]` | Extra callee roots to treat as mocking setup calls, on top of the built-ins below. |
+
+Built-in mock roots (their bindings may go unread): the globals `jest`, `vi` and `sinon`; any
+import of `vi` / `jest` / `sinon` / `mock` from `vitest`, `@jest/globals`, `sinon`, `node:test`
+or `test` — including aliases (`import { vi as v } from 'vitest'`) and a default `sinon`
+import; and any call path through `.mock` (node:test's `t.mock.fn()` / `t.mock.method()`).
+`using` / `await using` declarations are skipped (disposal is their use). Tagged-template
+and optional-chain initialisers (`sql\`...\``, `api?.fetch()`) are checked like any call.
+
+Known limits (not flagged, by design): `console.log(r.x)` counts as consuming `r` (only
+`console.*(r)` with the bare binding is a discard); `expect.soft` and TypeScript `as` /
+`satisfies` / `!` wrappers around the initialiser are not unwrapped; `await x;` counts as
+consuming `x`. It also analyses the `.each` forms the same way as `no-tautological-assertions`.
 
 ```js
 it('constructs without side effects', () => {
@@ -226,6 +244,13 @@ it('constructs without side effects', () => {
   const widget = new Widget();
 });
 ```
+
+## The marker silences the whole test block
+
+For all three rules, a single `TEST-CORRECTNESS:` marker comment anywhere inside a test block
+silences **every strictlock rule** for that whole block — not just the statement next to it, and
+not just the rule the comment was written for. Keep blocks small when you use it. A per-statement
+marker is an open design question (see `dev/ESLINT-SEMANTIC-RULES-SPEC.md` §8 Q8).
 
 ## What it prevents, detects, and can't address
 

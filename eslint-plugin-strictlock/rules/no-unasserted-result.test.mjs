@@ -39,6 +39,45 @@ ruleTester.run('no-unasserted-result', rule, {
     // Near-miss: mocking-library setup call is a side effect, binding unused.
     { code: t(`const spy = vi.spyOn(api, 'get'); f();`), filename: FN },
     { code: t(`const spy = jest.spyOn(api, 'get').mockReturnValue(1); f();`), filename: FN },
+    // Regression: `await x` consumes the value (settles/throws), not a discard.
+    {
+      code: t(`const found = screen.findByText('x'); fireEvent.click(btn); await found;`),
+      filename: FN,
+    },
+    // Aliased mocking-library imports and node:test mocks are setup calls.
+    {
+      code: `import { vi as v } from 'vitest';
+        it('x', () => { const spy = v.spyOn(api, 'get'); f(); });`,
+      filename: FN,
+    },
+    {
+      code: `import { jest as j } from '@jest/globals';
+        it('x', () => { const spy = j.fn(); f(); });`,
+      filename: FN,
+    },
+    {
+      code: `import { mock } from 'node:test';
+        it('x', () => { const m = mock.method(obj, 'f'); f(); });`,
+      filename: FN,
+    },
+    {
+      code: `import sandbox from 'sinon';
+        it('x', () => { const stub = sandbox.stub(obj, 'f'); f(); });`,
+      filename: FN,
+    },
+    { code: t(`const m = t.mock.fn(); f();`), filename: FN },
+    // extraMockRoots option.
+    {
+      code: t(`const m = td.replace('./x'); f();`),
+      filename: FN,
+      options: [{ extraMockRoots: ['td'] }],
+    },
+    // `using` / `await using` bindings are disposed → their use.
+    { code: t(`using handle = open();`), filename: FN, languageOptions: { ecmaVersion: 'latest', sourceType: 'module' } },
+    // each-table test bodies are analyzed (and clean ones stay clean).
+    { code: `it.each([1, 2])('x %i', (n) => { const r = f(n); expect(r).toBe(n); });`, filename: FN },
+    // Not a test block: test.describe bodies are not analyzed.
+    { code: `test.describe('s', () => { const r = f(); });`, filename: FN },
     // Declarations outside a test block are not analyzed.
     { code: `const r = f();`, filename: FN },
     { code: `describe('x', () => { const r = f(); it('y', () => { expect(1).toBe(1); }); });`, filename: FN },
@@ -78,6 +117,33 @@ ruleTester.run('no-unasserted-result', rule, {
     { code: t(`const { a, b } = f();`), filename: FN, errors: [{ messageId: 'unasserted' }] },
     // Written again but never read.
     { code: t(`let r = f(); r = g();`), filename: FN, errors: [{ messageId: 'unasserted' }] },
+    // Chained and tagged-template initialisers are checked too.
+    { code: t(`const r = api?.fetch();`), filename: FN, errors: [{ messageId: 'unasserted' }] },
+    { code: t("const r = sql`select 1`;"), filename: FN, errors: [{ messageId: 'unasserted' }] },
+    // Mock exemption does not cover an unrelated aliased import.
+    {
+      code: `import { thing as v } from 'other-lib';
+        it('x', () => { const r = v.run(); });`,
+      filename: FN,
+      errors: [{ messageId: 'unasserted' }],
+    },
+    // each forms are analyzed: array table, tagged template, nested modifier.
+    {
+      code: `it.each([1, 2])('x %i', (n) => { const r = f(n); });`,
+      filename: FN,
+      errors: [{ messageId: 'unasserted' }],
+    },
+    {
+      code: "test.each`\n a | b\n ${1} | ${2}\n`('x', ({ a }) => { const r = f(a); });",
+      filename: FN,
+      errors: [{ messageId: 'unasserted' }],
+    },
+    {
+      code: `it.concurrent.each([1])('x', (n) => { const r = f(n); });`,
+      filename: FN,
+      errors: [{ messageId: 'unasserted' }],
+    },
+    // `await x;` is NOT a discard, but a bare `x;` and `void x` still are.
     // Member-form test block.
     { code: `test.only('x', () => { const r = f(); });`, filename: FN, errors: [{ messageId: 'unasserted' }] },
     // Stale default marker does not justify under a custom marker.
