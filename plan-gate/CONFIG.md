@@ -15,7 +15,10 @@ everything.
 | `PLAN_GATE_LOG_DECISIONS` | no | `all` (default) records every decision on a gated surface, allow and deny; `deny` records denials plus emergency-bypass rows only. |
 | `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated MCP tools that modify external state. Each entry is `tool` (a bare name: **default-denied**, arguments never read) or `tool:arg` / `tool:arg1+arg2` (the argument(s) that hold target paths; see below). |
 | `PLAN_GATE_WRITER_SCRIPTS` | no | Extra "writer scripts", comma-separated `name.py:argpos`. A Bash/PowerShell command that runs `python`/`python3`/`py` on a listed script is treated as a file write to that script's target argument and gated like a `>` redirect target (see below). `atomic-write.py:1` is built in. A malformed value **fails closed**. |
-| `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` / `1` / `true` / `yes` (case-insensitive) disables the gate for the call (set it inline per command; every use is logged). Also honored when the gate itself faults. Use deliberately. |
+| `PLAN_GATE_SCOPE_LEASE` | no | Path to `scope-lease.py`. When set, every file-write target (Edit/Write/NotebookEdit `file_path`, Bash redirect targets, writer-script targets, MCP path arguments) is looked up with `scope-lease.py holder` before the plan check; a path leased by another agent is denied (see [scope-lease honored](#scope-lease-honored)). Unset: no lookup, no subprocess. |
+| `PLAN_GATE_SCOPE_LEASE_TIMEOUT` | no | Seconds to wait for the `holder` lookup (default `10`). A timeout denies. |
+| `PLAN_GATE_REQUIRE_LEASE` | no | `on` / `1` / `true` / `yes`: a write to a path nobody holds a lease on is also denied ("acquire it first"). Needs `PLAN_GATE_SCOPE_LEASE`; without it every file write is denied as a configuration error. Default off. |
+| `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` / `1` / `true` / `yes` (case-insensitive) disables the gate for the call. It reaches the hook only through the harness environment (the env Claude Code was started with, or the `settings.json` `env` block), not as a prefix on an agent's command; every use is logged. Also honored when the gate itself faults. Use deliberately. |
 | `_PLAN_GATE_TEST_PLANS_DIR` | no | Test-only override that redirects the plans scan to a temp dir. Not a security boundary — used by the test suite. |
 
 `os.pathsep` is `;` on Windows and `:` on Linux/macOS — it applies to
@@ -70,6 +73,30 @@ segment must still be admitted by `allowed_commands`; the two checks are indepen
   `PLAN_GATE_BYPASS` is set. Read-only commands are not affected.
 - Decision-log class for these denials: `writer_script` (or `log_self_protect` for a log-dir
   target).
+
+## scope-lease honored
+
+`PLAN_GATE_SCOPE_LEASE=/path/to/scope-lease.py` makes plan-gate respect scope-lease locks for
+every gated agent write. All the write targets of one tool call are batched into one
+`python scope-lease.py holder --json --root <repo> -- <abs paths>` call per repo (same
+interpreter as the hook; the repo is the nearest git root above each target, else the hook's
+working directory), run **before** the plan check:
+
+- a path **held by someone else** (a live lease whose lock id is not `SCOPE_LEASE_LOCK_ID` and
+  whose owner is not `SCOPE_LEASE_OWNER` / the worktree's branch / `user.email`) is **denied**,
+  naming the holder, the lease age and its deadline (decision class `scope_lease`);
+- a lookup that errors, times out, returns something unreadable, or whose script is missing is
+  **denied** (fail closed) with the bypass how-to;
+- free, expired and mine fall through to the normal plan decision;
+- `PLAN_GATE_REQUIRE_LEASE=on` additionally denies a path with no live lease (or an expired
+  one): "acquire it first". Targets under `PLAN_GATE_ALWAYS_WRITABLE` (plans, memory) are
+  exempt from that rule only, so drafting plans keeps working.
+
+The owner identity is read from the hook's environment, so export the same `SCOPE_LEASE_OWNER`
+(or `SCOPE_LEASE_LOCK_ID`) in the harness environment that the agent used when it ran
+`acquire`. Canonicalization (case and Unicode folding, repo-relative keys) happens only inside
+scope-lease. Reads are never looked up; a human's own edits or merges never pass through the
+hook, so a lease never blocks a person. `PLAN_GATE_BYPASS` skips the lookup.
 
 ## Per-OS examples
 
@@ -141,7 +168,7 @@ PowerShell is unchanged (prefix match, no compound parsing). Details and the mig
 
 A stdin payload that does not parse, or an unhandled exception in the gate, **denies** (JSON on
 stdout, exit 0) with a message naming the failure and the bypass. Set `PLAN_GATE_BYPASS=on`
-inline to proceed anyway — that is honored on the fault path too and logged as
+in the harness environment to proceed anyway — that is honored on the fault path too and logged as
 `emergency_bypass`. `PLAN_GATE` unset or not `on` still allows. A best-effort `gate_error` row
 is written to the decision log; a logging failure never changes the decision. (A test-only
 `_PLAN_GATE_TEST_CRASH=early|late` variable injects a fault for the test suite; it can only

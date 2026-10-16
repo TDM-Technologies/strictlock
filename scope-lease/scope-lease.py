@@ -68,6 +68,12 @@ Usage:
                                      [--file FILE] [--lock-id ID] [--owner OWNER]
   python3 scope-lease.py fence-check [--root DIR] [<source selectors as above>]
   python3 scope-lease.py release     [--root DIR] [<source selectors as above>]
+  python3 scope-lease.py holder      [--root DIR] [--lock-id ID] [--owner OWNER] [--json] PATH ...
+                                     (READ-ONLY: 0 = every path free or mine, 5 = at least one
+                                      held by someone else; plan-gate's PLAN_GATE_SCOPE_LEASE
+                                      calls this. "Mine" = lock id matches --lock-id /
+                                      SCOPE_LEASE_LOCK_ID, or owner matches --owner /
+                                      SCOPE_LEASE_OWNER / branch / user.email.)
 
 Exit codes: 0 ok; 1 unexpected error (incl. undeterminable owner / no path source);
             2 usage error (argparse);
@@ -303,17 +309,18 @@ def _ref_oid(root: Path, ref: str) -> str | None:
 
 
 def _hash_lease_blob(
-    root: Path, *, lock_id: str, owner: str, token: int, deadline: str, refstore: dict
+    root: Path, *, lock_id: str, owner: str, token: int, deadline: str, refstore: dict,
+    acquired: str = ""
 ) -> str:
     """Write the lock payload as a git blob and return its oid. Deterministic JSON (sorted keys,
     no spaces) so identical logical leases share a blob. CRITICAL ORDERING (the GC race): the blob
     is created with `-w` and then IMMEDIATELY referenced by the caller's update-ref — a ref-pinned
     blob survives `git gc`, a dangling one can be reaped in the sub-second hash->ref window."""
-    payload = json.dumps(
-        {"lock_id": lock_id, "owner": owner, "token": token, "deadline": deadline,
-         "host": refstore["host"], "git_dir": refstore["git_dir"]},
-        sort_keys=True, separators=(",", ":"),
-    )
+    body = {"lock_id": lock_id, "owner": owner, "token": token, "deadline": deadline,
+            "host": refstore["host"], "git_dir": refstore["git_dir"]}
+    if acquired:  # when this holder first took the scope (lets `holder` report a lease age)
+        body["acquired"] = acquired
+    payload = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return _git_run(root, "hash-object", "-w", "--stdin", input=payload).stdout.strip()
 
 
@@ -392,13 +399,14 @@ def acquire_lease(
 
     # Phase 1 — DECIDE (reads only, no blob writes): per path, resolve verb + token + old-oid.
     # A LIVE foreign holder raises here, before anything is written (no half-claim).
-    plan: list[tuple] = []        # (ref, verb, old_oid|None, token)
+    plan: list[tuple] = []        # (ref, verb, old_oid|None, token, acquired)
     reclaimed: list[tuple] = []
+    now_iso = now.isoformat()
     for p in norm:
         ref = _lease_ref(p)
         old = _ref_oid(root, ref)
         if old is None:
-            plan.append((ref, "create", None, 1))
+            plan.append((ref, "create", None, 1, now_iso))
             continue
         holder = _read_lease_blob(root, old)
         _assert_same_refstore(holder, refstore, p)  # fail loud BEFORE trusting the lock
@@ -408,7 +416,10 @@ def acquire_lease(
         if held_live and not is_ours:
             raise LeaseDenied(p, holder)            # first-mover wins; write nothing
         token = int(holder.get("token", 0)) + 1     # ours (extend) or expired (reclaim)
-        plan.append((ref, "update", old, token))
+        # An extend keeps the original acquire time (age = time since first taken); a
+        # reclaim starts a new age.
+        acquired = (holder.get("acquired") or now_iso) if is_ours else now_iso
+        plan.append((ref, "update", old, token, acquired))
         if not is_ours:
             reclaimed.append((p, holder, token))
 
@@ -416,9 +427,9 @@ def acquire_lease(
     # is ref-pinned within sub-ms of creation (a dangling blob can be reaped by a sibling
     # `git gc --prune=now` in the hash->ref window; pinning immediately closes the GC race).
     txn: list[str] = []
-    for ref, verb, old, token in plan:
+    for ref, verb, old, token, acquired in plan:
         blob = _hash_lease_blob(root, lock_id=lock_id, owner=owner, token=token,
-                                deadline=deadline, refstore=refstore)
+                                deadline=deadline, refstore=refstore, acquired=acquired)
         txn.append(f"create {ref} {blob}" if verb == "create" else f"update {ref} {blob} {old}")
 
     proc = _git_run(root, "update-ref", "--stdin", input="\n".join(txn) + "\n", check_rc=False)
@@ -516,6 +527,75 @@ def release_lease(
                                 "owner": lock_owner, "released_by": owner or "",
                                 "released": released})
     return released
+
+
+def holder_status(
+    *, root: Path, paths: list[str], lock_id: str | None = None,
+    owner: str | None = None, now: datetime.datetime | None = None,
+) -> list[dict]:
+    """READ-ONLY: who holds each path right now. One dict per input path (input order):
+
+        {"path": <as given>, "key": <canonical>, "status": "free" | "mine" | "held", ...}
+
+    `free`  no lock ref, or the lock's deadline has passed (an expired lock is reclaimable by
+            the next `acquire`; the dict then also carries "expired": true plus the old holder).
+    `mine`  a live lock whose lock_id == `lock_id` (when given) OR whose owner == `owner`
+            (when not given, resolved lazily via derive_owner, so a path nobody holds never
+            needs an owner).
+    `held`  a live lock held by someone else. Carries lock_id, owner, token, deadline,
+            acquired and age_seconds (None for a lock minted before `acquired` existed).
+
+    Canonicalization is the one in this file (_normalize_paths + _lease_ref); nothing is
+    reimplemented by callers. Writes nothing. Raises MachineBoundaryError for a lock minted by
+    a foreign ref store, LeaseError for a git failure, OwnerDeriveError when an owner is needed
+    but cannot be derived."""
+    root = Path(root)
+    now = now or _utcnow()
+    top = _git_toplevel(root)
+    fold = _fold_flags(root)
+    keys = [_normalize_repo_relative(root, p, top, fold) for p in paths]
+    # One for-each-ref instead of one show-ref per path.
+    listing = _git_run(root, "for-each-ref", "--format=%(objectname) %(refname)",
+                       LOCKS_REF_PREFIX).stdout
+    held_refs: dict[str, str] = {}
+    for ln in listing.splitlines():
+        oid, _, ref = ln.strip().partition(" ")
+        if oid and ref:
+            held_refs[ref] = oid
+    refstore: dict | None = None
+    my_owner = owner
+    out: list[dict] = []
+    for raw, key in zip(paths, keys):
+        entry: dict = {"path": raw, "key": key, "status": "free"}
+        oid = held_refs.get(_lease_ref(key))
+        if oid is None:
+            out.append(entry)
+            continue
+        blob = _read_lease_blob(root, oid)
+        if refstore is None:
+            refstore = _refstore(root)
+        _assert_same_refstore(blob, refstore, key)
+        deadline = blob.get("deadline", "")
+        live = bool(deadline) and (_parse_iso(deadline) or now) > now
+        acquired = _parse_iso(blob.get("acquired", ""))
+        entry.update({
+            "lock_id": blob.get("lock_id", ""), "owner": blob.get("owner", ""),
+            "token": blob.get("token", 0), "deadline": deadline,
+            "acquired": blob.get("acquired", ""),
+            "age_seconds": (int((now - acquired).total_seconds()) if acquired else None),
+        })
+        if not live:
+            entry["expired"] = True
+            out.append(entry)
+            continue
+        if lock_id and blob.get("lock_id") == lock_id:
+            entry["status"] = "mine"
+        else:
+            if my_owner is None:
+                my_owner = derive_owner(root)
+            entry["status"] = "mine" if blob.get("owner") == my_owner else "held"
+        out.append(entry)
+    return out
 
 
 # ── owner resolution ─────────────────────────────────────────────────────────────────
@@ -765,6 +845,47 @@ def _add_source_args(p: argparse.ArgumentParser) -> None:
                    help="Lock owner (else SCOPE_LEASE_OWNER, git branch, or user.email).")
 
 
+def _fmt_age(seconds: int | None) -> str:
+    if seconds is None:
+        return "unknown"
+    if seconds < 120:
+        return f"{max(seconds, 0)}s"
+    if seconds < 7200:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+def _cmd_holder(args, root: Path) -> int:
+    lock_id = (args.lock_id or os.environ.get("SCOPE_LEASE_LOCK_ID", "")).strip() or None
+    owner = (args.owner or "").strip() or None
+    if owner is None:
+        env_owner = os.environ.get("SCOPE_LEASE_OWNER", "").strip()
+        owner = env_owner or None  # else derived lazily, only if some live lock is found
+    try:
+        res = holder_status(root=root, paths=args.paths, lock_id=lock_id, owner=owner)
+    except MachineBoundaryError as exc:
+        print(f"scope-lease: FAIL-LOUD: {exc}", file=sys.stderr)
+        return 6
+    except (LeaseError, OwnerDeriveError) as exc:
+        print(f"scope-lease: ERROR: {exc}", file=sys.stderr)
+        return 1
+    held = [r for r in res if r["status"] == "held"]
+    for r in res:
+        if args.json:
+            print(json.dumps(r, sort_keys=True))
+        elif r["status"] == "held":
+            print(f"HELD {r['path']}: lock {r['lock_id']!r} owner {r['owner']} "
+                  f"age {_fmt_age(r['age_seconds'])} until {r['deadline']}")
+        else:
+            print(f"{r['status'].upper()} {r['path']}"
+                  + (" (lease expired)" if r.get("expired") else ""))
+    if held:
+        print(f"scope-lease: {len(held)} of {len(res)} path(s) held by someone else.",
+              file=sys.stderr)
+        return 5
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="scope-lease.py",
@@ -785,8 +906,28 @@ def main(argv: list[str] | None = None) -> int:
     p_rel = sub.add_parser("release", help="Drop the locks this lock_id owns (idempotent).")
     _add_source_args(p_rel)
 
+    p_hold = sub.add_parser(
+        "holder",
+        help="Read-only: who holds each path (0 all free/mine, 5 any held by someone else).")
+    p_hold.add_argument("paths", nargs="+", metavar="PATH",
+                        help="Paths to look up (absolute, or relative to the repo top-level).")
+    p_hold.add_argument("--root", default=".", metavar="DIR",
+                        help="Repo / worktree the lock store lives in (default: cwd).")
+    p_hold.add_argument("--lock-id", default=None, metavar="ID",
+                        help="My lock id (else SCOPE_LEASE_LOCK_ID). A lock with this id is mine.")
+    p_hold.add_argument("--owner", default=None, metavar="OWNER",
+                        help="My owner (else SCOPE_LEASE_OWNER, git branch, or user.email). "
+                             "A lock stamped with this owner is mine.")
+    p_hold.add_argument("--json", action="store_true",
+                        help="One JSON object per path on stdout (machine-readable).")
+
     args = ap.parse_args(argv)
     root = Path(args.root)
+
+    if args.cmd == "holder":
+        # A read-only query: it ignores the SCOPE_LEASE on/off switch (answering "free" because
+        # the switch is off would be a wrong answer, not a no-op) and needs no path source.
+        return _cmd_holder(args, root)
 
     if not _enabled():
         print("scope-lease: SCOPE_LEASE is off — no-op (nothing claimed/checked/released).",

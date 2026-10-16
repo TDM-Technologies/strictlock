@@ -56,6 +56,8 @@ def run_gate(
     env["PLAN_GATE_LOG_DIR"] = str(log_dir) if log_dir else ""
     env["PLAN_GATE_LOG_DECISIONS"] = ""
     env["PLAN_GATE_MCP_WRITE_TOOLS"] = ""
+    env["PLAN_GATE_SCOPE_LEASE"] = ""
+    env["PLAN_GATE_REQUIRE_LEASE"] = ""
     # Test-only override: scan our staged plans dir, never the real one.
     env["_PLAN_GATE_TEST_PLANS_DIR"] = str(plans_dir)
     if extra_env:
@@ -1654,6 +1656,263 @@ class WorktreeClaimTests(unittest.TestCase):
         p = bash("npm test")
         self.assertEqual(decision(p), "deny")
         self.assertIn("likely drift", self.reason(p))
+
+
+SCOPE_LEASE = HERE.parent.parent / "scope-lease" / "scope-lease.py"
+
+
+def _git(root, *args):
+    proc = subprocess.run(["git", "-C", str(root), *args], stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        raise AssertionError("git %s failed: %s" % (" ".join(args), proc.stderr))
+    return proc.stdout
+
+
+class ScopeLeaseTests(unittest.TestCase):
+    """PLAN_GATE_SCOPE_LEASE: every write target is looked up with `scope-lease.py
+    holder` before the plan check; a path held by another owner is denied.
+    PLAN_GATE_REQUIRE_LEASE=on also denies a path nobody holds."""
+
+    WRITER = "externalized-memory/atomic-write.py"
+    TOOL = "mcp__fs__write_file"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.plans = root / "plans"
+        self.plans.mkdir()
+        self.repo = root / "repo"
+        self.repo.mkdir()
+        _git(self.repo, "init", "-q")
+        _git(self.repo, "config", "user.email", "t@example.com")
+        _git(self.repo, "config", "user.name", "T")
+        (self.repo / "seed.txt").write_text("x\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "seed")
+        self.leased = self.repo / "leased.txt"
+        self.free = self.repo / "free.txt"
+        self.write_plan(self.leased, self.free)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write_plan(self, *paths):
+        body = "".join("  - %s\n" % p for p in paths)
+        (self.plans / "active.md").write_text(
+            "---\nname: lease-test\nstatus: active\nallowed_paths:\n%s"
+            "allowed_commands:\n  - python3 %s\n---\n" % (body, self.WRITER),
+            encoding="utf-8")
+
+    def lease(self, owner, *paths, lock_id=None, deadline=None):
+        env = dict(os.environ, SCOPE_LEASE_OWNER=owner)
+        args = [sys.executable, str(SCOPE_LEASE), "acquire", "--root", str(self.repo),
+                "--source", "paths", "--lock-id", lock_id or ("lock-" + owner), "--paths"]
+        args += [str(p) for p in paths]
+        if deadline:
+            args += ["--deadline", deadline]
+        proc = subprocess.run(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def env(self, owner, **more):
+        e = {"PLAN_GATE_SCOPE_LEASE": str(SCOPE_LEASE), "SCOPE_LEASE_OWNER": owner,
+             "SCOPE_LEASE_LOCK_ID": "", "PLAN_GATE_REQUIRE_LEASE": "",
+             "PLAN_GATE_MCP_WRITE_TOOLS": self.TOOL + ":path"}
+        e.update(more)
+        return e
+
+    def run_edit(self, path, owner, **more):
+        return run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(path)}},
+                        self.plans, cwd=self.repo, extra_env=self.env(owner, **more))
+
+    def run_bash(self, cmd, owner, **more):
+        return run_gate({"tool_name": "Bash", "tool_input": {"command": cmd}},
+                        self.plans, cwd=self.repo, extra_env=self.env(owner, **more))
+
+    def run_mcp(self, path, owner, **more):
+        return run_gate({"tool_name": self.TOOL, "tool_input": {"path": str(path)}},
+                        self.plans, cwd=self.repo, extra_env=self.env(owner, **more))
+
+    def reason(self, proc):
+        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    # --- held by someone else: deny on every write surface -------------------------
+    def test_edit_denied_when_held_by_other_and_names_holder_and_age(self):
+        self.lease("alice", self.leased)
+        p = self.run_edit(self.leased, "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+        r = self.reason(p)
+        self.assertIn("alice", r)
+        self.assertIn("lease age", r)
+        self.assertIn("lock-alice", r)
+
+    def test_redirect_denied_when_held_by_other(self):
+        self.lease("alice", self.leased)
+        p = self.run_bash("echo hi > %s" % self.leased, "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("alice", self.reason(p))
+
+    def test_writer_script_denied_when_held_by_other(self):
+        self.lease("alice", self.leased)
+        p = self.run_bash("python3 %s %s" % (self.WRITER, self.leased), "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("alice", self.reason(p))
+
+    def test_mcp_denied_when_held_by_other(self):
+        self.lease("alice", self.leased)
+        p = self.run_mcp(self.leased, "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("alice", self.reason(p))
+
+    def test_deny_is_logged_with_its_own_class(self):
+        self.lease("alice", self.leased)
+        logs = Path(self._tmp.name) / "logs"
+        self.run_edit(self.leased, "bob", PLAN_GATE_LOG_DIR=str(logs),
+                      PLAN_GATE_REQUIRE_APPROVAL="off")
+        rows = [json.loads(x) for x in
+                (logs / "plan-gate-decisions.log").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[-1]["class"], "scope_lease")
+
+    # --- mine / free: the normal plan decision applies -----------------------------
+    def test_held_by_me_gets_the_normal_plan_decision(self):
+        self.lease("alice", self.leased)
+        self.assertEqual(decision(self.run_edit(self.leased, "alice")), "allow")
+        self.assertEqual(decision(self.run_bash("echo hi > %s" % self.leased, "alice")), "allow")
+        self.assertEqual(decision(self.run_mcp(self.leased, "alice")), "allow")
+        # mine, but the plan does not list it -> the plan still denies
+        other = self.repo / "other.txt"
+        self.lease("alice", other)
+        self.assertEqual(decision(self.run_edit(other, "alice")), "deny")
+
+    def test_held_by_me_via_lock_id(self):
+        self.lease("alice", self.leased, lock_id="shared-lock")
+        p = self.run_edit(self.leased, "bob", SCOPE_LEASE_LOCK_ID="shared-lock")
+        self.assertEqual(decision(p), "allow", p.stdout)
+
+    def test_free_path_gets_the_normal_plan_decision(self):
+        self.assertEqual(decision(self.run_edit(self.free, "bob")), "allow")
+        self.assertEqual(decision(self.run_edit(self.repo / "nope.txt", "bob")), "deny")
+
+    def test_expired_lease_is_free(self):
+        self.lease("alice", self.leased, deadline="2000-01-01T00:00:00+00:00")
+        self.assertEqual(decision(self.run_edit(self.leased, "bob")), "allow")
+
+    def test_unset_means_today_s_behavior_and_no_subprocess(self):
+        self.lease("alice", self.leased)
+        stub = Path(self._tmp.name) / "stub.py"
+        stub.write_text("import sys; sys.exit(9)\n")
+        # PLAN_GATE_SCOPE_LEASE empty: lease is ignored entirely (held path is allowed).
+        p = self.run_edit(self.leased, "bob", PLAN_GATE_SCOPE_LEASE="")
+        self.assertEqual(decision(p), "allow", p.stdout)
+
+    def test_bypass_still_works(self):
+        self.lease("alice", self.leased)
+        p = self.run_edit(self.leased, "bob", PLAN_GATE_BYPASS="on")
+        self.assertEqual(decision(p), "allow")
+
+    def test_reads_are_never_lease_checked(self):
+        self.lease("alice", self.leased)
+        self.assertEqual(decision(self.run_bash("cat %s" % self.leased, "bob")), "allow")
+
+    def test_batch_one_held_target_denies_the_whole_call(self):
+        self.lease("alice", self.leased)
+        self.write_plan(self.leased, self.free)
+        p = self.run_bash("echo a > %s && echo b > %s" % (self.free, self.leased), "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+
+    # --- strict mode ----------------------------------------------------------------
+    def test_require_lease_denies_unleased_path_and_says_acquire(self):
+        for p in (self.run_edit(self.free, "bob", PLAN_GATE_REQUIRE_LEASE="on"),
+                  self.run_bash("echo hi > %s" % self.free, "bob", PLAN_GATE_REQUIRE_LEASE="1"),
+                  self.run_mcp(self.free, "bob", PLAN_GATE_REQUIRE_LEASE="TRUE"),
+                  self.run_bash("python3 %s %s" % (self.WRITER, self.free), "bob",
+                                PLAN_GATE_REQUIRE_LEASE="yes")):
+            self.assertEqual(decision(p), "deny", p.stdout)
+            self.assertIn("acquire", self.reason(p))
+
+    def test_require_lease_allows_my_lease(self):
+        self.lease("bob", self.free)
+        p = self.run_edit(self.free, "bob", PLAN_GATE_REQUIRE_LEASE="on")
+        self.assertEqual(decision(p), "allow", p.stdout)
+
+    def test_require_lease_default_off(self):
+        self.assertEqual(decision(self.run_edit(self.free, "bob")), "allow")
+
+    def test_require_lease_exempts_always_writable_dirs(self):
+        notes = self.repo / "notes"
+        notes.mkdir()
+        p = self.run_edit(notes / "a.md", "bob", PLAN_GATE_REQUIRE_LEASE="on",
+                          PLAN_GATE_ALWAYS_WRITABLE=str(notes))
+        self.assertEqual(decision(p), "allow", p.stdout)
+
+    def test_require_lease_without_script_fails_closed(self):
+        p = self.run_edit(self.free, "bob", PLAN_GATE_REQUIRE_LEASE="on",
+                          PLAN_GATE_SCOPE_LEASE="")
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("PLAN_GATE_SCOPE_LEASE", self.reason(p))
+
+    # --- failure modes: fail closed, with the bypass how-to ------------------------
+    def test_holder_error_denies(self):
+        stub = Path(self._tmp.name) / "stub.py"
+        stub.write_text("import sys; sys.stderr.write('boom'); sys.exit(3)\n")
+        p = self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE=str(stub))
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("PLAN_GATE_BYPASS", self.reason(p))
+        self.assertIn("boom", self.reason(p))
+
+    def test_garbage_output_denies(self):
+        stub = Path(self._tmp.name) / "stub.py"
+        stub.write_text("print('not json')\n")
+        p = self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE=str(stub))
+        self.assertEqual(decision(p), "deny")
+
+    def test_missing_script_denies(self):
+        p = self.run_edit(self.free, "bob",
+                          PLAN_GATE_SCOPE_LEASE=str(Path(self._tmp.name) / "nope.py"))
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("PLAN_GATE_BYPASS", self.reason(p))
+
+    def test_timeout_denies(self):
+        stub = Path(self._tmp.name) / "slow.py"
+        stub.write_text("import time; time.sleep(30)\n")
+        p = self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE=str(stub),
+                          PLAN_GATE_SCOPE_LEASE_TIMEOUT="0.5")
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("timed out", self.reason(p))
+
+    def test_not_in_a_repo_is_a_denied_error_not_a_crash(self):
+        loose = Path(self._tmp.name) / "loose"
+        loose.mkdir()
+        self.write_plan(loose / "f.txt")
+        p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(loose / "f.txt")}},
+                     self.plans, cwd=loose, extra_env=self.env("bob"))
+        self.assertEqual(decision(p), "deny")
+
+    # --- canonicalization stays in scope-lease --------------------------------------
+    def test_case_fold_matches_scope_lease_when_git_says_ignorecase(self):
+        _git(self.repo, "config", "core.ignorecase", "true")
+        self.write_plan(self.repo / "Foo.md", self.repo / "foo.md")
+        self.lease("alice", self.repo / "Foo.md")
+        p = self.run_edit(self.repo / "foo.md", "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("alice", self.reason(p))
+
+    def test_case_is_distinct_when_git_says_case_sensitive(self):
+        _git(self.repo, "config", "core.ignorecase", "false")
+        self.write_plan(self.repo / "Foo.md", self.repo / "foo.md")
+        self.lease("alice", self.repo / "Foo.md")
+        self.assertEqual(decision(self.run_edit(self.repo / "foo.md", "bob")), "allow")
+
+    def test_unicode_fold_matches_scope_lease(self):
+        import unicodedata
+        _git(self.repo, "config", "core.precomposeunicode", "true")
+        nfc = unicodedata.normalize("NFC", "café.md")
+        nfd = unicodedata.normalize("NFD", "café.md")
+        self.write_plan(self.repo / nfc, self.repo / nfd)
+        self.lease("alice", self.repo / nfc)
+        p = self.run_edit(self.repo / nfd, "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
 
 
 if __name__ == "__main__":

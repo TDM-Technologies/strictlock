@@ -717,6 +717,120 @@ class CLITests(unittest.TestCase):
         self.assertEqual(lock_refs(self.root), [])
 
 
+def _run_holder(root: Path, paths: list, env_extra: dict, *flags: str):
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("SCOPE_LEASE", "SCOPE_LEASE_OWNER", "SCOPE_LEASE_LOCK_ID")}
+    env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "holder", "--root", str(root), *flags, *map(str, paths)],
+        capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+    )
+
+
+class HolderTests(unittest.TestCase):
+    """`holder`: read-only lookup. 0 = every path free or mine, 5 = any held by someone else."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = make_repo(Path(self._tmp.name))
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_free_path_exit_0(self):
+        p = _run_holder(self.root, [self.root / "src" / "free.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("FREE", p.stdout)
+
+    def test_held_by_other_exit_5_names_holder_and_age(self):
+        p = _run_holder(self.root, [self.root / "src" / "a.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 5, p.stderr)
+        self.assertIn("alice", p.stdout)
+        self.assertIn("lock-a", p.stdout)
+        self.assertIn("age", p.stdout)
+
+    def test_mine_by_owner_and_by_lock_id(self):
+        a = _run_holder(self.root, ["src/a.py"], {"SCOPE_LEASE_OWNER": "alice"})
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertIn("MINE", a.stdout)
+        b = _run_holder(self.root, ["src/a.py"],
+                        {"SCOPE_LEASE_OWNER": "bob", "SCOPE_LEASE_LOCK_ID": "lock-a"})
+        self.assertEqual(b.returncode, 0, b.stderr)
+        self.assertIn("MINE", b.stdout)
+
+    def test_json_age_is_reported(self):
+        p = _run_holder(self.root, ["src/a.py"], {"SCOPE_LEASE_OWNER": "bob"}, "--json")
+        row = json.loads(p.stdout.splitlines()[0])
+        self.assertEqual((row["status"], row["owner"], row["lock_id"]), ("held", "alice", "lock-a"))
+        self.assertIsInstance(row["age_seconds"], int)
+        self.assertGreaterEqual(row["age_seconds"], 0)
+
+    def test_one_held_among_many_is_exit_5(self):
+        p = _run_holder(self.root, ["src/free.py", "src/a.py"], {"SCOPE_LEASE_OWNER": "bob"},
+                        "--json")
+        self.assertEqual(p.returncode, 5)
+        self.assertEqual([json.loads(x)["status"] for x in p.stdout.splitlines()],
+                         ["free", "held"])
+
+    def test_expired_lease_counts_as_free(self):
+        sl.acquire_lease(root=self.root, lock_id="old", owner="carol",
+                         paths=["src/old.py"], deadline=past())
+        p = _run_holder(self.root, ["src/old.py"], {"SCOPE_LEASE_OWNER": "bob"}, "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        row = json.loads(p.stdout.splitlines()[0])
+        self.assertEqual(row["status"], "free")
+        self.assertTrue(row["expired"])
+
+    def test_writes_nothing(self):
+        before = set(lock_refs(self.root))
+        _run_holder(self.root, ["src/a.py", "src/new.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(set(lock_refs(self.root)), before)
+
+    def test_ignores_scope_lease_off_switch(self):
+        p = _run_holder(self.root, ["src/a.py"],
+                        {"SCOPE_LEASE": "off", "SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 5)
+
+    def test_foreign_ref_store_is_exit_6(self):
+        ref = sl._lease_ref("src/zz.py")
+        blob = sl._hash_lease_blob(self.root, lock_id="x", owner="y", token=1, deadline=future(),
+                                   refstore={"host": "other-host", "git_dir": "/elsewhere"})
+        _git(self.root, "update-ref", ref, blob)
+        p = _run_holder(self.root, ["src/zz.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 6)
+
+    def test_not_a_repo_is_an_error(self):
+        plain = Path(self._tmp.name) / "plain"
+        plain.mkdir()
+        p = _run_holder(plain, ["x.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertGreaterEqual(p.returncode, 1)
+        self.assertNotIn(p.returncode, (5,))
+
+    def test_case_fold_follows_git_ignorecase(self):
+        # Same canonicalization as acquire: with core.ignorecase a different spelling of
+        # the leased file is still held; on a case-sensitive repo it is a different file.
+        _git(self.root, "config", "core.ignorecase", "true")
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                         paths=["docs/Foo.md"], deadline=future())
+        p = _run_holder(self.root, ["docs/foo.md"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 5, p.stdout)
+        _git(self.root, "config", "core.ignorecase", "false")
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                         paths=["docs/Bar.md"], deadline=future())
+        q = _run_holder(self.root, ["docs/bar.md"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(q.returncode, 0, q.stdout)
+
+    def test_extend_keeps_original_acquire_time(self):
+        first = sl.holder_status(root=self.root, paths=["src/a.py"], owner="bob")[0]
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+        second = sl.holder_status(root=self.root, paths=["src/a.py"], owner="bob")[0]
+        self.assertEqual(first["acquired"], second["acquired"])
+        self.assertEqual(second["token"], first["token"] + 1)
+
+
 class EnabledSwitchValueTests(unittest.TestCase):
     """SCOPE_LEASE opt-out switch: unset runs; on/1/true/yes (any case, trimmed) run;
     any other value disables."""

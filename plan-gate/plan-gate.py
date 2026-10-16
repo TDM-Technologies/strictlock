@@ -55,6 +55,13 @@ CONFIGURATION (all via environment; no machine-specific defaults are baked in)
                             python/python3/py segment running one is a file write
                             to its argpos-th (1-based) positional argument, gated
                             like a `>` target. Malformed value fails closed.
+  PLAN_GATE_SCOPE_LEASE     optional path to scope-lease.py: every file-write
+                            target is looked up with `scope-lease.py holder`
+                            before the plan check; a path held by another agent
+                            is denied; a lookup failure denies. Unset = no lookup.
+  PLAN_GATE_REQUIRE_LEASE   on/1/true/yes: a write to a path with no lease is
+                            denied too. PLAN_GATE_SCOPE_LEASE_TIMEOUT: seconds
+                            for the lookup (default 10).
   PLAN_GATE_MCP_WRITE_TOOLS optional comma-separated list of MCP tool names that
                             modify external state (e.g. a cloud-drive create/copy
                             tool). A bare name is default-denied. `tool:arg` or
@@ -124,6 +131,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -1630,7 +1638,7 @@ def _classify_redirect(target: str, has_cd: bool, what: str = "redirection targe
       ("null", None)    /dev/null (NUL on Windows) — never a real write
       ("error", msg)    cannot be resolved safely -> deny
       ("log", msg)      under PLAN_GATE_LOG_DIR -> deny (log_self_protect)
-      ("always", None)  under an always-writable directory -> allowed
+      ("always", path)  under an always-writable directory -> allowed
       ("plan", path)    absolute path that must match an allowed_paths entry
     A RELATIVE target resolves against the session CWD — but not after a
     `cd`/`pushd`/`popd` in the same command, whose destination is not known
@@ -1663,7 +1671,7 @@ def _classify_redirect(target: str, has_cd: bool, what: str = "redirection targe
             f"gate never authorizes gated writes to its own decision log."
         )
     if _under_any(norm(t), ALWAYS_WRITABLE_DIRS):
-        return "always", None
+        return "always", t
     return "plan", t
 
 
@@ -1858,20 +1866,156 @@ def _tokenize_ps(cmd: str) -> list[list[str]]:
     return segs
 
 
-def _extra_write_target_checks(target: str):
-    """Hook point for additional per-target write checks. Returns a deny reason
-    or None. Runs for every resolved writer-script target (and, when added, any
-    other file-write target) AFTER log self-protection and BEFORE the allowed_paths
-    check. The scope-lease holder check (spec section 3) plugs in here."""
+# --- scope-lease integration -------------------------------------------------------
+# PLAN_GATE_SCOPE_LEASE=/path/to/scope-lease.py makes every file-write target (Edit /
+# Write / NotebookEdit file_path, Bash redirect targets, writer-script targets, MCP
+# path arguments) get looked up with `scope-lease.py holder` BEFORE the plan check.
+# A path held by another agent is denied. Canonicalization lives only in scope-lease;
+# plan-gate just hands it absolute paths. PLAN_GATE_REQUIRE_LEASE=on additionally
+# denies a write to a path nobody holds (targets under an always-writable directory,
+# i.e. plans / memory, are exempt from that "must hold one" rule only).
+SCOPE_LEASE_SCRIPT = os.environ.get("PLAN_GATE_SCOPE_LEASE", "").strip()
+
+
+def _lease_timeout() -> float:
+    raw = os.environ.get("PLAN_GATE_SCOPE_LEASE_TIMEOUT", "").strip()
+    try:
+        val = float(raw) if raw else 10.0
+    except ValueError:
+        return 10.0
+    return val if val > 0 else 10.0
+
+
+def _fmt_age(seconds) -> str:
+    if not isinstance(seconds, int):
+        return "unknown"
+    if seconds < 120:
+        return f"{max(seconds, 0)}s"
+    if seconds < 7200:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+def _lease_root_for(abs_target: str) -> str:
+    """The repo / worktree whose lock refs cover `abs_target`: the nearest git root
+    above it, else the hook's working directory (a path outside any repo can only
+    have been leased through the repo the agent works in)."""
+    try:
+        repo, wt = find_repo_and_worktree_roots(Path(os.path.dirname(abs_target) or "."))
+    except Exception:
+        repo, wt = None, None
+    root = wt or repo
+    if root is not None:
+        return str(root)
+    try:
+        return os.getcwd()
+    except OSError:
+        return "."
+
+
+def _lease_check(targets: list[str]):
+    """Deny reason (str) or None. See the scope-lease integration note above."""
+    require = _env_truthy("PLAN_GATE_REQUIRE_LEASE")
+    if not SCOPE_LEASE_SCRIPT and not require:
+        return None
+    uniq: list[str] = []
+    for t in targets:
+        a = t if os.path.isabs(t) else os.path.join(os.getcwd(), t)
+        a = os.path.normpath(a)
+        if a not in uniq:
+            uniq.append(a)
+    if not uniq:
+        return None
+    if not SCOPE_LEASE_SCRIPT:
+        return (
+            "plan-gate: PLAN_GATE_REQUIRE_LEASE is on but PLAN_GATE_SCOPE_LEASE (the "
+            "path to scope-lease.py) is not set, so lease ownership cannot be "
+            "checked. Failing closed. Set PLAN_GATE_SCOPE_LEASE, or turn "
+            "PLAN_GATE_REQUIRE_LEASE off. " + _BYPASS_HOWTO
+        )
+    script = os.path.expanduser(SCOPE_LEASE_SCRIPT)
+    groups: dict = {}
+    for a in uniq:
+        groups.setdefault(_lease_root_for(a), []).append(a)
+    timeout = _lease_timeout()
+    results: list[dict] = []
+    for root, paths in groups.items():
+        cmd = [sys.executable, script, "holder", "--root", root, "--json", "--"] + paths
+        try:
+            proc = subprocess.run(
+                cmd, cwd=root if os.path.isdir(root) else None, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return (
+                f"plan-gate: scope-lease holder lookup timed out after {timeout:g}s, so "
+                f"lease ownership of {paths[0]} is unknown. Failing closed. " + _BYPASS_HOWTO
+            )
+        except OSError as exc:
+            return (
+                f"plan-gate: could not run scope-lease ({exc}); PLAN_GATE_SCOPE_LEASE="
+                f"{SCOPE_LEASE_SCRIPT!r}. Failing closed. " + _BYPASS_HOWTO
+            )
+        out = proc.stdout.decode("utf-8", "replace")
+        if proc.returncode not in (0, 5):
+            err = (proc.stderr.decode("utf-8", "replace").strip() or out.strip())[:300]
+            return (
+                f"plan-gate: scope-lease holder lookup failed (exit {proc.returncode}: "
+                f"{err}), so lease ownership of {paths[0]} is unknown. Failing closed. "
+                + _BYPASS_HOWTO
+            )
+        try:
+            rows = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+            if len(rows) != len(paths) or not all(isinstance(r, dict) for r in rows):
+                raise ValueError("unexpected row count")
+        except ValueError:
+            return (
+                f"plan-gate: scope-lease holder returned output plan-gate cannot read "
+                f"({out[:120]!r}). Failing closed. " + _BYPASS_HOWTO
+            )
+        for p, r in zip(paths, rows):
+            r["_target"] = p
+        results.extend(rows)
+    for r in results:
+        if r.get("status") == "held":
+            return (
+                f"plan-gate: {r['_target']} is leased by another agent: lock "
+                f"{r.get('lock_id', '?')!r} (owner {r.get('owner', '?')}), lease age "
+                f"{_fmt_age(r.get('age_seconds'))}, until {r.get('deadline', '?')}. "
+                f"Pick a different file, or wait for the lease to lapse or be released."
+            )
+    if require:
+        for r in results:
+            if r.get("status") == "free" and not _under_any(
+                    norm(r["_target"]), ALWAYS_WRITABLE_DIRS):
+                why = "its lease has expired" if r.get("expired") else "no lease is held on it"
+                return (
+                    f"plan-gate: {r['_target']}: {why} (PLAN_GATE_REQUIRE_LEASE is on). "
+                    f"Acquire it first: scope-lease.py acquire."
+                )
+            if r.get("status") not in ("free", "mine"):
+                return (f"plan-gate: scope-lease reported an unknown status for "
+                        f"{r['_target']}. Failing closed.")
     return None
+
+
+def _extra_write_target_checks(targets: list[str]):
+    """Per-write-target checks beyond log self-protection / always-writable /
+    allowed_paths. Takes ALL of one tool call's write targets (so the scope-lease
+    lookup is one subprocess per repo, not one per path) and returns a deny reason
+    or None. Runs AFTER log self-protection and BEFORE the plan check."""
+    return _lease_check(targets)
 
 
 def _collect_writer_targets(raw_segs: list[str], shell: str, has_cd: bool):
     """Find writer-script invocations among `raw_segs` (Bash segments, or for
     shell == "ps" the whole command) and classify each target like a redirect.
-    Returns (plan_targets, problem): plan_targets is [(abs_target, script)] that
-    must be in allowed_paths; problem is None or (deny_reason, log_class)."""
+    Returns (plan_targets, problem, all_targets): plan_targets is
+    [(abs_target, script)] that must be in allowed_paths; problem is None or
+    (deny_reason, log_class); all_targets is every resolved absolute target (for
+    the scope-lease check)."""
     plan_targets: list[tuple[str, str]] = []
+    all_targets: list[str] = []
     token_segs: list[list[str]] = []
     for raw in raw_segs:
         try:
@@ -1888,7 +2032,7 @@ def _collect_writer_targets(raw_segs: list[str], shell: str, has_cd: bool):
                     f"script {hit[0]} ({raw[:120]!r}); where it writes cannot be "
                     f"resolved statically. Failing closed.",
                     "writer_script",
-                )
+                ), all_targets
     for toks in token_segs:
         if shell == "ps" and toks and toks[0].lower() in _PS_CD_WORDS:
             has_cd = True
@@ -1900,22 +2044,18 @@ def _collect_writer_targets(raw_segs: list[str], shell: str, has_cd: bool):
         ok, val = _writer_target(base, args)
         if not ok:
             return plan_targets, (f"plan-gate: writer script: {val}. Failing closed.",
-                                  "writer_script")
+                                  "writer_script"), all_targets
         what = f"{base} write target"
         kind, v = _classify_redirect(val, has_cd, what)
         if kind == "error":
-            return plan_targets, (v, "writer_script")
+            return plan_targets, (v, "writer_script"), all_targets
         if kind == "log":
-            return plan_targets, (v, "log_self_protect")
+            return plan_targets, (v, "log_self_protect"), all_targets
         if kind in ("always", "plan"):
-            abs_t = v if kind == "plan" else os.path.normpath(
-                val if os.path.isabs(val) else os.path.join(os.getcwd(), val))
-            extra = _extra_write_target_checks(abs_t)
-            if extra:
-                return plan_targets, (extra, "writer_script")
+            all_targets.append(v)
             if kind == "plan":
                 plan_targets.append((v, base))
-    return plan_targets, None
+    return plan_targets, None, all_targets
 
 
 def _writer_cfg_deny_reason() -> str:
@@ -1933,9 +2073,10 @@ def _writer_cfg_deny_reason() -> str:
 _CALL_CTX: dict = {"tool": "", "tool_input": {}}
 
 _BYPASS_HOWTO = (
-    "To proceed anyway, set PLAN_GATE_BYPASS=on inline for that command (in the "
-    "environment the hook runs in); every bypass use is logged as an "
-    "emergency_bypass row."
+    "To proceed anyway, set PLAN_GATE_BYPASS=on in the environment the harness "
+    "starts the hook with (the env Claude Code was launched with, or the "
+    "settings.json env block); it cannot be passed as a prefix on the agent's "
+    "command. Every bypass use is logged as an emergency_bypass row."
 )
 
 
@@ -2091,6 +2232,11 @@ def main() -> None:
                 f"never authorizes gated writes to its own decision log.",
                 class_="log_self_protect",
             )
+        # Scope-lease: a path leased by another agent is denied (and, with
+        # PLAN_GATE_REQUIRE_LEASE, a path nobody holds) before the plan is consulted.
+        lease_reason = _extra_write_target_checks([str(target)])
+        if lease_reason:
+            gated_deny(lease_reason, class_="scope_lease")
         if _under_any(target_n, ALWAYS_WRITABLE_DIRS):
             gated_allow(
                 "plan-gate: target is under an always-writable directory.",
@@ -2129,6 +2275,7 @@ def main() -> None:
         # Redirection-as-write: each target is a file write, gated like
         # Edit/Write (log self-protection -> always-writable -> allowed_paths).
         plan_targets: list[str] = []
+        lease_targets: list[str] = []
         for rd in all_redirects:
             r_kind, r_val = _classify_redirect(rd, has_cd)
             if r_kind == "error":
@@ -2137,14 +2284,20 @@ def main() -> None:
                 gated_deny(r_val, class_="log_self_protect")
             elif r_kind == "plan":
                 plan_targets.append(r_val)
+                lease_targets.append(r_val)
+            elif r_kind == "always":
+                lease_targets.append(r_val)
         # Writer scripts (python atomic-write.py TARGET ...): the target is a
         # file write, gated like a redirect target.
         if _WRITER_CFG_ERROR and _first_bad_segment(all_segs, []) is not None:
             gated_deny(_writer_cfg_deny_reason(), class_="writer_script")
-        writer_plan_targets, w_problem = _collect_writer_targets(
+        writer_plan_targets, w_problem, w_all = _collect_writer_targets(
             all_segs, "bash", has_cd)
         if w_problem:
             gated_deny(w_problem[0], class_=w_problem[1])
+        lease_reason = _extra_write_target_checks(lease_targets + w_all)
+        if lease_reason:
+            gated_deny(lease_reason, class_="scope_lease")
         # Pre-plan read-only bypass: a compound is read-only only if EVERY
         # segment is (a `cd` segment is a navigation no-op), and every write
         # redirection is /dev/null or lands in an always-writable directory.
@@ -2184,10 +2337,13 @@ def main() -> None:
         # file write, gated like a redirect target.
         if _WRITER_CFG_ERROR:
             gated_deny(_writer_cfg_deny_reason(), class_="writer_script")
-        ps_writer_plan_targets, w_problem = _collect_writer_targets(
+        ps_writer_plan_targets, w_problem, ps_w_all = _collect_writer_targets(
             [cmd], "ps", False)
         if w_problem:
             gated_deny(w_problem[0], class_=w_problem[1])
+        lease_reason = _extra_write_target_checks(ps_w_all)
+        if lease_reason:
+            gated_deny(lease_reason, class_="scope_lease")
 
     mcp_plan_targets: list[str] = []
     if tool in MCP_FILE_WRITE_TOOLS:
@@ -2217,10 +2373,9 @@ def main() -> None:
                         f"never authorizes gated writes to its own decision log.",
                         class_="log_self_protect",
                     )
-            for mt in mcp_targets:
-                extra_reason = _extra_write_target_checks(mt)
-                if extra_reason:
-                    gated_deny(extra_reason, class_="mcp_target")
+            extra_reason = _extra_write_target_checks(mcp_targets)
+            if extra_reason:
+                gated_deny(extra_reason, class_="scope_lease")
             mcp_plan_targets = [
                 mt for mt in mcp_targets
                 if not _under_any(norm(os.path.normpath(mt)), ALWAYS_WRITABLE_DIRS)

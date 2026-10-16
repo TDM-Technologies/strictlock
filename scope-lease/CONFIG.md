@@ -71,7 +71,26 @@ The contract a calling script branches on:
 | `2` | Usage error (argparse). |
 | `4` | `fence-check` **lost** — a held scope was reclaimed away. "A guard tripped: write nothing." |
 | `5` | `acquire` **DENY** — a scope is held by a live holder. First-mover wins; nothing was written. |
+| `5` (`holder`) | At least one queried path is held by a live lock that is not mine. |
 | `6` | **Machine-boundary fail-loud** — a lock from a non-shared ref store. Cross-machine exclusion is not real here; refusing rather than degrading silently. |
+
+## `holder` — read-only lookup
+
+```
+python3 scope-lease.py holder [--root DIR] [--lock-id ID] [--owner OWNER] [--json] PATH ...
+```
+
+Reports, per path, whether it is `FREE`, `MINE` or `HELD` by someone else, and writes
+nothing. Exit `0` when every path is free or mine, `5` when at least one is held by someone
+else (the holder, the lease age and the deadline are printed), `1`/`6` on errors. It uses the
+same path canonicalization as `acquire` (so case/Unicode folding agrees), looks in the repo at
+`--root` (default: the current directory), and ignores the `SCOPE_LEASE` on/off switch.
+
+*Mine* means the lock's `lock_id` equals `--lock-id` / `SCOPE_LEASE_LOCK_ID`, **or** the lock's
+`owner` equals `--owner` / `SCOPE_LEASE_OWNER` (else the worktree's git branch, else
+`user.email`). An expired lock counts as free. `--json` prints one JSON object per path
+(`path`, `key`, `status`, and for a lock: `lock_id`, `owner`, `token`, `deadline`, `acquired`,
+`age_seconds`, `expired`). `plan-gate` calls this when `PLAN_GATE_SCOPE_LEASE` is set.
 
 ## Reclaim is surfaced, never silent
 

@@ -23,6 +23,7 @@ refs/locks/<sha1(canonical-repo-relative-path)>  ->  a blob
 | `owner` | string | Human/agent label (branch, email, CI runner id). Informational — used in DENY/reclaim messages, not in the ownership decision. |
 | `token` | int | Monotonic per-path fencing token. Starts at 1; `+1` on every reclaim/extend. The replay-safety backstop for reclaim CAS. |
 | `deadline` | string | ISO-8601 expiry. Past the deadline the lock is **reclaimable**. The only liveness signal. |
+| `acquired` | string | ISO-8601 time the holder first took the scope (kept on extend, restarted on reclaim). Only used by `holder` to report a lease age; absent on locks minted by older versions (age reported as unknown). |
 | `host` | string | The hostname that minted the lock. |
 | `git_dir` | string | The resolved git-common-dir that minted it. `host` + `git_dir` together identify the ref store. |
 
