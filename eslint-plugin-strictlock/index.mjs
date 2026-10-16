@@ -11,14 +11,18 @@
  * objects), so adopters can spread it straight into `eslint.config.js`.
  */
 import noSmokeOnlyAssertions from './rules/no-smoke-only-assertions.mjs';
+import noTautologicalAssertions from './rules/no-tautological-assertions.mjs';
+import noUnassertedResult from './rules/no-unasserted-result.mjs';
 
 const meta = {
   name: 'eslint-plugin-strictlock',
-  version: '0.1.0',
+  version: '0.2.0',
 };
 
 const rules = {
   'no-smoke-only-assertions': noSmokeOnlyAssertions,
+  'no-tautological-assertions': noTautologicalAssertions,
+  'no-unasserted-result': noUnassertedResult,
 };
 
 // Defined first as a bare object so the recommended config can reference the
@@ -36,6 +40,8 @@ plugin.configs.recommended = [
     plugins: { strictlock: plugin },
     rules: {
       'strictlock/no-smoke-only-assertions': 'error',
+      'strictlock/no-tautological-assertions': 'warn',
+      'strictlock/no-unasserted-result': 'warn',
     },
   },
 ];
@@ -45,6 +51,8 @@ plugin.configs['recommended-legacy'] = {
   plugins: ['strictlock'],
   rules: {
     'strictlock/no-smoke-only-assertions': 'error',
+    'strictlock/no-tautological-assertions': 'warn',
+    'strictlock/no-unasserted-result': 'warn',
   },
 };
 
