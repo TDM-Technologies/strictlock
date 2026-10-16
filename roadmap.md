@@ -4,6 +4,7 @@ StrictLock ships as an umbrella that grows. The shipped suite now spans three fa
 **Gates** ([`plan-gate`](plan-gate/), [`commit-msg-gate`](commit-msg-gate/),
 [`generated-sink-commit-gate`](generated-sink-commit-gate/) /
 [`generated-sink-prepush-gate`](generated-sink-prepush-gate/),
+[`test-protection-guard`](test-protection-guard/),
 [`eslint-plugin-strictlock`](eslint-plugin-strictlock/)), **Hygiene**
 ([`memory-cap`](memory-cap/), [`externalized-memory`](externalized-memory/) and its projection
 bundle), and **Concurrency** ([`scope-lease`](scope-lease/), [`sink-resolver`](sink-resolver/),

@@ -138,7 +138,7 @@ deciding whether to honor the rule. That is the fail-open posture from §1 — t
 not do the asking, and when it doesn't, the action still happens.
 
 The structural approach moves the rule out of the prompt and into a **pre-action hook at the
-tool boundary**. Every consequential tool call — every file write, every command — is
+tool boundary**. Every file edit, shell command, and recognized external-write tool call is
 intercepted *before it executes* and checked against the approved plan. If the action is in the
 plan, it proceeds. If it is not, it is denied, and the agent is told why. The check runs in
 ordinary code, outside the model's control. The agent cannot reason its way past it, cannot
@@ -202,7 +202,7 @@ forgetful skill could skip the asking.
 
 **Stage 4 — the plan-gate proper.** The mature form is a pre-action hook keyed on an approved
 plan's **allowlist**: an explicit enumeration of the exact files the agent may modify and the
-exact commands it may run. Not a directory it may work *in* — the specific files. Not a tool it
+enumerated command prefixes it may run. Not a directory it may work *in* — the specific files. Not a tool it
 may use — the specific command prefixes. The agent cannot act outside the enumerated envelope,
 and the envelope is approved per unit of work, then retired.
 
@@ -212,10 +212,13 @@ incident:
 - **Worktree-anchored path resolution.** An agent working in an isolated copy of a repository
   once wrote to the *main* repository instead, because its plan listed main-repo paths and the
   write "succeeded" — at the wrong target. The fix anchors all path resolution at the session's
-  actual working root, with a **hard guard** that blocks *every* tool call if not one authorized
-  path resolves under the current working tree. A plan that is misaligned with where the session
-  is actually running fails closed, loudly, on the first action — instead of silently writing to
-  the wrong place. (This failure is §5's "silent drift / wrong-target writes.")
+  actual working root, with a **worktree guard**: a plan counts as active for a worktree session
+  only if an authorized absolute path resolves under that worktree, so gated writes and
+  commands outside the read-only set are denied when it does not (read-only inspection stays
+  available; that set is prefix-matched today, so a chained or redirected command starting with a
+  read-only prefix still passes — per-segment checking is in progress). A
+  plan that is misaligned with where the session is actually running fails closed, loudly, on
+  the first gated action — instead of silently writing to the wrong place. (This failure is §5's "silent drift / wrong-target writes.")
 - **Exact-match authorization.** Listing a *directory* as authorized was, at first, assumed to
   authorize everything inside it. It does not: authorization matches files by *exact* path, and a
   directory entry expands to nothing. The gate emits a warning when a plan lists a directory, to
@@ -236,9 +239,9 @@ mitigation each forced, and — honestly — whether the mitigation *prevents* t
 
 | Failure mode | What happened | Mitigation | Prevents or detects? |
 |---|---|---|---|
-| **Momentum Bias** | The agent barrels from intent to action without a stop, producing changes the human never approved ("invisible agent" anxiety). | PLAN → CONFIRM → EXECUTE made *structural*: a pre-action gate blocks any tool call outside an approved plan. | **Prevents.** |
+| **Momentum Bias** | The agent barrels from intent to action without a stop, producing changes the human never approved ("invisible agent" anxiety). | PLAN → CONFIRM → EXECUTE made *structural*: a pre-action gate blocks any recognized file edit, shell command, or configured external-write tool call outside an approved plan. | **Prevents** for Edit/Write/NotebookEdit calls and for single commands. Caveat: command matching is by prefix and only `cd`-led compounds are split today, so a chained or `>`-redirected command that starts with an allowed or read-only prefix is matched on its start (per-segment checking and redirection-as-write are in progress). |
 | **Prose governance ignored** | Instructions like "ask before deleting" are skipped under context pressure. | Move the rule out of the prompt and into a hook the model cannot talk its way past. | **Prevents.** |
-| **Silent drift / wrong-target writes** | An agent working in a git *worktree* wrote to the *main* repo because its plan listed main-repo paths. The write "succeeded" — at the wrong target. | Anchor path resolution at the session's worktree root; a hard guard blocks every tool call if no authorized path resolves under the current worktree. | **Prevents.** |
+| **Silent drift / wrong-target writes** | An agent working in a git *worktree* wrote to the *main* repo because its plan listed main-repo paths. The write "succeeded" — at the wrong target. | Anchor path resolution at the session's worktree root; a plan counts as active only if an absolute authorized path resolves under the current worktree, otherwise gated writes and commands outside the read-only set are denied. | **Prevents** for gated writes (shell commands: see the prefix caveat in the Momentum Bias row). |
 | **Over-broad authorization** | Listing a *directory* as authorized was assumed to authorize everything inside it. | Authorization matches files by *exact* path; directory entries do not expand. The gate warns when a directory is listed. | **Prevents** (forces explicit enumeration). |
 | **Write truncation** | A file write was silently truncated mid-content; the agent believed it had written the whole file. | A post-write checksum/verify step warns when output length looks wrong. Root cause unresolved. | **Detects only** — honest gap. |
 | **Cache / sync lag** | A cross-filesystem cache (virtiofs over a synced folder) served stale file contents after an edit, so the agent read pre-edit state — and signaled nothing, proceeding on the stale read with full confidence. The root cause (host-side writes not invalidating the guest cache) took five debugging sessions to isolate, *because* the failure is silent. | Fresh session/mount per handoff; longer term, route all file I/O through a single executor. | **Mitigates operationally**, not a true fix. |
@@ -287,7 +290,7 @@ internal compliance-framework backlog, maintained separately.)
 
 | Gate mechanism | Evidence it emits (as a byproduct) | Maps to |
 |---|---|---|
-| **Allowlist-scoped, exact-path authorization** — an agent may touch only the specific files and run only the specific commands an approved plan enumerates; least privilege by construction. | Per-plan record of exactly what each agent was permitted to access, scoped per unit of work and then retired. | **SOC 2 CC6** (logical access / least privilege); **ISO/IEC 42001** (controlled operation of the AI system) |
+| **Allowlist-scoped, exact-path authorization** — an agent may touch only the specific files, and run only the commands matching the specific prefixes, an approved plan enumerates; least privilege by construction. | Per-plan record of exactly what each agent was permitted to access, scoped per unit of work and then retired. | **SOC 2 CC6** (logical access / least privilege); **ISO/IEC 42001** (controlled operation of the AI system) |
 | **Append-only, hash-chained decision log** — every decision the gate makes on a gated surface, *allow and deny*, recorded with timestamp, target, command, decision class, and the governing plan; the gate never authorizes a gated write to its own log. | A continuous monitoring trail of authorized activity and policy-violation attempts whose integrity is *verifiable*: rows are hash-chained, so edits and deletions within the record are detectable by re-running the bundled verifier. (Scope honesty: integrity-without-secret — a host-level adversary can still truncate the tail or re-forge the file wholesale; anchor the latest row hash externally where that threat matters.) | **SOC 2 CC7** (system monitoring / security logging); **ISO/IEC 42001** (AI system logging & monitoring) |
 | **PLAN → CONFIRM → EXECUTE + staging review** — no change reaches the working system without an explicit, recorded human approval of a specific plan. | Documented approve→act→record cycle for every change; an auditor can trace any modification back to the approval that authorized it. | **SOC 2 CC8** (change management); **ISO 9001 §8.5** (controlled production / service provision) |
 | **The approved plan as a documented artifact** — each unit of work is a versioned, inspectable plan stating scope, paths, and commands. | Versioned, retained documentation of intended work and its authorization. | **ISO 9001 §7.5** (documented information) |
@@ -315,12 +318,12 @@ unsure.
 Concretely, four moves carry almost all the weight:
 
 1. **Put the rule at the tool boundary, not in the prompt.** A pre-action hook that checks every
-   consequential call against an approved plan is a small amount of code and it changes your risk
+   file edit, shell command, and recognized external-write call against an approved plan is a small amount of code and it changes your risk
    posture immediately. Start there.
 2. **Fail closed.** When an action is unapproved, ambiguous, or surprising, the default is to
    block it and stop for a human. Bias the whole system toward consent over completion.
-3. **Enumerate; never grant broadly.** Authorize the exact files and the exact commands, not the
-   directory or the tool. Broad grants are fail-open invitations wearing the costume of
+3. **Enumerate; never grant broadly.** Authorize the exact files and enumerated command prefixes,
+   not the directory or the tool. Broad grants are fail-open invitations wearing the costume of
    convenience.
 4. **Let the floor be your audit trail.** Don't build a separate "compliance feature." Log every
    gate decision and you will find you have already produced most of what SOC 2 and ISO ask you

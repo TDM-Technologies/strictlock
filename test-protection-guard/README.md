@@ -40,8 +40,8 @@ The same coupling-analysis core ships behind two interchangeable I/O shells. Ado
 
 | Door | Catches | Where the warning lands | Install |
 |---|---|---|---|
-| **PreToolUse hook** (agentic harness, e.g. Claude Code) | the agent's `git commit` tool call | inline in the agent's context (`permissionDecisionReason`) + stderr — so it can self-correct *this turn* | a `PreToolUse` matcher in `settings.json` |
-| **git `pre-commit` hook** (any repo / any harness / humans) | every commit | stderr at commit time | `cp` into `.git/hooks/pre-commit` (or wire via husky / `pre-commit` / lefthook) |
+| **PreToolUse hook** (agentic harness, e.g. Claude Code) | the agent's `git commit` tool call | the hook's decision reason (`permissionDecisionReason`) + stderr — where each lands (agent context, transcript, or log only) depends on the harness | a `PreToolUse` matcher in `settings.json` |
+| **git `pre-commit` hook** (any repo / any harness / humans) | commits that run the hook (see the known limits below) | stderr at commit time | `cp` into `.git/hooks/pre-commit` (or wire via husky / `pre-commit` / lefthook) |
 
 The mode is **auto-detected** — a tool-call JSON payload on stdin selects PreToolUse; empty stdin
 (how git runs a hook) selects pre-commit — and can be pinned with `TEST_PROTECTION_GUARD_MODE`.
@@ -116,8 +116,13 @@ log review and a CI diff can backstop:
   globs. A CI diff of those artifacts is the complement.
 - **The PreToolUse door only sees commands it can parse.** It recognises `git commit`,
   `git -C <dir> commit`, `git -c k=v commit`, and a single `cd <dir> && …` prefix, but not a
-  nested `cd`. The git `pre-commit` door has no such gap — it sees every commit — which is why
-  adopting both is the robust posture.
+  nested `cd`. For `git -C <dir> commit` it recognises the command but does not yet retarget
+  the analysis to `<dir>` — the staged diff it reads is the session's own repo, so a `-C`
+  commit into a different repo is analysed against the wrong one. (Fix in progress.)
+- **The git `pre-commit` door can miss `git commit -a` and `git commit <paths>`.** Those forms
+  stage through a temporary index that the door does not currently follow, so it may not see
+  their changes as staged. A plain `git add` + `git commit` is seen. (Fix in progress.) Adopting
+  both doors is still the more robust posture.
 
 ### The justification token, in both doors
 

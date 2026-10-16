@@ -129,9 +129,19 @@ A compound like `cd <path> && <something>` is **not** waved through on the stren
 the gate splits the line on top-level `&&`, `||`, and `;` (quote-, subshell-, and heredoc-aware)
 and checks **each segment independently** against the read-only set and your `allowed_commands`.
 This is deliberate — it closes the `cd anywhere && <arbitrary command>` hole that a naive prefix
-match would open. The practical authoring consequence: **a compound command is only as authorized
-as its least-authorized segment.** If a step needs `cd build && make install`, then `make install`
-must itself match an `allowed_commands` prefix; the `cd` buys it nothing.
+match would open. The practical authoring consequence, **for `cd`-led compounds**: such a compound
+is only as authorized as its least-authorized segment. If a step needs `cd build && make install`,
+then `make install` must itself match an `allowed_commands` prefix; the `cd` buys it nothing.
+
+**Current limit — read this.** That per-segment check applies **only to compounds that begin with
+`cd`**. Any other command is matched as one string against the read-only prefixes and your
+`allowed_commands`, so a chained command whose *start* matches an allowed prefix is matched on that
+start alone: with `pytest` allowed, `pytest -q && <other command>` matches the `pytest` prefix.
+Likewise a top-level `>` redirection is not treated as a file write. Until per-segment checking of
+every chained command lands, author `allowed_commands` as though a prefix authorizes whatever is
+chained after it, and prefer one command per step. The same applies to the always-allowed read-only
+prefixes (`cat`, `echo`, `find`, `git branch`, ...), with or without an active plan: `cat x; rm y`
+and `echo x > f` start with a read-only prefix and are allowed today.
 
 (PowerShell is checked by prefix against `allowed_commands` too, but with **no compound parsing at
 all** — `Get-Foo; Set-Bar` is not split. If you need a multi-segment PowerShell command, list each
@@ -145,33 +155,34 @@ shape you intend explicitly, or run it through Bash.)
 
 ---
 
-## 3. The worktree hard-guard and `worktree_bypass`
+## 3. The worktree guard and `worktree_bypass`
 
 This rule exists because of a real wrong-target write: an agent working in an isolated worktree
 once wrote to the **main** repository instead, because its plan listed main-repo paths and the
 write "succeeded" — at the wrong place. The gate now anchors path resolution at the session's
-actual working root and adds a hard guard against that drift.
+actual working root and guards against that drift.
 
 **What the guard does.** When the session's working directory is inside a git worktree (the `.git`
 is a *file* pointing at the main repo, not a directory), the gate resolves every relative
-`allowed_paths` entry against the **worktree root**. Then, before authorizing anything, it
-requires that **at least one** `allowed_paths` entry resolve *under that worktree*. If a plan has a
-non-empty `allowed_paths` and **zero** of them land under the current worktree, the gate blocks
-**every** tool call — not just the off-tree write, the whole session — with a "silent-drift
-pattern" deny. The reasoning: a plan whose paths don't point where the session is running is
+`allowed_paths` entry against the **worktree root**. A plan then counts as active for that
+worktree only if it claims it — `worktree_bypass: true`, or at least one **absolute**
+`allowed_paths` entry resolving *under that worktree* (§4). If a plan's paths land elsewhere, it
+is not active for this session, and the gate denies gated file writes and commands outside the (prefix-matched) read-only set
+with a "no active plan" message; read-only inspection and `PLAN_GATE_ALWAYS_WRITABLE` directories
+stay available. The reasoning: a plan whose paths don't point where the session is running is
 misaligned, and continuing would write somewhere you didn't mean. It fails closed, loudly, on the
-first action.
+first gated action.
 
-**The authoring takeaway.** For normal in-tree work, do nothing special — just use
-**repo-root-relative paths**. They anchor at the worktree automatically and the guard is satisfied
-the moment one of them is genuinely in your tree. The guard only fires when a plan and a session
-have drifted apart, which is exactly when you want to be stopped.
+**The authoring takeaway.** For normal in-tree work, do nothing special — name at least one file
+by its **absolute path** inside your worktree (that is what claims the worktree) and use
+repo-root-relative paths for the rest. The guard only fires when a plan and a session have
+drifted apart, which is exactly when you want to be stopped.
 
 **`worktree_bypass: true`** is the deliberate opt-out, for work that is *genuinely* cross-tree —
 the plan's `allowed_paths` are absolute and intentionally point outside (or across) worktrees.
 Setting it:
 
-- skips the worktree hard-guard (the plan is *expected* not to resolve locally);
+- skips the worktree guard (the plan is *expected* not to resolve locally);
 - makes the plan **cross-tree exclusive** — it counts against the single-active invariant of
   *every* worktree, so no other plan can be active anywhere while it is (see §4);
 - exempts the plan from the cross-plan disjoint-paths overlap check.
@@ -270,8 +281,9 @@ Before you set `status: active`, read the plan back as a grant of authority and 
 - [ ] Each `allowed_commands` prefix is as narrow as the work needs. For every prefix, the worst
       command that also starts with it is **not** destructive (no `git checkout`-style trap, no
       bare `git`, no bare `npm`/`python`).
-- [ ] Any multi-step Bash you rely on survives segment-wise checking (the `cd` buys nothing; each
-      segment is authorized on its own).
+- [ ] Any `cd`-led multi-step Bash you rely on survives segment-wise checking (the `cd` buys
+      nothing; each segment is authorized on its own). Other chained commands are matched by
+      their start only (§2), so keep one command per step.
 - [ ] `worktree_bypass: true` is present **only** if the work is deliberately cross-tree, and then
       `allowed_paths` are absolute.
 - [ ] Exactly **one** plan is `status: active`; the previous unit's plan is archived.

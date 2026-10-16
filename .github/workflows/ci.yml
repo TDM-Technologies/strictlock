@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: scan for secrets and stray UUIDs
+      - name: scan for secrets, stray UUIDs, and machine paths
         run: |
           set -e
           fail=0
@@ -81,8 +81,10 @@ jobs:
           uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
           if git grep -nIE "$secrets" -- . ':(exclude).github/workflows/ci.yml'; then fail=1; fi
           if git grep -nIE "$uuid" -- . ':(exclude).github/workflows/ci.yml'; then fail=1; fi
+          machine='(/Users/[A-Za-z]|[A-Z]:(\\|\\\\)Users)'
+          if git grep -nIE "$machine" -- . ':(exclude).github/workflows/ci.yml'; then fail=1; fi
           if [ "$fail" -ne 0 ]; then
-            echo "::error::Possible secret or stray UUID found in tracked files."
+            echo "::error::Possible secret, stray UUID, or machine path found in tracked files."
             exit 1
           fi
           echo "Secret scan passed."

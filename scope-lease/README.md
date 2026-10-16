@@ -60,7 +60,7 @@ Same honesty the rest of StrictLock ships with — know exactly what guarantee y
   prevents that stale edit from landing.
 - **Can't address**: (1) **cross-machine** exclusion. Acquire-time exclusion is only real when
   all worktrees share one `.git` ref store. A lock minted by a foreign store is a hard
-  **fail-loud** (exit 6), never a silent downgrade — the real multi-machine fix (push-CAS to a
+  **fail-loud** (exit 6) on `acquire` and `fence-check`, never a silent downgrade — the real multi-machine fix (push-CAS to a
   shared origin) is a later phase. (2) A holder that writes *within* its valid lease window —
   that's authorized by construction; scope-lease guarantees only that no one else holds the
   file at the same time. (3) Anything a **human** does — `refs/locks/*` coordinates agents

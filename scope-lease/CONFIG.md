@@ -20,7 +20,7 @@ no-op. An explicit call with `SCOPE_LEASE` unset still runs.
 | `SCOPE_LEASE_LOCK_ID` | for `paths` | The lock id for `--source paths` (the `plan-gate` / `file` sources derive it from the plan `name`). Overrides a derived id when set. The identity that holds the scope — keep it **stable** across acquire / fence-check / release. |
 | `SCOPE_LEASE_TTL` | no | Lease lifetime in **seconds** (the deadline = now + TTL). Default `1800` (30 min): long enough to cover a work burst, short enough that a crashed holder's scope frees by deadline. `--ttl-seconds` overrides. |
 | `SCOPE_LEASE_OWNER` | no | The owner label stamped in the blob. Resolution order: `SCOPE_LEASE_OWNER` → the worktree's git branch → `user.email`. Errors only if all three are unavailable (an unresolvable owner is routed back to you, never guessed). `--owner` overrides. |
-| `SCOPE_LEASE_LOG_DIR` | no | Directory for the append-only decision log (`scope-lease.log`). Each acquire/release appends a JSON line (UTC timestamp, lock id, owner, leased/reclaimed paths). If unset, no log is written. This is your concurrency audit trail. |
+| `SCOPE_LEASE_LOG_DIR` | no | Directory for the append-only decision log (`scope-lease.log`). Each successful acquire appends a JSON line (UTC timestamp, lock id, owner, leased/reclaimed paths), and each release that drops at least one scope appends one (UTC timestamp, lock id, released paths — no owner). A denied acquire is not logged. If unset, no log is written. This is your concurrency audit trail. |
 
 `os.pathsep` is `;` on Windows and `:` on Linux/macOS — it applies to `SCOPE_LEASE_PATHS`.
 
@@ -82,8 +82,9 @@ it.
 
 ## Decision log
 
-When `SCOPE_LEASE_LOG_DIR` is set, every acquire and release appends a JSON line to
-`scope-lease.log` with a UTC timestamp, the event, the lock id, the owner, and the leased /
-reclaimed / released paths. That append-only trail is the concurrency-side audit exhaust —
+When `SCOPE_LEASE_LOG_DIR` is set, every successful acquire and every release that drops at
+least one scope appends a JSON line to `scope-lease.log` with a UTC timestamp, the event, the
+lock id, and the leased / reclaimed / released paths (acquire rows also carry the owner; release
+rows do not). A denied acquire writes no row. That append-only trail is the concurrency-side audit exhaust —
 produced as a byproduct of the lock doing its job, the same posture as `plan-gate`'s decision
 log. Logging is best-effort: a log-write failure never changes a lock outcome.

@@ -83,9 +83,9 @@ casually, just don't migrate them.
 - The `*-hipaapath` skills (`start-` / `close-` / `harvest-` / `cleanup-hipaapath`) —
   **CORRECTION 2026-07-05 (this section previously said Windows-only — that went stale
   four days before it was written): they were imported off the Windows box on 2026-06-26
-  and are STAGED on this Mac at `/Users/tim/StrictLock-harvest-import/skills/`**, each with
+  and are STAGED locally in the maintainer's staging import (`skills/`)**, each with
   BOTH `SKILL.md` and `learnings.md` (~58KB of scar-tissue notes). Deliberately outside
-  this public repo (they carry `D:\` paths + HIPAAPath-coupled internals — genericize on
+  this public repo (they carry Windows machine paths + HIPAAPath-coupled internals — genericize on
   the way in). Wave 4 / Wave 2 ritual items are therefore **faithful ports, not
   reconstruction** — do NOT rebuild them from HIPAAPath `CLAUDE.md` (whose relevant
   sections were deleted in the 2026-06-24 rewrite anyway).

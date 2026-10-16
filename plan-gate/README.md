@@ -5,8 +5,8 @@
 `plan-gate` is the flagship [StrictLock](../README.md) module. It's a single Python script
 wired as a **`PreToolUse` hook**: before an agent edits a file or runs a command, the gate
 reads the active *plan* and decides allow/deny. An agent may modify only the exact files and
-run only the exact commands an approved plan enumerates. Everything else is denied **before
-it runs**. When in doubt, the gate denies.
+run only commands matching the command prefixes an approved plan enumerates. Everything else
+is denied **before it runs**. When in doubt, the gate denies.
 
 Read the full argument in [`paper.md`](paper.md).
 
@@ -17,7 +17,10 @@ Read the full argument in [`paper.md`](paper.md).
 - **Edit / Write / NotebookEdit:** the target path must *exactly* match an `allowed_paths`
   entry. A directory entry authorizes nothing inside it — enumerate each file.
 - **Bash / PowerShell:** the command must *start with* an `allowed_commands` prefix, or be a
-  known read-only command (`git status`, `ls`, `cat`, …) which is always permitted.
+  known read-only command (`git status`, `ls`, `cat`, …) which is always permitted. Only
+  `cd`-led compounds are split and checked segment by segment today; any other chained
+  command is matched on its start (see [`AUTHORING.md`](AUTHORING.md) §2). Per-segment checking
+  of every chained command is in progress.
 - Emits `{"hookSpecificOutput": {"permissionDecision": "allow"|"deny", ...}}` on **stdout**.
 - Appends every decision, allow and deny, to a hash-chained decision log (when
   `PLAN_GATE_LOG_DIR` is set) — your audit trail. `plan-gate.py verify-log` proves the

@@ -1,36 +1,40 @@
 # StrictLock — state (the shared blackboard)
 
 ## Meta
-- last_session: 2026-07-05 (blackboard refresh — brings Meta/Next-Action current with PR #7/#8, which shipped without updating this file)
-- agent: Claude Code (Fable 5)
-- git_ref: e4e94fd (**origin/main HEAD, all CI green**) — current public tip: the
-  `eslint-plugin-strictlock@0.1.1` author-metadata bump, sitting on top of PR #7 (`test-protection-guard`,
-  43 tests), PR #8 (harvest source map), and PR #9 (harvest-map staged-import fix). Full Python suite green:
-  **228 tests / 10 Python modules** (the Wave-3 185/9 + test-protection-guard's 43). Wave 3 (`scope-lease` +
-  `sink-resolver` + `liveness-scan`) shipped earlier via PR #6 (`d17e1a9`); README + COMPLIANCE (§K/§L) + CI +
-  roadmap all registered. origin/main == the public repo tip.
-- touched (this wave): sink-resolver/*, liveness-scan/*, README.md, COMPLIANCE.md (§K/§L),
-  .github/workflows/ci.yml, roadmap.md, dev/STATE.md, dev/BACKLOG.md
+- last_session: 2026-10-16 (claims-truth reword pass, PR 1 of 2 — docs-only; see [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) §7 ledger)
+- agent: Claude Code
+- git_ref: 81cad04 (**origin/main HEAD at branch time, CI 8/8 green**) — the tip after PR #11 (the
+  authorizations record: unified hash-chained plan-gate decision log), PR #12 (spec status header), and
+  the earlier PR #7 (`test-protection-guard`), PR #8/#9 (harvest source map). Full suite run on this
+  branch: **254 Python tests across 10 suites** (plan-gate 35 · memory-cap 15 · externalized-memory 7 + 38 ·
+  generated-sink-commit-gate 10 · generated-sink-prepush-gate 9 · scope-lease 37 · sink-resolver 29 ·
+  liveness-scan 31 · test-protection-guard 43) **+ 9 shell checks** (commit-msg-gate), all green.
+  Wave 3 (`scope-lease` + `sink-resolver` + `liveness-scan`) shipped via PR #6 (`d17e1a9`); README +
+  COMPLIANCE (§K/§L) + CI + roadmap all registered.
+- touched (this session): README.md, roadmap.md, COMPLIANCE.md, plan-gate/*, memory-cap/*,
+  commit-msg-gate/*, generated-sink-*/*, scope-lease/*, sink-resolver/*, liveness-scan/*,
+  test-protection-guard/*, externalized-memory/DESIGN.md, dev/*, .github/workflows/ci.yml
 
 ## Next Action
-**❄ PAUSED 2026-07-05 (Tim's portfolio ruling):** StrictLock is **link-only evidence** during the 13-week
-HIPAAPath distribution push (to Oct 1). No new waves until Tim unpauses. State below is current and ready.
+**Pause ended — project thawed 2026-09-29.** The ❄ pause (2026-07-05, link-only evidence during the
+HIPAAPath distribution push to Oct 1) is over: StrictLock resumed after the HIPAAPath push. History kept:
+during the pause the one exception (2026-07-15) was the authorizations record, which **shipped 2026-07-15 as
+PR #11** (one unified, hash-chained `plan-gate-decisions.log`, allow+deny, all surfaces, full-by-default, +
+log-dir self-protection; spec [AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-RECORD-SPEC.md)). That closed
+the `paper-§6-reconcile` thread.
 
-**EXCEPTION (Tim, 2026-07-15) — the §6 paper reconcile is ruled BUILD, not reword:** ship the
-**authorizations record** — one unified, hash-chained `plan-gate-decisions.log` (allow+deny, all
-surfaces, full-by-default) + log-dir self-protection, replacing the three per-surface logs. Spec:
-[AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-RECORD-SPEC.md) (ruled decisions + coverage map +
-honest tamper-evidence scope). Work lives on `feat/authorizations-record`; paper §5/§6 rewording
-rides the same PR; **merge stays with Tim** (flagship module + public claims). This closes the
-`paper-§6-reconcile` thread below when it lands.
+**Current focus (2026-10-16):** the claims-truth pass ([CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md), decisions
+made 2026-07-07): **PR 1** (docs-only rewords + this housekeeping) is in review; **PR 2** (code that makes
+the interim-reworded claims true, then restores the strong wording) follows. Open-work inventory:
+[WORK-QUEUE.md](WORK-QUEUE.md). Merge to public main stays with Tim.
 
 1. **Wave 3 — DONE + LIVE** (PR #6, `d17e1a9`, 2026-06-25): scope-lease + sink-resolver + liveness-scan.
 2. **Wave 4 — 1 of 4 SHIPPED:** the **test-protection co-commit guard is DONE + MERGED** (PR #7, 43 tests,
    2026-06-30; this file previously still called it "next build" — stale, corrected 2026-07-05). The
    **harvest source map** also landed (PR #8, `dev/HARVEST-SOURCE-MAP.md`).
-3. **Wave 4 remainder (when unpaused) — the 3 prose items:** session-ritual checklists · WP-interaction
-   analysis · pre-WP currency check. **Faithful ports, not reconstruction:** sources are STAGED at
-   `/Users/tim/StrictLock-harvest-import/skills/` (all four `*-hipaapath` skills + ~58KB learnings, imported
+3. **Wave 4 remainder — the 3 prose items:** session-ritual checklists · WP-interaction
+   analysis · pre-WP currency check. **Faithful ports, not reconstruction:** sources are STAGED in the
+   maintainer's local staging import (all four `*-hipaapath` skills + ~58KB learnings, imported
    2026-06-26 — see the corrected HARVEST-SOURCE-MAP §OFF-MACHINE/STAGED). Then Wave 2 (marquee IP, last).
 4. **(Done)** `eslint-plugin-strictlock` PUBLISHED to npm — `0.1.0` (2026-06-25) + `0.1.1` (2026-07-05),
    acct `downsmullen`: <https://www.npmjs.com/package/eslint-plugin-strictlock>.
@@ -86,14 +90,24 @@ HIPAAPath, exact paths, and whether each item is already safe. In brief:
 - harvest-wave-2 (marquee) — **DEFERRED to end of queue (Tim, 2026-06-25)** — Cleanup-Day / rule-archaeology
   (+ design paper) · ROI / harvest governance narrative · blast-radius (needs pattern-config genericization).
   Still the highest-cred work; just sequenced last by choice.
-- paper-§6-reconcile — ready — `paper.md` §6 overclaims the decision log ("allow and deny",
-  "tamper-evident"); the shipped gate logs denials by default. Reword §6, or build the opt-in allow/deny log.
+- paper-§6-reconcile — **DONE 2026-07-15 (PR #11)** — built, not reworded: the authorizations record
+  (allow+deny, hash-chained, verifier, log self-protection) makes the paper's §6 claims code-backed. Still
+  open from that family: the memory-cap decision-log mirror and the scope-lease / sink-resolver log gap-fills
+  (CLAIMS-FIX-SPEC §1, Q3).
+- claims-truth-pass — **PR 1 in review (2026-10-16)**; PR 2 (code fixes + restoring strong wording) next —
+  [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) §6, ledger in §7.
 - ci-os-matrix — ready — add windows-latest + macos-latest to CI so OS-agnostic is proven, not just reviewed.
 - plans-into-repo — pending — import the historical plan files as worked examples (off-machine).
 - false-positive-analysis — pending — quantify read-only compound denies from real deny-log data (off-machine).
 - reversibility-tiers / auto-commit — exploring (later) — need a shared 2–3 month evidence window.
 
 ## Decisions
+- 2026-10-16 — **Claims-truth PR 1 (docs-only) built** on `docs/claims-truth-reword`: every public claim the
+  code does not yet back is reworded to interim honest wording (each logged in CLAIMS-FIX-SPEC §7 so PR 2 can
+  restore the strong form once code backs it); permanent rewords (Q6 coverage sentence, Q7 "single-use by
+  convention", Q8a tree-vs-pushed-commit) applied; STATE/BACKLOG refreshed; staged-import machine paths
+  genericized. Direction per the 2026-07-07 walkthrough (CLAIMS-FIX-SPEC §5); merge stays with Tim.
+- 2026-09-29 — **Project thawed** — the ❄ pause (2026-07-05) ended after the HIPAAPath push; StrictLock resumed.
 - 2026-06-25 — **Wave 3 COMPLETE — `sink-resolver` + `liveness-scan` shipped to LOCAL main** (`189285c`,
   **not pushed**). Built solo (drafting/file-ops per the charter), each adversarially verified via a
   perspective-diverse workflow fan-out (3 lenses for the correctness-critical sink-resolver where silent
@@ -103,7 +117,7 @@ HIPAAPath, exact paths, and whether each item is already safe. In brief:
   landing. Coverage guard added as a genuine upgrade to the core safety claim (the tool now PROVES every
   conflicted sink was regenerated, vs trusting operator CHECK_CMD coverage). liveness-scan came back
   zero-blocking. Registered in README + COMPLIANCE §K/§L + CI + roadmap, then **PUSHED + MERGED to origin/main
-  via PR #6 (Tim's go-ahead 2026-06-25; CI green, 9 jobs).** Remaining harvest: Wave 4 (rituals/gates), then
+  via PR #6 (Tim's go-ahead 2026-06-25; CI green, 8 jobs).** Remaining harvest: Wave 4 (rituals/gates), then
   Wave 2 (marquee, last).
 - 2026-06-25 — **Wave 3 `scope-lease` flagship SHIPPED** (queue reordered first: marquee deferred to end,
   concurrency next). Faithful port of vault Feature C's git-ref CAS lease, retargeted per HARVEST-PLAN §6

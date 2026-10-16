@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# commit-msg-gate — require every commit to reference an approved plan, unless it
-# carries an approved "ceremony" prefix (chore/docs/ci/build).
+# commit-msg-gate — require every commit to name a plan (`plan: <slug>`), unless it
+# carries an approved "ceremony" prefix (chore/docs/ci/build). The slug is not
+# validated against any plans directory.
 #
 # Part of StrictLock (https://github.com/TDM-Technologies/strictlock).
-# Install as .git/hooks/commit-msg. Applies to every commit in the repo,
-# whether made by a human or an agent — so the version-control trail always
-# links back to the authorization for the change.
+# Install as .git/hooks/commit-msg. Runs on every commit in the repo that goes
+# through git's hook machinery (--no-verify skips it), whether made by a human
+# or an agent — so the version-control trail names the plan for the change.
 #
 # A commit passes if EITHER:
 #   (a) its first line starts with an approved prefix, e.g.
 #         chore: ...   chore(scope): ...   docs: ...   ci: ...   build: ...
-#   (b) its body contains a line matching:  plan: <slug>
+#   (b) its message contains a line (at line start) matching:  plan: <slug>
 #
 # Configuration (environment):
-#   COMMIT_MSG_GATE_BYPASS=on        skip the gate for one commit (deliberate).
+#   COMMIT_MSG_GATE_BYPASS=on        skip the gate (single-use by convention: set inline per commit).
 #   COMMIT_MSG_GATE_PREFIXES=<regex> override the approved first-line prefix
 #                                    regex (grep -E syntax). See DEFAULT below.
 
@@ -65,9 +66,9 @@ Your commit message must do ONE of:
         docs: ...         docs(scope): ...
         ci: ...           build: ...
 
-  (b) Include a line referencing the approved plan:
+  (b) Include a line naming the plan:
         plan: add-logout-button
-      (plan files live in your plan-gate plans directory)
+      (the slug is not checked against your plans directory)
 
 Emergency bypass: COMMIT_MSG_GATE_BYPASS=on git commit ...
 ---------------------------------------------------------------------

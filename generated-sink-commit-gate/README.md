@@ -10,7 +10,9 @@ re-running the generator. The hazard is silent: the instant a source changes but
 not regenerated, every downstream reader desyncs, and nothing notices until a stale fact has
 already propagated.
 
-`generated-sink-commit-gate` makes "commit a stale sink" **structurally impossible**. Wired
+`generated-sink-commit-gate` makes "commit a stale sink" **fail closed at commit time**. (Git
+honors `--no-verify`, so a client-side hook can't make it impossible — see "Can't address"
+below; the pre-push sibling and a server-side check are the layers behind it.) Wired
 as a git `pre-commit` hook, on any commit whose staged changes touch the configured source
 paths it re-runs your generator in `--check` mode and **refuses the commit** unless the
 checked-in sink is a **byte-exact** match of a fresh regeneration. Same posture as the rest
@@ -41,8 +43,9 @@ cp generated-sink-commit-gate.py /path/to/your/repo/.git/hooks/pre-commit
 chmod +x /path/to/your/repo/.git/hooks/pre-commit
 ```
 
-Then configure it (below) and turn it on with `GENERATED_SINK_COMMIT_GATE=on`. It applies to **every**
-commit in that repo — human or agent. Git invokes a `pre-commit` hook with no arguments and
+Then configure it (below) and turn it on with `GENERATED_SINK_COMMIT_GATE=on`. It runs on every
+commit in that repo that goes through git's hook machinery — human or agent (`--no-verify`
+skips it). Git invokes a `pre-commit` hook with no arguments and
 honors its exit code: `0` allows the commit, non-zero blocks it. See [`examples/`](examples/)
 for an end-to-end walkthrough.
 
@@ -59,7 +62,7 @@ defaults are baked in. If `GENERATED_SINK_COMMIT_GATE` is not `on`, the hook is 
 | `GENERATED_SINK_COMMIT_GATE_GENERATOR_CWD` | no | Directory to run the generator from (absolute, or repo-root-relative). Default: the repo root. Useful when the generator lives in a subproject (e.g. `app`). |
 | `GENERATED_SINK_COMMIT_GATE_TIMEOUT` | no | Seconds before the generator is treated as a fail-closed timeout. Default `120`. A non-integer or non-positive value falls back to the default **loudly** — a misconfiguration can't silently disable the gate. |
 | `GENERATED_SINK_COMMIT_GATE_LOG_DIR` | no | Directory for the append-only decision log (`sink-commit-gate.log`, one JSON line per decision). Your audit trail; if unset, no log is written. |
-| `GENERATED_SINK_COMMIT_GATE_BYPASS` | no | `1` skips the gate for a single commit (logged on use). A distinct bypass per gate is deliberate — see below. |
+| `GENERATED_SINK_COMMIT_GATE_BYPASS` | no | `1` skips the gate. Single-use by convention: set it inline per commit; every use is logged, so a lingering bypass is visible in the trail. A distinct bypass per gate is deliberate — see below. |
 
 `os.pathsep` is `:` on Linux/macOS and `;` on Windows — it applies to
 `GENERATED_SINK_COMMIT_GATE_SOURCE_PATHS`.

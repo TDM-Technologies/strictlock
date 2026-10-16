@@ -16,11 +16,12 @@ opt-in, and it only ever writes gitignored logs (and only when `LIVENESS_SCAN_LO
 | `LIVENESS_SCAN_HEARTBEAT_RELPATH` | (none) | A per-worktree file (relative to each worktree root) your harness touches to signal liveness. Read by **existence + mtime only**. Unset / absent → the scanner falls back to commit mtime. |
 | `LIVENESS_SCAN_HEARTBEAT_TIMEOUT_MIN` | `10` | A heartbeat older than this (assuming a ~30s touch cadence) reads as "quiet" → `stalled`. The lease-fresh window. |
 | `LIVENESS_SCAN_COMMIT_STALE_MIN` | `90` | The commit-mtime fallback window: no heartbeat + a commit older than this reads as `stalled`. Coarser than a heartbeat on purpose. |
-| `LIVENESS_SCAN_CEILING_MIN` | `480` | The whole-unit-of-work ceiling (8h). An owned worktree idle past this — even on a fresh-ish signal — is `ambiguous` and **escalates**. Distinct from the heartbeat window. |
+| `LIVENESS_SCAN_CEILING_MIN` | `480` | The outer quiet-time bound (8h). An owned worktree whose activity signal is older than this is `ambiguous` and **escalates**. Measured on the age of the signal, not on total time since the unit of work began. Distinct from the heartbeat window. |
 | `LIVENESS_SCAN_LOG_DIR` | (none) | Directory for the gitignored outputs: a human report (`liveness-escalations.md`, overwritten each run) and an append-only JSONL trail (`liveness-scan.log`). Unset → print to stdout only, write nothing. |
 
-A non-integer or `<= 0` threshold value falls back to its default (announced on stderr) — a
-misconfigured threshold never silently disables the scan.
+A non-integer threshold value falls back to its default (announced on stderr); a `<= 0` value
+also falls back to the default, currently without a notice. Either way a misconfigured threshold
+never silently disables the scan.
 
 ## Modes
 
