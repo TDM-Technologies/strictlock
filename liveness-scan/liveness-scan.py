@@ -23,9 +23,12 @@ WHERE THE SIGNAL COMES FROM (two-tier, degrades gracefully):
   * a per-worktree HEARTBEAT file (LIVENESS_SCAN_HEARTBEAT_RELPATH), read by EXISTENCE + mtime
     only — the sharp signal, if your harness touches one (e.g. alongside a scope-lease acquire).
   * else COMMIT mtime — coarser, flagged in the reason. Always available.
-  HEARTBEAT_TIMEOUT_MIN (the lease-fresh window) is distinct from CEILING_MIN (the outer
-  quiet-time bound: a signal older than this → escalate; it measures signal age, not total
-  time since the unit of work began).
+  HEARTBEAT_TIMEOUT_MIN (the lease-fresh window) is distinct from CEILING_MIN (the whole-
+  work-package ceiling: time since the EARLIEST branch commit not on base — `git log
+  base..HEAD --reverse`, first commit time. An owned worktree past it escalates EVEN ON A FRESH
+  SIGNAL; a signal itself older than the ceiling escalates too). Caveat: that start time is a
+  committer date, so a rebase / amend / squash rewrites it and restarts the WP clock (the
+  proxy under-reports long-running work; a report-only tool, so noise rather than a block).
 
 WHO OWNS A WORKTREE (attribution): if you run plan-gate, the scanner maps a worktree to the
 session running in it via the active/executed plan whose **absolute** allowed_paths resolve under
@@ -35,7 +38,8 @@ without them, attribution falls back to "branch ahead of base ⇒ done-unmerged"
 CLASSIFICATION (deterministic; report-only):
   running        an owning active plan + a fresh activity signal.
   stalled        an owning active plan, quiet past the heartbeat/commit window — likely slow; watch.
-  ambiguous      an owning active plan quiet past the ceiling, or no activity signal at
+  ambiguous      an owning active plan quiet past the ceiling, or open (since its earliest
+                 branch commit) past the ceiling even on a fresh signal, or no activity signal at
                  all — crashed-or-slow unclear ⇒ ESCALATE (never reap).
   done-unmerged  work complete / branch ahead of base, not yet merged ⇒ pending merge.
   idle           no plan claims it; branch clean or merged.
@@ -50,7 +54,7 @@ Modes:
   (default)   human report to stdout (+ the gitignored logs if LIVENESS_SCAN_LOG_DIR is set)
   --dry-run   compute + print the report; write NOTHING
   --json      structured digest (tooling / tests)
-  --explain   maintainer breakdown to stderr (thresholds + counts)
+  --explain   maintainer breakdown to stderr (thresholds + per-worktree internals)
 
 Usage:
   python3 liveness-scan.py            # scan + print the report
@@ -74,7 +78,7 @@ from pathlib import Path
 # ── tuning defaults (overridable by env; no machine-specific paths) ──────────────────
 DEFAULT_HEARTBEAT_TIMEOUT_MIN = 10    # heartbeat older than this (with a ~30s touch) => likely dead
 DEFAULT_COMMIT_STALE_MIN = 90         # no-heartbeat fallback: commit mtime older than this => "quiet"
-DEFAULT_CEILING_MIN = 480             # whole-WP ceiling (8h); idle past this => ambiguous => ESCALATE
+DEFAULT_CEILING_MIN = 480             # whole-WP ceiling (8h): WP older than this, or signal idle past it => ESCALATE
 DEFAULT_BASE = "origin/main"
 NO_HEARTBEAT_NOTE = "no heartbeat file — activity inferred from commit mtime"
 
@@ -90,7 +94,11 @@ def _env_int(name: str, default: int) -> int:
         print(f"liveness-scan: {name}={raw!r} is not an integer; using default {default}.",
               file=sys.stderr)
         return default
-    return v if v > 0 else default
+    if v <= 0:
+        print(f"liveness-scan: {name}={raw!r} must be a positive integer; using default {default}.",
+              file=sys.stderr)
+        return default
+    return v
 
 
 def _plans_dir() -> Path | None:
@@ -243,10 +251,10 @@ def _is_abs(p: str) -> bool:
 
 def plan_specifically_claims(plan: Plan, worktree_root: str) -> bool:
     """Liveness ATTRIBUTION: a plan specifically OWNS a worktree iff >=1 ABSOLUTE allowed_paths
-    entry resolves under it. **Intended to exclude worktree_bypass** (NOT YET ENFORCED in this
-    function: a bypass plan with an absolute path under the worktree still attributes) — a
-    cross-tree bypass plan has authority in many worktrees but is the session of NONE, so
-    attributing it per-worktree would mis-mark EVERY worktree as that plan's session.
+    entry resolves under it. **worktree_bypass plans never own a worktree**, even when they carry
+    an absolute path under it — a cross-tree bypass plan has authority in many worktrees but is
+    the session of NONE, so attributing it per-worktree would mis-mark EVERY worktree as that
+    plan's session.
 
     KNOWN BLIND SPOT (fail-safe): a running session whose active plan is worktree_bypass:true with
     no absolute path under its own worktree is invisible here → classifies idle/done-unmerged. That
@@ -256,6 +264,8 @@ def plan_specifically_claims(plan: Plan, worktree_root: str) -> bool:
     Paths are canonicalized (symlinks resolved, no case fold) before the prefix check, so a plan
     whose paths use a different alias of the same dir (`/var` vs `/private/var`, a symlinked root)
     still attributes, while distinct-cased dirs on a case-sensitive FS stay distinct."""
+    if plan.worktree_bypass:
+        return False
     wt = _canon(worktree_root)
     for entry in plan.allowed_paths:
         if _is_abs(entry) and _canon(entry).startswith(wt + "/"):
@@ -315,6 +325,17 @@ class GitProbe:
         s = self._run(["rev-list", "--count", f"{base}..{sha}"]).strip()
         return (int(s) > 0) if s.isdigit() else None
 
+    def branch_start_unixtime(self, sha: str, base: str) -> int | None:
+        """Committer time of the EARLIEST commit reachable from sha but not from base
+        (`git log base..sha --reverse`, first line) — the proxy for when the unit of work began.
+        None if unknown (base unresolvable) or the branch has no commits beyond base.
+        CAVEAT: committer time, so a rebase / amend / squash rewrites it and restarts the clock."""
+        if not sha:
+            return None
+        out = self._run(["log", "--reverse", "--format=%ct", f"{base}..{sha}"])
+        first = out.splitlines()[0].strip() if out.strip() else ""
+        return int(first) if first.isdigit() else None
+
 
 # ── classification (deterministic core; report-only) ─────────────────────────────────
 def _age_min(now: datetime, unixtime: int | None) -> float | None:
@@ -341,9 +362,15 @@ class Thresholds:
 
 def classify(wt: dict, now: datetime, *, active_plan: Plan | None, executed_plan: Plan | None,
              commit_age_min: float | None, ahead_of_base: bool | None,
-             heartbeat_age_min: float | None, th: Thresholds) -> dict:
+             heartbeat_age_min: float | None, th: Thresholds,
+             wp_age_min: float | None = None) -> dict:
     """Classify ONE worktree → {status, reason, escalate, recovery, signal, age_min}.
-    ambiguous => escalate; the core never reaps."""
+    ambiguous => escalate; the core never reaps.
+
+    wp_age_min is the WORK-PACKAGE age: minutes since the earliest branch commit not on base.
+    When known and > the ceiling, an owned worktree escalates EVEN ON A FRESH SIGNAL (a unit of
+    work open longer than the ceiling needs a human glance however busy it looks). The ceiling
+    also still bounds the signal's own age (a signal older than the ceiling escalates)."""
     path = wt.get("path", "")
     branch = wt.get("branch", "")
     is_main_wt = branch in ("main", "master", "")   # main/detached: session-liveness is N/A
@@ -370,10 +397,18 @@ def classify(wt: dict, now: datetime, *, active_plan: Plan | None, executed_plan
                     "never reap",
                     "escalate": True, "recovery": _recovery_command(path),
                     "signal": signal, "age_min": None}
+        if wp_age_min is not None and wp_age_min > th.ceiling:
+            return {"status": "ambiguous",
+                    "reason": f"active plan {active_plan.name} open {wp_age_min:.0f}m since its "
+                    f"earliest branch commit (> {th.ceiling}m whole-WP ceiling), signal "
+                    f"{signal} {age:.0f}m old — long-running work, crashed-or-slow unclear; "
+                    f"ESCALATE, never reap{note}",
+                    "escalate": True, "recovery": _recovery_command(path),
+                    "signal": signal, "age_min": age}
         if age > th.ceiling:
             return {"status": "ambiguous",
                     "reason": f"active plan {active_plan.name} idle {age:.0f}m (> {th.ceiling}m "
-                    f"whole-WP ceiling) via {signal} — crashed-or-slow unclear; ESCALATE, never "
+                    f"ceiling) via {signal} — crashed-or-slow unclear; ESCALATE, never "
                     f"reap{note}",
                     "escalate": True, "recovery": _recovery_command(path),
                     "signal": signal, "age_min": age}
@@ -432,10 +467,26 @@ def gather(*, plans_dir: Path | None, base: str, heartbeat_relpath: str | None,
                     except OSError:
                         hb_age = None
 
+        # WP age (time since the earliest branch commit not on base) only matters for an owned,
+        # non-main worktree; skip the extra git call otherwise.
+        wp_age: float | None = None
+        if claim_active is not None and wt.get("branch", "") not in ("main", "master", ""):
+            wp_age = _age_min(now, probe.branch_start_unixtime(head, base))
+
         c = classify(wt, now, active_plan=claim_active, executed_plan=claim_executed,
                      commit_age_min=commit_age, ahead_of_base=ahead,
-                     heartbeat_age_min=hb_age, th=th)
-        sessions.append({"path": root, "branch": wt.get("branch", ""), "head": head, **c})
+                     heartbeat_age_min=hb_age, th=th, wp_age_min=wp_age)
+        # Per-worktree internals (surfaced by --explain; also present in --json).
+        internals = {
+            "active_plan": claim_active.name if claim_active else None,
+            "executed_plan": claim_executed.name if claim_executed else None,
+            "commit_age_min": commit_age,
+            "heartbeat_age_min": hb_age,
+            "wp_age_min": wp_age,
+            "ahead_of_base": ahead,
+        }
+        sessions.append({"path": root, "branch": wt.get("branch", ""), "head": head, **c,
+                         "internals": internals})
 
     counts: dict[str, int] = {}
     for s in sessions:
@@ -502,11 +553,27 @@ def jsonl_row(digest: dict) -> str:
     }, sort_keys=True)
 
 
+def _fmt_min(v: float | None) -> str:
+    return "n/a" if v is None else f"{v:.0f}m"
+
+
 def _explain(digest: dict, th: Thresholds) -> str:
-    return (f"liveness-scan --explain: HEARTBEAT_TIMEOUT_MIN={th.heartbeat_timeout} "
-            f"COMMIT_STALE_MIN={th.commit_stale} CEILING_MIN={th.ceiling} base={digest['base']} "
-            f"worktrees={len(digest['sessions'])} counts={digest['counts']} "
-            f"escalations={len(digest['escalations'])}")
+    lines = [f"liveness-scan --explain: HEARTBEAT_TIMEOUT_MIN={th.heartbeat_timeout} "
+             f"COMMIT_STALE_MIN={th.commit_stale} CEILING_MIN={th.ceiling} base={digest['base']} "
+             f"worktrees={len(digest['sessions'])} counts={digest['counts']} "
+             f"escalations={len(digest['escalations'])}"]
+    for s in digest["sessions"]:
+        i = s.get("internals", {})
+        lines.append(
+            f"  - {s['path']} [{s['branch'] or '(detached)'}] status={s['status']} "
+            f"signal={s['signal']} signal_age={_fmt_min(s.get('age_min'))} "
+            f"commit_age={_fmt_min(i.get('commit_age_min'))} "
+            f"heartbeat_age={_fmt_min(i.get('heartbeat_age_min'))} "
+            f"wp_age={_fmt_min(i.get('wp_age_min'))} "
+            f"active_plan={i.get('active_plan') or '-'} "
+            f"executed_plan={i.get('executed_plan') or '-'} "
+            f"ahead_of_base={i.get('ahead_of_base')}")
+    return "\n".join(lines)
 
 
 def write_outputs(log_dir: Path, report: str, row: str) -> tuple[Path, Path]:

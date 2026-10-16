@@ -46,10 +46,18 @@ Each git worktree gets exactly one status:
 - Otherwise **commit mtime** — coarser, and flagged in the reason so you know the signal is weaker.
   Always available, no setup.
 
-`HEARTBEAT_TIMEOUT_MIN` (the lease-fresh window) is distinct from `CEILING_MIN` (the outer
-quiet-time bound: an owned worktree whose activity signal is older than this escalates). The
-ceiling is measured on the age of the activity signal; it does not yet track total elapsed
-time since the unit of work began, so a worktree with a fresh signal never reaches it.
+`HEARTBEAT_TIMEOUT_MIN` (the lease-fresh window) is distinct from `CEILING_MIN` (the whole-work-package
+ceiling). `CEILING_MIN` measures the time since the **earliest commit on the branch that is not on
+the base** (`git log <base>..HEAD --reverse`, first commit's time): an owned worktree whose work
+package is older than that escalates **even on a fresh signal**, because a unit of work open that
+long deserves a human glance however busy it looks. A signal that is itself older than the ceiling
+escalates too.
+
+> **Caveat — rebase rewrites the proxy.** The branch start is a *committer* date. A rebase, amend,
+> or squash rewrites it, so the WP clock restarts and a long-running branch can read younger than it
+> is. That under-reports (it can miss an escalation, never invent one); it is a proxy, not a
+> ledger. When the base ref is unresolvable or the branch has no commits beyond base, the WP age
+> is unknown and only the signal-age bound applies.
 
 ## Who owns a worktree (attribution)
 
@@ -58,11 +66,9 @@ via the active/executed plan whose **absolute** `allowed_paths` resolve under th
 the same enumeration plan-gate and scope-lease already read. Plans are optional: without them,
 attribution falls back to "branch ahead of base ⇒ done-unmerged" / "idle".
 
-One subtlety, intended but not yet fully enforced: a `worktree_bypass: true` plan has authority
-across *many* worktrees but is the *session* of none, so it is meant to be excluded from
-per-worktree attribution — otherwise it would mis-mark every worktree as its session. Today a
-bypass plan that carries an absolute path under a worktree is still attributed to that
-worktree (fix in progress).
+One subtlety: a `worktree_bypass: true` plan has authority across *many* worktrees but is the
+*session* of none, so it is excluded from per-worktree attribution — even when it carries an
+absolute path under a worktree — otherwise it would mis-mark every worktree as its session.
 
 ## Quickstart
 
@@ -102,7 +108,7 @@ schedule or pollute a tree.
 | [`liveness-scan.py`](liveness-scan.py) | The reporter. One file, standard library only. |
 | [`CONFIG.md`](CONFIG.md) | Every `LIVENESS_SCAN_*` environment variable. |
 | [`SCHEMA.md`](SCHEMA.md) | The classification model, the signals, and the attribution rule. |
-| [`examples/`](examples/) | A heartbeat-touch snippet. |
+| [`examples/`](examples/) | A heartbeat-touch snippet and a sample plan ([`plan.example.md`](examples/plan.example.md)). |
 | [`tests/`](tests/) | A standalone suite (stdlib `unittest`): a fake probe drives the classifier; real git proves the probe. |
 
 ## Requirements
