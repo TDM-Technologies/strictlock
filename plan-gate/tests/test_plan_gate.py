@@ -578,6 +578,12 @@ class BashSegmentTests(unittest.TestCase):
 
     def run_cmd(self, cmd, **kw):
         kw.setdefault("cwd", self.work)
+        # Tests splice temp paths into shell text. On Windows str(path) has
+        # backslashes, which bash (and so the gate) reads as escapes in an
+        # unquoted word; a real agent writes C:/... or quotes the path. Use the
+        # forward-slash form so the command means what the test intends.
+        if os.sep == "\\":
+            cmd = cmd.replace(str(self.root), self.root.as_posix())
         return run_gate({"tool_name": "Bash", "tool_input": {"command": cmd}},
                         self.plans, **kw)
 
