@@ -68,7 +68,7 @@ Then make it a habit: **read the state file first, write it last, commit the
 close-out.** Update it with the atomic writer so a half-write can never land:
 
 ```bash
-your_state_generator | python atomic-write.py ~/project/.state/STATE.md
+your_state_generator | python3 atomic-write.py ~/project/.state/STATE.md
 ```
 
 See [`examples/README.md`](examples/README.md) for the full loop, including the
@@ -91,7 +91,7 @@ failure**, never a silent no-op, and a failed write never leaves a partial sibli
 behind. Run it by hand:
 
 ```bash
-printf '%s' "$new_content" | python atomic-write.py path/to/STATE.md
+printf '%s' "$new_content" | python3 atomic-write.py path/to/STATE.md
 ```
 
 ## The projection bundle
@@ -124,10 +124,10 @@ It has five parts, all proven by [`tests/test_projection.py`](tests/test_project
 export EM_PROJECTION_RECORDS_DIR=~/project/.state/records
 export EM_PROJECTION_TARGET=~/project/STATUS.md       # must already contain the fence markers
 
-python projection.py validate --file "$EM_PROJECTION_RECORDS_DIR/01-foo.md"  # reject a bad record
-python projection.py render                                                  # pure, to stdout
-python projection.py splice                                                  # into the fenced region
-python projection.py check                                                   # oracle: fail on drift (CI)
+python3 projection.py validate --file "$EM_PROJECTION_RECORDS_DIR/01-foo.md"  # reject a bad record
+python3 projection.py render                                                  # pure, to stdout
+python3 projection.py splice                                                  # into the fenced region
+python3 projection.py check                                                   # oracle: fail on drift (CI)
 ```
 
 ### Projection bundle configuration

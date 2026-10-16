@@ -38,6 +38,11 @@ Free-form description for humans goes here.
 - **Exact-path matching.** `allowed_paths` matches the target file by exact (normalized)
   path. Listing `src/` does **not** authorize `src/foo.ts`. Enumerate every file. The gate
   prints a warning to stderr if it sees a directory in `allowed_paths`.
+- **`allowed_paths` limits tool-call writes, not what an allowed command writes.** A script run
+  through Bash is checked as a command (prefix match against `allowed_commands`), not by the
+  files it writes. `python3 atomic-write.py STATE.md` is matched by its prefix; its target file
+  is not checked against `allowed_paths` today. Only shell redirections (`>`, `>>`, ...) in
+  the command are treated as file writes.
 - **Prefix matching for commands, per segment.** `allowed_commands: [git add]` authorizes
   `git add -A .`. Keep prefixes specific — a loose prefix is a loose grant. A Bash command is
   split into segments (on `&&`, `||`, `;`, `|`, `&`, newlines, and the bodies of `$(...)`,

@@ -10,11 +10,11 @@ everything.
 |---|---|---|
 | `PLAN_GATE` | yes | Set to `on` (case-insensitive) to enable the gate. Anything else makes the hook inert (allow-all). |
 | `PLAN_GATE_PLANS_DIR` | yes | Directory holding plan files. Exactly one plan may be `status: active` at a time (scoped per git worktree). |
-| `PLAN_GATE_ALWAYS_WRITABLE` | no | `os.pathsep`-separated list of directories that are *always* writable regardless of plan state. Intended for the plans dir itself and any agent-memory dir that never ships. Same blast radius as plan files — keep it tight. |
-| `PLAN_GATE_LOG_DIR` | no | Directory for the append-only, hash-chained decision log (`plan-gate-decisions.log`). This log is your audit trail; if unset, no log is written. |
+| `PLAN_GATE_ALWAYS_WRITABLE` | no | `os.pathsep`-separated list of directories that are *always* writable regardless of plan state. Intended for the plans dir itself and any agent-memory dir that never ships. Same blast radius as plan files — keep it tight. Putting the plans dir here lets a gated agent write a plan with `status: active` and have it take effect at once; leave it out if a human should write the plans. |
+| `PLAN_GATE_LOG_DIR` | no (recommended) | Directory for the append-only, hash-chained decision log (`plan-gate-decisions.log`). This log is your audit trail and it is opt-in: if unset, no log is written. A planned release will require it for plan approval. |
 | `PLAN_GATE_LOG_DECISIONS` | no | `all` (default) records every decision on a gated surface, allow and deny; `deny` records denials plus emergency-bypass rows only. |
-| `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated list of MCP tool names that modify external state (e.g. a cloud-drive create/copy tool). When set, those tools are **default-denied** so they can't evade the gate. |
-| `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` disables the gate for the call (set it inline per command; every use is logged). Also honored when the gate itself faults. Use deliberately. |
+| `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated list of MCP tool names that modify external state (e.g. a cloud-drive create/copy tool). When set, those tools are **always denied** while a plan is active (their arguments are not read, so a plan cannot allow one). The hook only sees tools its `matcher` routes to it, and the example matcher does not include MCP tools: add them (e.g. `mcp__.*`). |
+| `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` (the only accepted value, case-insensitive) disables the gate; every use is logged. Also honored when the gate itself faults. Use deliberately. It must be in the environment the **harness** gives the hook (the environment Claude Code was launched with, or the `env` block of its settings); `export` in the agent's Bash tool, or an inline prefix on the agent's command, does not reach the hook. Set it, restart the session, and remove it afterwards. |
 | `_PLAN_GATE_TEST_PLANS_DIR` | no | Test-only override that redirects the plans scan to a temp dir. Not a security boundary — used by the test suite. |
 
 `os.pathsep` is `;` on Windows and `:` on Linux/macOS — it applies to
@@ -60,6 +60,9 @@ Set the variables in the `env` block and register the hook in `hooks.PreToolUse`
 - Relative entries resolve against the nearest repo root, walking up from the session's
   working directory. If the session runs inside a **git worktree** (where `.git` is a file,
   not a directory), the **worktree root** is the anchor — not the main repo.
+- **A plan with only relative paths cannot claim a worktree** (next bullet). Inside a worktree
+  the sample plan therefore denies everything until at least one `allowed_paths` entry is an
+  absolute path under that worktree. Use absolute paths for real plans.
 - **Worktree claim (claim-by-absolute):** a plan counts as active for a worktree session only
   if at least one of its *absolute* `allowed_paths` resolves under that worktree (or it
   declares `worktree_bypass: true`). If none does, the plan is not active there, so gated file
@@ -90,7 +93,7 @@ PowerShell is unchanged (prefix match, no compound parsing). Details and the mig
 
 A stdin payload that does not parse, or an unhandled exception in the gate, **denies** (JSON on
 stdout, exit 0) with a message naming the failure and the bypass. Set `PLAN_GATE_BYPASS=on`
-inline to proceed anyway — that is honored on the fault path too and logged as
+in the harness environment (see the variable table) to proceed anyway — that is honored on the fault path too and logged as
 `emergency_bypass`. `PLAN_GATE` unset or not `on` still allows. A best-effort `gate_error` row
 is written to the decision log; a logging failure never changes the decision. (A test-only
 `_PLAN_GATE_TEST_CRASH=early|late` variable injects a fault for the test suite; it can only
@@ -111,11 +114,11 @@ Rows are hash-chained — each carries `prev` (the previous row's hash) and `h` 
 edits or deletions within the record are detectable:
 
 ```
-python plan-gate.py verify-log [path]   # exit 0 = chain intact, 2 = damage/tampering
+python3 plan-gate.py verify-log [path]   # exit 0 = chain intact, 2 = damage/tampering
 ```
 
 Concurrent sessions share one log safely (advisory locking). The gate never authorizes a
 gated file-write into the log directory itself, no matter what a plan or always-writable
 entry says (`log_self_protect`). A logging failure never changes a decision. That
-append-only trail is the compliance exhaust described in [`paper.md`](paper.md) §6 —
-produced as a byproduct of the gate doing its job, not as a separate feature.
+append-only trail is the audit evidence described in [`paper.md`](paper.md) §6. It is written
+by the gate as it decides, but only when you set `PLAN_GATE_LOG_DIR`; it is opt-in.

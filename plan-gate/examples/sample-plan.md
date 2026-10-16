@@ -23,7 +23,11 @@ to the login page.
   (scoped per git worktree). The gate denies everything if zero are active.
 - `allowed_paths` — the agent may write **only** these exact files. Listing a directory
   authorizes nothing inside it; enumerate each file. Entries may be absolute or
-  repo-root-relative.
+  repo-root-relative. **Use absolute paths for real work.** The relative entries above are
+  for readability: inside a git worktree, a plan claims that worktree only through an
+  absolute entry under it, so a plan with only relative paths denies every write and every
+  non-read-only command there. (Example: `/absolute/path/to/project/src/components/Header.tsx`.)
+- `status: active` is, today, simply what makes the plan live; nothing records who set it.
 - `allowed_commands` — a Bash command is allowed only if **every segment** of it (split on
   `&&`, `||`, `;`, `|`, `&`, newlines, and including `$(...)` bodies) **starts with** one of
   these prefixes; a PowerShell command must start with one. Read-only commands like
