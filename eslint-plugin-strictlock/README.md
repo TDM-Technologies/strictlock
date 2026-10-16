@@ -18,7 +18,8 @@ stays Python + shell and zero-dep.
 npm install --save-dev eslint-plugin-strictlock
 ```
 
-Requires ESLint **>= 8** (declared as a peer dependency).
+Requires ESLint **>= 8** (declared as a peer dependency). The package ships both an ES
+module entry (`import`) and a CommonJS entry (`require`), so either style works.
 
 ## Usage
 
@@ -51,6 +52,8 @@ export default [
 ```
 
 ### Legacy config (`.eslintrc.*`)
+
+Works on ESLint 8.57+ (ESLint 8 loads plugins with `require()`, served by the CommonJS entry).
 
 ```jsonc
 {

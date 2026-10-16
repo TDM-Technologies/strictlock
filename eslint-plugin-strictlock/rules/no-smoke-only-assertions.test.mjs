@@ -12,9 +12,20 @@
  */
 import test from 'node:test';
 
-import { RuleTester } from 'eslint';
+import { createRequire } from 'node:module';
+
+import * as eslint from 'eslint';
 
 import rule from './no-smoke-only-assertions.mjs';
+
+// ESLint 8's classic RuleTester is eslintrc-style; its flat-config tester lives
+// at eslint/use-at-your-own-risk. ESLint >= 9's RuleTester is flat-config.
+const require = createRequire(import.meta.url);
+const eslintMajor = Number(require('eslint/package.json').version.split('.')[0]);
+const RuleTester =
+  eslintMajor < 9
+    ? require('eslint/use-at-your-own-risk').FlatRuleTester
+    : eslint.RuleTester;
 
 // Bind RuleTester's describe/it/afterAll to node:test primitives.
 RuleTester.afterAll = (fn) => fn();

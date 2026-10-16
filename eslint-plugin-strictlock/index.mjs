@@ -14,7 +14,7 @@ import noSmokeOnlyAssertions from './rules/no-smoke-only-assertions.mjs';
 
 const meta = {
   name: 'eslint-plugin-strictlock',
-  version: '0.1.0',
+  version: '0.1.2',
 };
 
 const rules = {

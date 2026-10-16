@@ -76,18 +76,32 @@ jobs:
         run: python test-protection-guard/tests/test_test_protection_guard.py
 
   node:
-    name: eslint-plugin tests
+    name: eslint-plugin tests (node ${{ matrix.node }}, eslint ${{ matrix.eslint }})
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: eslint-plugin-strictlock
+    strategy:
+      fail-fast: false
+      # One package-lock can't hold several ESLint majors, so each job installs
+      # its ESLint over the locked one. ESLint 8 exercises the legacy .eslintrc
+      # path (CommonJS entry); 9 and the locked version exercise flat config.
+      matrix:
+        include:
+          - { node: "18", eslint: "8.57.1" }
+          - { node: "20", eslint: "8.57.1" }
+          - { node: "20", eslint: "9.39.5" }
+          - { node: "20", eslint: "locked" }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node }}
       - name: install
         run: npm ci
+      - name: install eslint ${{ matrix.eslint }}
+        if: matrix.eslint != 'locked'
+        run: npm install --no-save eslint@${{ matrix.eslint }}
       - name: eslint-plugin-strictlock tests
         run: npm test
 
