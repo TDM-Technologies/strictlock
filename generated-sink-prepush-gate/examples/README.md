@@ -9,6 +9,9 @@ This directory shows the backstop end-to-end against a real (tiny) generator.
 - [`SINK.txt`](SINK.txt) — the checked-in generated artifact, currently fresh.
 - [`pre-push-hook.example.sh`](pre-push-hook.example.sh) — what to drop into
   `.git/hooks/pre-push`.
+- [`ci-sink-check.yml`](ci-sink-check.yml) — a copyable GitHub Actions job that runs the same
+  check on the pushed commit in CI. The hook checks your tree (fast, local); CI checks the
+  pushed commit (authoritative).
 
 A git `pre-push` hook is invoked with the remote name and URL as arguments and the refs being
 pushed on stdin. This gate validates the *working-tree* sink, so it ignores both and works as

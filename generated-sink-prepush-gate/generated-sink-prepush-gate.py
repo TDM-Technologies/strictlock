@@ -9,8 +9,8 @@ The commit-time gate is the line of FIRST defense, but a `--no-verify` commit, a
 deliberate single-commit bypass, or a source change committed without staging
 its companion sink can let a stale sink slip onto a branch. This pre-push gate
 intercepts `git push` and re-runs the configured generator in `--check` mode
-against the working tree (not the pushed commit; a CI check on the pushed head is
-planned) — refusing the push (loud non-zero exit)
+against the working tree (not the pushed commit; examples/ci-sink-check.yml runs the
+same check on the pushed head in CI) — refusing the push (loud non-zero exit)
 unless the checked-in sink is a BYTE-EXACT match of a fresh regeneration.
 
 It DEPARTS from the commit-time gate on two points:
