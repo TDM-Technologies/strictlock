@@ -155,7 +155,7 @@ class TestClassify(unittest.TestCase):
 
 
 class TestWpAgeCeiling(unittest.TestCase):
-    """Q8b: CEILING_MIN is a whole-WP bound (time since the earliest branch commit not on base)."""
+    """Q8b: CEILING_MIN is a whole-branch bound (time since the earliest branch commit not on base)."""
 
     def setUp(self):
         self.th = ls.Thresholds()  # ceiling 480
@@ -171,7 +171,7 @@ class TestWpAgeCeiling(unittest.TestCase):
         r = self._c(heartbeat_age_min=1.0, wp_age_min=600.0)
         self.assertEqual(r["status"], "ambiguous")
         self.assertTrue(r["escalate"])
-        self.assertIn("whole-WP ceiling", r["reason"])
+        self.assertIn("whole-branch ceiling", r["reason"])
         self.assertNotIn("reset --hard", r["recovery"])
 
     def test_young_wp_with_fresh_signal_is_running(self):

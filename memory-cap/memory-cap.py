@@ -28,16 +28,17 @@ FAIL-CLOSED
   - Master switch MEMORY_CAP must be on/1/true/yes (case-insensitive) or the hook is inert
     (allow-all).
   - A uniquely-named bypass MEMORY_CAP_BYPASS=on (or 1/true/yes) skips the cap. It is single-use
-    by convention: set inline per command; every use is announced on stderr, so a
-    lingering bypass is visible in the trail. A distinct bypass per gate is
+    by convention: set in the harness environment (the env Claude Code was started with, or the
+    settings.json env block), not as a prefix on the agent's command; every use is announced on
+    stderr, so a lingering bypass is visible in the trail. A distinct bypass per gate is
     deliberate: bypassing one fail-closed gate must never silently disable another.
   - On a stdin parse error or an unhandled crash the hook DENIES (fail-closed).
 
 CONFIGURATION (all via environment)
   MEMORY_CAP            on/1/true/yes (case-insensitive) to enable; anything else
                         makes the hook inert.
-  MEMORY_CAP_BYPASS     on/1/true/yes to bypass the cap (single-use by convention: set inline
-                        per command; every use is announced on stderr).
+  MEMORY_CAP_BYPASS     on/1/true/yes to bypass the cap (single-use by convention: set in the
+                        harness environment; every use is announced on stderr).
   MEMORY_CAP_CHARS      integer cap on a `- ` line, whole-line excluding trailing
                         whitespace (what the model actually loads). Default 200.
   MEMORY_CAP_PATH_RE    regex identifying the index file to cap, matched
@@ -593,8 +594,8 @@ def main() -> None:
             except Exception:
                 _CTX["surface"] = "gate"
         allow(
-            f"memory-cap: {OWN_BYPASS_ENV}=1 — explicit bypass (single-use by "
-            f"convention: set inline per command; every use is logged).",
+            f"memory-cap: {OWN_BYPASS_ENV}=1 — explicit bypass (set in the harness "
+            f"environment; every use is logged).",
             "emergency_bypass",
         )
 
@@ -681,8 +682,10 @@ def main() -> None:
             f"{'; '.join(total_violations)}.\n"
             f"Remove or merge entries (a write that keeps the index level or shrinks it "
             f"is allowed), and move detail into topic files. To bypass, set "
-            f"{OWN_BYPASS_ENV}=1 — single-use by convention: set inline per command; "
-            f"every use is logged, so a lingering bypass is visible in the trail.",
+            f"{OWN_BYPASS_ENV}=1 in the environment the harness starts the hook with "
+            f"(the env Claude Code was launched with, or the settings.json env block) — "
+            f"it cannot be passed as a prefix on the agent's command; every use is "
+            f"logged, so a lingering bypass is visible in the trail.",
             "total_cap",
         )
     if not violations:
@@ -712,8 +715,10 @@ def main() -> None:
         f"{lines_report}{overflow_note}\n"
         f"Compress each violating entry to <= {CAP_CHARS} chars and move detail into a "
         f"topic file (the index should stay a one-line-per-entry table of contents). "
-        f"To bypass, set {OWN_BYPASS_ENV}=1 — single-use by convention: set inline "
-        f"per command; every use is logged, so a lingering bypass is visible in the trail.",
+        f"To bypass, set {OWN_BYPASS_ENV}=1 in the environment the harness starts the "
+        f"hook with (the env Claude Code was launched with, or the settings.json env "
+        f"block) — it cannot be passed as a prefix on the agent's command; every use is "
+        f"logged, so a lingering bypass is visible in the trail.",
         "over_cap",
         log_reason=(
             f"memory-cap: {len(violations)} introduced/modified `- ` line(s) exceed the "
