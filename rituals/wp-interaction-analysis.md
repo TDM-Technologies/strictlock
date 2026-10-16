@@ -130,7 +130,7 @@ the honest account of which part matters:
 
 - **Shared files — now structurally enforced as well.** [`plan-gate`](../plan-gate/) refuses to
   let two concurrently active plans list the same absolute file (or one a directory containing
-  the other's path): it denies and names both plans so you can re-scope. See the cross-plan
+  the other's path): it denies, naming the other active plan and the colliding paths, so you can re-scope. See the cross-plan
   disjoint check in [`plan-gate/AUTHORING.md`](../plan-gate/AUTHORING.md) §4. For fleets of
   worktrees where you need an *exclusive claim* rather than only a plan-time check, see
   [`scope-lease`](../scope-lease/). So the tabletop for this sub-case is now a

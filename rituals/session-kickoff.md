@@ -50,24 +50,28 @@ Open `<state-file>` and note:
 If your setup has a mailbox for items dropped between sessions (see
 [`externalized-memory/templates/MAILBOX.template.md`](../externalized-memory/templates/MAILBOX.template.md)):
 
-- [ ] For each pending entry: fold it into the state file's Active Threads (use an unused
-      thread id), then delete it from the mailbox.
+- [ ] For each pending entry: note it and pick an unused thread id. The fold into Active
+      Threads and the mailbox deletion happen in the kickoff commit (step 8), once a plan
+      authorizes them (or now, if the state-file and mailbox directories are in
+      `PLAN_GATE_ALWAYS_WRITABLE`).
 - [ ] If it is empty, **say so explicitly** — that makes it clear the check wasn't skipped.
 
 The kickoff commit (Phase B) lands both edits together.
 
 ### 3. Verify the gates are armed
 
-- [ ] The gate's environment switch is **on** (e.g. `echo $PLAN_GATE` prints `on`) and the plans
-      directory is set. See [`plan-gate/CONFIG.md`](../plan-gate/CONFIG.md).
-- [ ] If it is unset, the gate is inert and the protocol will not enforce. **Stop and ask the
+- [ ] Every gate you rely on is **on**. In StrictLock each has its own switch: `PLAN_GATE=on`
+      plus `PLAN_GATE_PLANS_DIR` ([`plan-gate/CONFIG.md`](../plan-gate/CONFIG.md)), and, if
+      adopted, `GENERATED_SINK_COMMIT_GATE=on` / `GENERATED_SINK_PREPUSH_GATE=on`. Check each
+      one; one switch does not cover the others. If your harness wraps them behind one switch,
+      check that switch.
+- [ ] If one is unset, that gate is inert and the protocol will not enforce. **Stop and ask the
       operator** before proceeding. Do not proceed on the assumption that "it's probably on."
 
 > **Why this step exists.** An unarmed gate fails silently: nothing is denied, so nothing looks
-> wrong. A single environment switch commonly toggles every hook in the chain (plan gate,
-> state-file freshness, generated-sink gates), so one check covers all of them. Know which hook
-> a denial came from: the messages are tagged, and each integrity hook should have its own
-> uniquely named bypass so one emergency escape hatch cannot silently disable the others.
+> wrong. Know which hook a denial came from: the messages are tagged. Each integrity hook has
+> its own uniquely named bypass, so one emergency escape hatch cannot silently disable the
+> others.
 
 ### 4. Drift check — what shipped since the state file was written
 
@@ -80,9 +84,9 @@ The kickoff commit (Phase B) lands both edits together.
       done. Drift compounds: each unresolved unit makes the next reconciliation harder. The
       operator can then decide whether to fix the pattern or muscle through the reconcile.
 - [ ] **Local trunk sync and worktree count.** `git fetch origin <main>`, then compare your local
-      `<main>` to `origin/<main>`. If local trunk is behind, use a non-destructive recovery
-      (stash with a unique tag, check out trunk, `pull --ff-only`, inspect) — never a
-      `reset --hard`. Glance at `git worktree list | wc -l`; if the count has crept into the
+      `<main>` to `origin/<main>`. If local trunk is behind, note it. The non-destructive
+      recovery (stash with a unique tag, check out trunk, `pull --ff-only`; never a
+      `reset --hard`) needs those commands in the plan, so it happens in step 8. Glance at `git worktree list | wc -l`; if the count has crept into the
       dozens, flag a prune. **Surface; don't auto-prune** — deleting worktrees is the
       operator's call.
 - [ ] **Stuck-sync sentinels.** If you run unattended hygiene that syncs trunk, and it writes a
@@ -94,9 +98,9 @@ The kickoff commit (Phase B) lands both edits together.
       classic archive-move miss. *Propose* the fix as part of the kickoff reconcile in step 8;
       never edit beyond it. If you automate this as a reporter, treat "could not scan" as
       **not clean**.
-- [ ] **Retrospective patterns.** Read the retros of the last few units (or the last sprint-end
-      retro — see the cadence note in [`session-close.md`](session-close.md)). Look for
-      cross-unit patterns ("three of the last three units needed mid-flight `allowed_paths`
+- [ ] **Retrospective patterns.** Read the most recent sprint-end retro (see the cadence rule in
+      [`session-close.md`](session-close.md) step 10), plus any per-unit retro the operator
+      volunteered. A unit with no retro is expected, not a gap. Look for cross-unit patterns ("three of the last three units needed mid-flight `allowed_paths`
       additions" → scope harder this time) and surface them before planning.
 - [ ] **Anchor estimates to prior units.** When you quote effort, name a specific similar unit
       that already shipped ("similar in shape to the one that shipped last Tuesday") and let the
@@ -171,17 +175,20 @@ What follows is only the set of authoring lessons that earned their place at kic
 - [ ] **Don't list files that are already always-writable or that every unit touches.** Your
       agent-memory directory and plans directory can be exempted from gating with
       `PLAN_GATE_ALWAYS_WRITABLE`; listing a shared index file *as well* is unnecessary and
-      guarantees a disjoint-paths collision with any peer plan that also lists it. Do list the
-      per-unit state-file entry (it's unique to the unit).
+      guarantees a disjoint-paths collision with any peer plan that also lists it. Do list any
+      state-file entry that only this unit writes (e.g. a per-unit record file).
 - [ ] **If the state file is a single shared file that every unit's kickoff and close-out
-      writes**, decide the single-writer convention up front. Either each concurrent plan
-      claims it and a second claimant is denied (then the denied unit skips its state-file
-      refresh and a catch-up commit reconciles the batch later), or concurrent units are
-      sequenced. Don't discover this at close-out.
+      writes**, decide the single-writer convention up front. One pattern: list the state file
+      **twice**, once worktree-anchored (authorizes your writes) and once as the main
+      checkout's absolute path (a collision key: plan-gate's disjoint check compares other
+      plans' absolute entries, so a second concurrent plan listing the same key is denied). If
+      you are denied, either drop the key entry and skip the state-file refresh (a catch-up
+      commit reconciles the batch later), or wait and run sequentially. Don't discover this at
+      close-out.
 - [ ] **The worktree anchor.** When working in a worktree, at least one `allowed_paths` entry
       must resolve under it; repo-root-relative paths do this naturally. Main-checkout absolute
       paths in a worktree session trip the silent-drift guard.
-- [ ] **Keep gate-compared scalars bare.** The public plan-gate strips trailing ` # comments`
+- [ ] **Keep gate-compared scalars bare.** plan-gate strips trailing ` # comments`
       from scalars and list items, but a different parser may not: for any scalar compared
       with `==` (`status`, `worktree_bypass`), put the rationale on its own comment line, never
       trailing the value.
@@ -203,10 +210,9 @@ a **separate context, explicitly told to refute** the first (confirm / refute / 
 finding, plus a false-negative sweep). Single-pass is fine for low-stakes or purely local work.
 Run the second stage even when the first looks airtight.
 
-If you have an objective trigger for this decision (scoring the plan's paths against security-
-sensitive, high-churn, generated-sink, and file-count factors), run it against the plan. Treat
-it as a **floor, not a ceiling**, and report only the plain yes/no to the operator — never a
-number whose meaning they can't audit.
+If you automate this decision (for example by scoring the plan's paths for security
+sensitivity, churn, and size), treat the score as a **floor, not a ceiling**, and report the
+resulting yes/no rather than the raw score.
 
 - [ ] Review depth decided and written into the plan.
 
@@ -292,8 +298,13 @@ If this unit runs alongside other agents in sibling worktrees, claim its path se
 now that the branch exists: [`scope-lease`](../scope-lease/) reads the same active plan's
 `allowed_paths` and takes an exclusive lease. Release it at close-out (see
 [`session-close.md`](session-close.md)). This step is advisory when you run one agent at a time.
-If you run [`liveness-scan`](../liveness-scan/), the claim is also what lets it classify this
-session as live rather than ambiguous.
+A lease expires at `SCOPE_LEASE_TTL` (default 30 min); re-run `scope-lease.py acquire` during
+long work to extend it (re-acquiring your own lock refreshes the deadline), and run
+`scope-lease.py fence-check` just before you hand off for merge (see
+[`session-close.md`](session-close.md)). If you run [`liveness-scan`](../liveness-scan/), it
+does not read the lease; it classifies this session from its active plan plus a heartbeat file
+(`LIVENESS_SCAN_HEARTBEAT_RELPATH`) or commit mtime. Touch the heartbeat file alongside the
+acquire so it reports this session as running.
 
 ### 9. Push the branch
 
@@ -350,6 +361,7 @@ turns out wrong; fold what proves durable into the steps above.
   integrity hook, fix the staleness — don't toggle the bypass for routine drift.
 - **A hook denial isn't always the plan gate.** Check which hook produced the message before
   editing the plan.
-- **An unattended-lease caveat.** If you use a heartbeat or lease with a fixed timeout, a
-  session that outlives it will read as "stalled" to the reporter. That is harmless when
-  liveness is report-only and nothing is reaped — don't "fix" it mid-unit.
+- **Heartbeat age vs lease expiry are different things.** A liveness heartbeat that ages past
+  its timeout only makes a report-only scanner say "stalled", which is harmless. A scope-lease
+  that passes its deadline can be reclaimed by a peer, which is not harmless: extend it, and
+  fence-check before merge.

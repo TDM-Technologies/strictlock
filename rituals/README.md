@@ -39,10 +39,11 @@ a feature, a fix, a doc pass. "Unit of work" and "WP" are interchangeable.
 Each step here exists because skipping it was a *recurring* failure, not a hypothetical one:
 a state file that drifted several units behind reality, a closed item left in the "open" table,
 a plan locked around a premise that had already been overtaken, a plan archived one step too
-early so the push was denied. Every checklist step carries a short **"Why this step exists"**
-note so you can tell which steps earn their place and which a given project can drop. If you
-find a step that has never once caught anything in your setup, delete it — a ritual that fires
-on every run and never changes the outcome trains people to skip all of them.
+early so the push was denied. The steps that most often get skipped carry a short **"Why this
+step exists"** note, so you can tell which steps earn their place. Whether a step that has never
+fired should be kept is a governance-of-governance question (see [roadmap.md](../roadmap.md)):
+a step that never catches anything may be working, not dead. Prune deliberately, with evidence,
+not by default.
 
 Two design rules run through all four files:
 
@@ -75,7 +76,7 @@ rituals make the gates' plans *worth approving*.
 
 1. Copy the four files into your project's docs (or your agent's skill directory — each
    checklist is written so it can be loaded as a skill or a prompt, and walked in order).
-2. Replace the bracketed placeholders (`<state-file>`, `<plans-dir>`, `<main-branch>`, your
+2. Replace the bracketed placeholders (`<state-file>`, `<plans-dir>`, `<main>`, your
    test command) with your project's equivalents. Every project-specific name in the
    checklists is a placeholder on purpose.
 3. Add a **lessons file** beside each checklist and let it grow. Both checklists carry a

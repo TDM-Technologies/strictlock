@@ -43,9 +43,12 @@ mistake is made at this point.
 
 > **Why this step exists.** Reconciling the state file *in the close-out commit* is the point,
 > not "I'll do that at the next kickoff". Several units once skipped the refresh and deferred it
-> to the next kickoff, which often missed it too; drift compounded. A freshness hook that
-> compares the state file's `git_ref` to trunk now refuses a stale reconcile. When it blocks
-> you, the fix is to do the work, not bypass the hook.
+> to the next kickoff, which often missed it too; drift compounded.
+> The source project later added a hook that compares the state file's `git_ref` to trunk and
+> refuses a stale reconcile. StrictLock does not ship that hook;
+> [`externalized-memory`](../externalized-memory/) gives you the `git_ref` tripwire field (the
+> manual version is the staleness tripwire in its DESIGN.md). If you build one, the fix when it
+> blocks you is to do the work, not bypass it.
 
 > **If your Meta and Next Action are generated** (projected from per-unit record files), don't
 > hand-edit them. Flip *this unit's* record to its "code-complete" status, fill in the PR
@@ -53,10 +56,7 @@ mistake is made at this point.
 > regenerated state file together. Hand-edits to a generated region are overwritten and refused
 > by the sink gate. See
 > [`externalized-memory/PROJECTION-SCHEMA.md`](../externalized-memory/PROJECTION-SCHEMA.md) and
-> [`generated-sink-commit-gate`](../generated-sink-commit-gate/). A transitional note: if your
-> freshness hook only parses an *older* state-file shape, use a ceremony subject it accepts
-> (`docs:` or a `plan:` body line) until the hook's fix lands.
-
+> [`generated-sink-commit-gate`](../generated-sink-commit-gate/).
 ### 3. Next Action refreshed
 
 - [ ] Reframe Next Action around what comes **after** this unit merges. The common pattern:
@@ -116,9 +116,11 @@ that went:
 3. **Denied, and you waited (sequential).** You became first-mover once the earlier plan merged.
    Proceed as in case 1.
 
-- [ ] Case identified. (Deterministic check: if your active plan lists both the
-      worktree-anchored path and the main-checkout path of the shared state file, you claimed
-      it; if only the worktree-anchored one, you did not.)
+- [ ] Case identified. (Deterministic check: plan-gate's disjoint check only
+      compares absolute paths, so the claim on a shared file is the absolute path of the shared
+      copy. If your active plan lists that absolute path, you claimed it; if it lists only your
+      worktree's own copy, you did not. Keep at least one worktree-anchored entry so the
+      silent-drift guard is satisfied.)
 
 ### 5. New decisions, constraints, and threads logged
 
@@ -135,9 +137,9 @@ Route each captured item:
 - **Belongs to this project** -> a new thread in the state file (rides the step-5 authorization).
 - **Not this project's / cross-project / not sure** -> your outbound chute: one new file per
   item in a designated folder, written so it rides this close-out commit. It is an *outbound
-  chute*, not a second backlog. If the capture is done by a helper script, have the plan
-  authorize the **command** rather than a path — the file write then happens inside the script's
-  process and the gate sees only the authorized command.
+  chute*, not a second backlog. List the chute folder in `allowed_paths` (or in
+  `PLAN_GATE_ALWAYS_WRITABLE`) so the write is visible to the gate. Note that any command you
+  authorize can write files the gate never sees, so authorize helper scripts narrowly.
 
 Two passes, both capturing **agent-flagged** items, not only operator-named ones:
 
@@ -189,6 +191,12 @@ Re-read `<state-file>` and `<archive-file>` once before committing. Confirm:
 
 ## After the commit lands
 
+### 7b. Fence-check your path claim (if you took one)
+
+- [ ] If you claimed paths with [`scope-lease`](../scope-lease/), run
+      `scope-lease.py fence-check` before pushing for merge; exit 4 means the lease was
+      reclaimed: stop and surface.
+
 ### 8. Push the branch and open the PR
 
 ```
@@ -202,24 +210,32 @@ The agent opens the PR; a human merges it through your normal review process.
 
 If `origin/<main>` advanced and the PR shows a conflict on a **generated sink** (the common
 concurrent-units case: an earlier PR merged its own regenerated state file), don't ask the
-operator to resolve it and don't hand-merge it. Use [`sink-resolver`](../sink-resolver/): it
-regenerates from the merged sources, byte-checks the result, and **escalates any conflict that
-isn't purely the sink**. Then act on the **outcome token it prints, never its exit code**
-(a resolver can always exit 0, so the exit status says nothing):
+operator to resolve it and don't hand-merge it. Use [`sink-resolver`](../sink-resolver/): merge
+`origin/<main>` into your branch; when the merge stops on the `merge=binary` sink, run
+`python3 sink-resolver.py resolve`. It regenerates the sink from the merged sources, byte-checks
+the result, finalizes the merge, and **escalates any conflict that isn't purely the sink**.
+Then act on its **exit code** (see [`sink-resolver/CONFIG.md`](../sink-resolver/CONFIG.md)
+"Exit codes"):
 
-| Outcome | What to do |
+| Exit code | What to do |
 |---|---|
-| **resolved** | The sink conflict was auto-resolved and byte-verified. Re-push the rewritten branch, then re-check mergeability. If it *still* reports a conflict (trunk advanced again between your rebase and your push — the second-merger case), re-run this step. |
-| **nothing to resolve** | The rebase cleared it locally. **A clean worktree is not the same as a mergeable PR** — re-push (the branch may have been rebased) and re-confirm mergeability. |
-| **plan-only** | You ran a dry run; the apply didn't take. Re-run with apply. Do **not** push. |
-| **any escalation** | A real non-sink conflict, a failed verify, a tripped circuit breaker. **Surface to the operator. Do not force-push. Do not retry in a loop** — a failed verify won't self-clear, and a tripped breaker can leave the worktree staged but not finalized, so you may need `git rebase --abort` to back out. The judgment is the human's. |
+| `0`, printed `RESOLVED` | The sink conflict was auto-resolved and byte-verified. Push normally (`git push origin <branch>`), then re-check mergeability. If it *still* reports a conflict (trunk advanced again between your merge and your push — the second-merger case), repeat this step. |
+| `0`, printed `no merge conflict to resolve` | **A clean worktree is not the same as a mergeable PR** — re-push and re-confirm mergeability. |
+| `0`, printed `DRY-RUN` | You passed `--dry-run`, which classifies without writing; the apply didn't run. Re-run without `--dry-run`. Do **not** push. |
+| `1` | Fail-closed: generator error, failed byte-oracle, or misconfiguration. **Surface to the operator. Do not retry in a loop** — a failed verify won't self-clear. |
+| `4` | Escalation: a non-sink path is in conflict and nothing was written. **Surface to the operator.** The judgment is the human's. |
 
-**Force-push safety and the gate.** The re-push rewrites history, so it needs the narrow
-`git push --force-with-lease --force-if-includes origin <branch>` form: the lease refuses if your
-remote-tracking ref doesn't match origin, and the includes check additionally refuses if a
-background fetch advanced a ref you never integrated. It targets the **feature branch only,
-never trunk**. If the gate denies it because the plan lacks that line, **surface the
-rebased-branch state to the operator** — don't toggle a bypass and don't edit the gate.
+If a merge is left half-done, `git merge --abort` (or `git rebase --abort`) backs out.
+**Do not force-push** to get past any of these.
+
+**If you instead run a pre-merge worktree resolver that rebases** (see sink-resolver
+[SCHEMA.md](../sink-resolver/SCHEMA.md) "Placement variants"), the re-push rewrites history and
+needs the narrow `git push --force-with-lease --force-if-includes origin <branch>` form: the
+lease refuses if your remote-tracking ref doesn't match origin, and the includes check
+additionally refuses if a background fetch advanced a ref you never integrated. It targets the
+**feature branch only, never a bare force-push and never trunk**. If the gate denies it because
+the plan lacks that line, **surface the branch state to the operator** — don't toggle a bypass
+and don't edit the gate.
 
 **The plan stays `status: active` through this step.** The flip is the last step (12). Flipping
 any earlier blocks the gate from authorizing the push or the PR.
@@ -243,15 +259,14 @@ closed items. Ask the retro question **only at a sprint-end close-out**.
   Then ask once, scoped to the sprint: **"Sprint wrap — (1) what surprised you across this
   sprint, (2) what's working that we should deliberately keep, and (3) what would you change?"**
   Ground it with the patterns so the retro evaluates *impact* rather than re-enumerating what
-  the gate blocked. The next kickoff reads the sprint-end retro for pattern surfacing.
+  the gate blocked. Record the answer in your durable retro surface (the state file's archive
+  or a sprint notes file) in the same session; the next kickoff reads it from there.
 
-> **Why this step is shaped this way.** A per-unit retro prompt is friction that reads as
-> interrogation, not signal; in the run that produced this rule, it fired on a unit that had
-> only closed its own self-raised item and drew an immediate "why did it fire now?". The wrong
-> premise was the *cadence*, not the question. Batching to sprint boundaries matches how
-> attention actually works and keeps the question valuable. Earlier versions of this checklist
-> prompted on every unit, then carved out small ones, then dropped per-unit prompts entirely;
-> only the last is the rule.
+> **Why this step is shaped this way.** A per-unit retro prompt fires too often to stay useful;
+> on small units it reads as friction rather than signal. Batching to the sprint boundary keeps
+> the question rare enough to get a considered answer, and gives it enough units to find
+> patterns in. If your team prefers per-unit retros, change the cadence; the write side
+> (recording volunteered retros) is the same either way.
 
 ### 10a. Gate decision log — record per unit silently, surface clusters at sprint end
 
@@ -302,7 +317,7 @@ any retro the operator volunteered. No prompt here.
 ### 11b. Release the path claim
 
 - [ ] If you claimed paths at kickoff with [`scope-lease`](../scope-lease/), release them now so
-      a fleet scanner no longer counts the session as live. Release is idempotent; releasing a
+      peers can claim those paths. Release is idempotent; releasing a
       claim that was never taken, or already released, is a no-op. Do this **before** step 12:
       the flip-last discipline wants nothing left for the gate to authorize after it.
 
@@ -350,7 +365,8 @@ turns out wrong; fold what proves durable into the steps above.
 
 - **Archive moves and reconcile happen in the close-out commit, not the next kickoff** (steps 2,
   4). Multiple units skipped this and deferred it; the next kickoff often missed it too, and
-  drift compounded until a freshness hook was added to refuse a stale reconcile.
+  drift compounded until the source project added a freshness hook to refuse a stale reconcile
+  (not shipped here).
 - **The plan flip is the last keystroke** (step 12). The original wording was "after the commit
   is in", which was read as "immediately after", and the push was denied. The real rule is
   "after everything that needs the gate". The recurring failure: flip, push denied, re-flip to
