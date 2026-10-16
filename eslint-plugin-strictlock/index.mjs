@@ -40,8 +40,8 @@ plugin.configs.recommended = [
     plugins: { strictlock: plugin },
     rules: {
       'strictlock/no-smoke-only-assertions': 'error',
-      'strictlock/no-tautological-assertions': 'error',
-      'strictlock/no-unasserted-result': 'error',
+      'strictlock/no-tautological-assertions': 'warn',
+      'strictlock/no-unasserted-result': 'warn',
     },
   },
 ];
@@ -51,8 +51,8 @@ plugin.configs['recommended-legacy'] = {
   plugins: ['strictlock'],
   rules: {
     'strictlock/no-smoke-only-assertions': 'error',
-    'strictlock/no-tautological-assertions': 'error',
-    'strictlock/no-unasserted-result': 'error',
+    'strictlock/no-tautological-assertions': 'warn',
+    'strictlock/no-unasserted-result': 'warn',
   },
 };
 

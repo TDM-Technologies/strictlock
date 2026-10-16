@@ -36,7 +36,24 @@ export default [
 ];
 ```
 
-Or wire the rule by hand to pass options:
+**Severity staging (0.2.0).** `recommended` sets `no-smoke-only-assertions` to `error` and the two
+newer rules (`no-tautological-assertions`, `no-unasserted-result`) to `warn`. The plan is to
+promote those two to `error` in a later release, after feedback from real suites. To get `error`
+today, override after the spread (flat config; the legacy equivalent is in `rules`):
+
+```js
+export default [
+  ...strictlock.configs.recommended,
+  {
+    rules: {
+      'strictlock/no-tautological-assertions': 'error',
+      'strictlock/no-unasserted-result': 'error',
+    },
+  },
+];
+```
+
+Or wire the rules by hand to pass options (the examples below use `error`):
 
 ```js
 import strictlock from 'eslint-plugin-strictlock';
