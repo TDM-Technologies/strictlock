@@ -29,6 +29,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 GUARD = HERE.parent / "test-protection-guard.py"
+# ASCII marker for "the guard warned". The warning glyph is not encodable in
+# cp1252, so on Windows it reaches stderr as a backslash escape and a glyph-based
+# assertNotIn would pass vacuously.
+WARN_MARKER = "test-protection-guard: this commit changes"
 
 
 def load_guard():
@@ -190,7 +194,7 @@ class PreToolUseTests(GuardTestBase):
         dec, reason, err, _c = self.run_pretooluse("git commit -m 'spec change'")
         self.assertEqual(dec, "allow")
         self.assertIn("justification", reason.lower())
-        self.assertNotIn("⚠", err)
+        self.assertNotIn(WARN_MARKER, err)
         self.assertEqual(self.log_rows()[0]["decision"], "justified")
 
     def test_commit_message_token_justifies(self):
@@ -260,21 +264,21 @@ class PreCommitTests(GuardTestBase):
         self.seed("js"); self.stage("js", "change", with_token=True)
         err, code = self.run_precommit()
         self.assertEqual(code, 0)
-        self.assertNotIn("⚠", err)
+        self.assertNotIn(WARN_MARKER, err)
         self.assertEqual(self.log_rows()[0]["decision"], "justified")
 
     def test_additions_only_quiet(self):
         self.seed("js"); self.stage("js", "add")
         err, code = self.run_precommit()
         self.assertEqual(code, 0)
-        self.assertNotIn("⚠", err)
+        self.assertNotIn(WARN_MARKER, err)
         self.assertEqual(self.log_rows(), [])
 
     def test_no_source_quiet(self):
         self.seed("js"); self.stage("js", "change", stage_source=False)
         err, code = self.run_precommit()
         self.assertEqual(code, 0)
-        self.assertNotIn("⚠", err)
+        self.assertNotIn(WARN_MARKER, err)
 
     def test_outside_git_repo_exit_zero(self):
         outside = self.root / "outside"; outside.mkdir()
@@ -469,7 +473,7 @@ class VerifyHardeningTests(GuardTestBase):
         git(self.repo, "add", "-A", env=self.git_env)
         err, code = self.run_precommit()
         self.assertEqual(code, 0)
-        self.assertNotIn("⚠", err)
+        self.assertNotIn(WARN_MARKER, err)
         self.assertEqual(self.log_rows(), [])
 
     def test_go_testify_assert_dot_still_caught(self):

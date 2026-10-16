@@ -47,6 +47,14 @@ _spec.loader.exec_module(sr)
 
 PY = sys.executable  # don't depend on a `python3` on PATH
 
+
+def q(arg: str) -> str:
+    """Quote one argv element for the configured-command parser on this OS.
+
+    The resolver splits with shlex posix=False on Windows, where shlex.quote's
+    single quotes are not understood; use Windows quoting there."""
+    return subprocess.list2cmdline([arg]) if os.name == "nt" else shlex.quote(arg)
+
 # A pure, deterministic generator: dist/index.txt = "<name>=<content>" per sorted src/*.txt.
 GEN = r'''#!/usr/bin/env python3
 import sys, pathlib
@@ -109,8 +117,8 @@ class SinkResolverBase(unittest.TestCase):
         self._env_backup = dict(os.environ)
         # default config the tests share; individual tests override.
         os.environ["SINK_RESOLVER"] = "on"
-        os.environ["SINK_RESOLVER_GENERATOR_CMD"] = f"{shlex.quote(PY)} gen.py"
-        os.environ["SINK_RESOLVER_CHECK_CMD"] = f"{shlex.quote(PY)} gen.py --check"
+        os.environ["SINK_RESOLVER_GENERATOR_CMD"] = f"{q(PY)} gen.py"
+        os.environ["SINK_RESOLVER_CHECK_CMD"] = f"{q(PY)} gen.py --check"
         os.environ["SINK_RESOLVER_SINKS"] = "dist/index.txt"
         for k in ("SINK_RESOLVER_GENERATOR_CWD", "SINK_RESOLVER_TIMEOUT",
                   "SINK_RESOLVER_LOG_DIR"):
@@ -356,7 +364,7 @@ class TestByteOracleFailClosed(SinkResolverBase):
     def test_check_cmd_drift_fails_closed(self) -> None:
         self._make_sink_only_conflict()
         # a deliberately-failing oracle (always reports drift) -> resolve must fail closed
-        os.environ["SINK_RESOLVER_CHECK_CMD"] = f"{shlex.quote(PY)} -c \"import sys; sys.exit(1)\""
+        os.environ["SINK_RESOLVER_CHECK_CMD"] = f"{q(PY)} -c \"import sys; sys.exit(1)\""
         rc = self._run("resolve")
         self.assertEqual(rc, sr.EXIT_ERROR)
         self.assertTrue(sr._merge_in_progress(self.root), "merge must NOT be finalized on a "
@@ -560,7 +568,7 @@ class TestMisconfig(SinkResolverBase):
 
     def test_generator_nonzero_fails_closed(self) -> None:
         self._make_sink_only_conflict()
-        os.environ["SINK_RESOLVER_GENERATOR_CMD"] = f"{shlex.quote(PY)} -c \"import sys; sys.exit(3)\""
+        os.environ["SINK_RESOLVER_GENERATOR_CMD"] = f"{q(PY)} -c \"import sys; sys.exit(3)\""
         os.environ.pop("SINK_RESOLVER_CHECK_CMD", None)
         self.assertEqual(self._run("resolve"), sr.EXIT_ERROR)
         self.assertTrue(sr._merge_in_progress(self.root))
@@ -581,6 +589,26 @@ class TestNormalization(SinkResolverBase):
         self._init_repo()
         keys = sr.normalize_sinks(self.root, ["./dist/index.txt", "dist/index.txt"])
         self.assertEqual(keys, ["dist/index.txt"])
+
+
+class SplitCommandTests(unittest.TestCase):
+    """Windows-style (posix=False) splitting must strip one layer of outer quotes."""
+
+    def test_windows_quoted_path_with_spaces(self):
+        argv = sr._split_command(r'"C:\Program Files\Python\python.exe" gen.py --check', posix=False)
+        self.assertEqual(argv, [r"C:\Program Files\Python\python.exe", "gen.py", "--check"])
+
+    def test_windows_single_quotes_stripped(self):
+        self.assertEqual(sr._split_command("'a b' c", posix=False), ["a b", "c"])
+
+    def test_windows_unquoted_and_inner_quotes_untouched(self):
+        self.assertEqual(sr._split_command(r"python C:\x\gen.py", posix=False),
+                         ["python", r"C:\x\gen.py"])
+        self.assertEqual(sr._split_command('python -c "import sys"', posix=False),
+                         ["python", "-c", "import sys"])
+
+    def test_posix_unchanged(self):
+        self.assertEqual(sr._split_command("'a b' c", posix=True), ["a b", "c"])
 
 
 if __name__ == "__main__":

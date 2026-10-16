@@ -201,6 +201,23 @@ def _timeout_s() -> int:
     return v
 
 
+def _split_command(value: str, posix=None) -> list:
+    """shlex.split a configured command line, correct on every OS.
+
+    On Windows shlex runs with posix=False, which keeps the surrounding quote
+    characters inside each token; one matching outer layer is stripped so a quoted
+    path with spaces ("C:\\Program Files\\Python\\python.exe" gen.py) launches.
+    `posix` is overridable for tests.
+    """
+    if posix is None:
+        posix = os.name != "nt"
+    argv = shlex.split(value, posix=posix)
+    if not posix:
+        argv = [t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t
+                for t in argv]
+    return argv
+
+
 def run_check(repo_root: Path) -> None:
     """Regenerate-and-compare via the configured generator's --check mode.
 
@@ -222,7 +239,7 @@ def run_check(repo_root: Path) -> None:
         )
 
     try:
-        argv = shlex.split(generator, posix=(os.name != "nt"))
+        argv = _split_command(generator)
     except ValueError as e:
         block(repo_root, f"{ENV_GENERATOR} is not a parseable command ({e}) — fail-closed.")
     if not argv:
