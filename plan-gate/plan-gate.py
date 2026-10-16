@@ -335,6 +335,35 @@ def deny(reason: str) -> None:
     _emit("deny", reason)
 
 
+def no_decision() -> None:
+    """Exit 0 with NO stdout JSON: the hook has no opinion, so the harness runs
+    its normal permission flow (an "allow" decision would SKIP the user's
+    permission prompt). Used for MCP tools plan-gate does not affirmatively
+    check: unconfigured ones, and any MCP call while the gate is off or bypassed."""
+    sys.exit(0)
+
+
+def _peek_tool_name() -> str:
+    """Best-effort tool_name from the stdin payload (used only where the gate is
+    inert or bypassed and just needs to know whether the call is an MCP tool).
+    Never raises; an interactive TTY stdin is not consumed."""
+    try:
+        if sys.stdin is not None and not sys.stdin.isatty():
+            payload = json.load(sys.stdin)
+            name = payload.get("tool_name", "") if isinstance(payload, dict) else ""
+            return name if isinstance(name, str) else ""
+    except Exception:
+        pass
+    return ""
+
+
+def _allow_or_defer(reason: str, tool: str) -> None:
+    """allow(), except an MCP tool gets no decision (see no_decision)."""
+    if tool.startswith("mcp__"):
+        no_decision()
+    allow(reason)
+
+
 def _canonical_row_hash(prev: str, row_without_h: dict) -> str:
     """sha256 over prev + newline + the canonical JSON of the row (minus `h`).
 
@@ -428,14 +457,59 @@ def _safe_str(v, cap: int) -> str:
     """Length-cap + strip un-encodable code points (lone surrogates arriving
     via \\uXXXX escapes in the stdin JSON) so a row ALWAYS serializes — the
     record must never lose a decision to its own input. Every string field
-    goes through this: the caps also bound total row size (worst case well
-    under 32KiB) so a row can never outgrow _read_prev_hash's tail window.
+    goes through this: the caps bound each field, and _fit_row enforces the
+    total serialized-row budget (MAX_ROW_BYTES) so a row can never outgrow
+    _read_prev_hash's tail window.
     """
     s = str(v)[:cap]
     try:
         return s.encode("utf-8", "replace").decode("utf-8")
     except Exception:
         return s.encode("ascii", "replace").decode("ascii")
+
+
+MAX_ROW_BYTES = 32 * 1024  # serialized row (incl. prev + h) is kept at or under this
+
+
+def _row_bytes(row: dict) -> int:
+    probe = dict(row)
+    probe["prev"] = "0" * 64
+    probe["h"] = "0" * 64
+    return len(json.dumps(
+        probe, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8"))
+
+
+def _fit_row(row: dict) -> None:
+    """Shrink `row` in place until its serialized size is <= MAX_ROW_BYTES, so a
+    crafted payload (many long, control-character-heavy targets whose JSON
+    escaping inflates 6x) can never outgrow the tail window _read_prev_hash
+    reads — which would break the hash chain. Extra targets are dropped (with a
+    count), then the longest string is halved with a marker."""
+    marker = "...[truncated]"
+    for _ in range(200):
+        if _row_bytes(row) <= MAX_ROW_BYTES:
+            return
+        extra = row.get("extra")
+        tl = extra.get("targets") if isinstance(extra, dict) else None
+        if isinstance(tl, list) and len(tl) > 1:
+            extra.setdefault("targets_n", len(tl))
+            extra["targets_truncated"] = True
+            del tl[len(tl) // 2:]
+            continue
+        # Halve the longest remaining string (a row field or the first target).
+        cands = [(len(v), k) for k, v in row.items() if isinstance(v, str)]
+        if isinstance(tl, list) and tl:
+            cands.append((len(tl[0]), None))
+        if not cands:
+            break
+        ln, key = max(cands, key=lambda c: c[0])
+        if ln <= len(marker) + 1:
+            break
+        if key is None:
+            tl[0] = tl[0][:ln // 2] + marker
+        else:
+            row[key] = row[key][:ln // 2] + marker
 
 
 def _log_decision(
@@ -474,10 +548,11 @@ def _log_decision(
         elif surface in ("bash", "ps"):
             command = _safe_str(tin.get("command") or "", 500)
         elif surface == "mcp":
-            summary_fields = ("title", "parentId", "fileId", "mimeType", "newTitle")
+            # Tool name only (already in the row). Argument VALUES and names are
+            # never logged for MCP calls (they can carry mail, chat, document
+            # content); the one exception is the configured path argument(s) of a
+            # tool with an argument spec, recorded as targets.
             if tool in MCP_TOOL_ARGS:
-                # Configured with an argument spec: record each target path
-                # (same per-path cap as a file target; at most 20 listed).
                 try:
                     mt, _prob = _mcp_targets(tool, tin)
                     if mt:
@@ -487,14 +562,6 @@ def _log_decision(
                             extra["targets_n"] = len(mt)
                 except Exception:
                     extra["targets_error"] = True
-            try:
-                for key in summary_fields:
-                    if key in tin:
-                        val = tin.get(key)
-                        extra[key] = _safe_str(val, 80) if val is not None else None
-                extra["_keys"] = sorted(_safe_str(k, 64) for k in tin.keys())[:20]
-            except Exception:
-                extra = {"_keys_error": True}
         elif surface == "gate":
             # Gate-level rows (emergency bypass): best-effort context from
             # whatever payload shape was captured.
@@ -518,6 +585,7 @@ def _log_decision(
         }
         if extra:
             row["extra"] = extra
+        _fit_row(row)
         with open(DECISIONS_LOG, "a+b") as fh:
             with _Flock(fh):
                 row["prev"] = _read_prev_hash(fh)
@@ -1656,8 +1724,12 @@ def _classify_redirect(target: str, has_cd: bool, what: str = "redirection targe
                 f"working directory cannot be determined."
             )
         t = os.path.join(base, t)
+    t_raw = t
     t = os.path.normpath(t)
-    if _is_under_log_dir(t):
+    # Check BOTH the raw and the lexically normalized form (each is also checked
+    # resolved by _is_under_log_dir): normalizing first would erase a `..` that,
+    # after a symlink in front of it, leads into the log directory.
+    if _is_under_log_dir(t_raw) or _is_under_log_dir(t):
         return "log", (
             f"plan-gate: {what} {t} is under PLAN_GATE_LOG_DIR; the "
             f"gate never authorizes gated writes to its own decision log."
@@ -1685,10 +1757,17 @@ def _classify_redirect(target: str, has_cd: bool, what: str = "redirection targe
 _BUILTIN_WRITER_SCRIPTS = {"atomic-write.py": 1}
 
 
+_MAX_ARGPOS = 64
+_WRITER_NAME_RE = re.compile(r"^[^\s:;/\\,]+\.py$", re.IGNORECASE)
+
+
 def _parse_writer_scripts(raw: str):
     """(writers, error). `writers` maps lowercased script basename -> 1-based
     positional index of its target; `error` is a message when `raw` is malformed
-    (writers is then just the built-ins)."""
+    (writers is then just the built-ins). A name must be a bare file name ending
+    in .py (no ':', ';', whitespace or path separators), so a separator typo such
+    as `a.py:1 b.py:2` or `a.py:2;b.py:1` is malformed rather than silently
+    leaving a writer ungated."""
     writers = dict(_BUILTIN_WRITER_SCRIPTS)
     if not raw.strip():
         return writers, None
@@ -1702,32 +1781,60 @@ def _parse_writer_scripts(raw: str):
         pos = pos.strip()
         if not sep or not name:
             return dict(_BUILTIN_WRITER_SCRIPTS), (
-                f"entry {entry!r} is not name.py:argpos"
+                f"entry {entry[:80]!r} is not name.py:argpos"
             )
-        if "/" in name or "\\" in name:
+        if not _WRITER_NAME_RE.match(name):
             return dict(_BUILTIN_WRITER_SCRIPTS), (
-                f"entry {entry!r}: the script must be a bare file name "
-                f"(matched by basename), not a path"
+                f"entry {entry[:80]!r}: the script must be a bare file name ending "
+                f"in .py (no ':', ';', spaces or path separators; matched by "
+                f"basename); entries are separated by ','"
             )
-        if not re.match(r"^[0-9]+$", pos) or int(pos) < 1:
+        if not re.match(r"^[0-9]{1,3}$", pos) or not (1 <= int(pos) <= _MAX_ARGPOS):
             return dict(_BUILTIN_WRITER_SCRIPTS), (
-                f"entry {entry!r}: argpos must be a positive integer; it is "
-                f"1-based (1 = the script's first positional argument)"
+                f"entry {entry[:80]!r}: argpos must be an integer from 1 to "
+                f"{_MAX_ARGPOS}; it is 1-based (1 = the script's first positional "
+                f"argument)"
             )
         extra[name.lower()] = int(pos)
     writers.update(extra)
     return writers, None
 
 
-WRITER_SCRIPTS, _WRITER_CFG_ERROR = _parse_writer_scripts(
-    os.environ.get("PLAN_GATE_WRITER_SCRIPTS", "")
-)
+def _load_writer_scripts():
+    # Any fault while parsing the config fails CLOSED (it must not escape at
+    # import time, outside the crash handler).
+    try:
+        return _parse_writer_scripts(os.environ.get("PLAN_GATE_WRITER_SCRIPTS", ""))
+    except Exception as exc:  # pragma: no cover - defensive
+        return dict(_BUILTIN_WRITER_SCRIPTS), f"could not parse ({type(exc).__name__})"
 
-_PYTHON_PROG_RE = re.compile(r"^(python([0-9]+(\.[0-9]+)*)?|py)$")
+
+WRITER_SCRIPTS, _WRITER_CFG_ERROR = _load_writer_scripts()
+
+# Interpreters: python, python3, python3.12, python3.13t, python3-dbg, pythonw(.exe),
+# pypy, pypy3 (a basename; any directory prefix is ignored), and the py launcher.
+_INTERP_RE = re.compile(
+    r"^(?:(?:python|pythonw|pypy)[0-9.]*[a-z\-]*(?:\.exe)?|py(?:\.exe)?)$"
+)
+_PY_LAUNCHER_FLAG_RE = re.compile(r"^-(?:V:\S*|[0-9][0-9.a-z\-]*)$")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# Words that may sit in front of the interpreter without changing what runs.
-_COMMAND_WRAPPERS = ("env", "nohup", "time", "exec", "command", "sudo", "nice")
+# Wrappers that may sit in front of the interpreter without changing what runs,
+# with the options of each that take a separate value word.
+_WRAPPER_VALUE_OPTS = {
+    "env": ("-u", "-C", "-S", "-P", "--unset", "--chdir", "--split-string"),
+    "time": ("-f", "-o", "--format", "--output"),
+    "sudo": ("-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U"),
+    "nice": ("-n", "--adjustment"),
+    "timeout": ("-k", "-s", "--kill-after", "--signal"),
+    "exec": ("-a",),
+    "nohup": (),
+    "command": (),
+}
 _PS_CD_WORDS = ("cd", "chdir", "sl", "set-location", "pushd", "popd")
+# Interpreter short options that take a value (separate word, or the rest of the
+# cluster), and long ones that take a separate value word.
+_INTERP_VALUE_SHORT = "WXQ"
+_INTERP_VALUE_LONG = ("--check-hash-based-pycs",)
 
 
 def _basename_lc(tok: str) -> str:
@@ -1735,39 +1842,76 @@ def _basename_lc(tok: str) -> str:
 
 
 def _is_python_prog(tok: str) -> bool:
-    b = _basename_lc(tok)
-    if b.endswith(".exe"):
-        b = b[:-4]
-    return bool(_PYTHON_PROG_RE.match(b))
+    return bool(_INTERP_RE.match(_basename_lc(tok)))
+
+
+def _skip_wrappers(tokens: list[str]) -> int:
+    """Index of the first token that is not a VAR=val, call operator, or a
+    wrapper (with its options)."""
+    i, n = 0, len(tokens)
+    while i < n:
+        t = tokens[i]
+        if _ENV_ASSIGN_RE.match(t) or t in ("&", "."):
+            i += 1
+            continue
+        w = _basename_lc(t)
+        if w not in _WRAPPER_VALUE_OPTS:
+            break
+        i += 1
+        valued = _WRAPPER_VALUE_OPTS[w]
+        while i < n:
+            o = tokens[i]
+            if o == "--":
+                i += 1
+                break
+            if o.startswith("-") and len(o) > 1:
+                i += 2 if o in valued else 1
+                continue
+            if w == "env" and _ENV_ASSIGN_RE.match(o):
+                i += 1
+                continue
+            break
+        if w == "timeout" and i < n:
+            i += 1  # the DURATION word
+    return i
 
 
 def _writer_invocation(tokens: list[str]):
-    """If `tokens` (one simple command) runs a listed writer script via a python
-    interpreter, return (script_basename_lc, args_after_script); else None.
-    `python -m mod`, `python -c code`, a non-listed script, or a program that is
-    not python are all None (unaffected)."""
-    i = 0
+    """If `tokens` (one simple command) runs a listed writer script (via a python
+    interpreter, or by executing it directly), return (script_basename_lc,
+    args_after_script); else None. `python -m mod`, `python -c code`, a non-listed
+    script, or a program that is not python are all None (unaffected)."""
     n = len(tokens)
-    while i < n and (
-        _ENV_ASSIGN_RE.match(tokens[i])
-        or tokens[i] in ("&", ".")
-        or _basename_lc(tokens[i]) in _COMMAND_WRAPPERS
-    ):
-        i += 1
-    if i >= n or not _is_python_prog(tokens[i]):
+    i = _skip_wrappers(tokens)
+    if i >= n:
         return None
+    prog = tokens[i]
+    if _basename_lc(prog) in WRITER_SCRIPTS:
+        return _basename_lc(prog), tokens[i + 1:]  # direct execution
+    if not _is_python_prog(prog):
+        return None
+    launcher = _basename_lc(prog).startswith("py") and not _basename_lc(prog).startswith(
+        ("python", "pypy"))
     j = i + 1
     while j < n:
         t = tokens[j]
         if t == "-":
             return None  # script on stdin
-        if t.startswith("-") and not t.startswith("--"):
-            if t[1:2] in ("m", "c"):
-                return None  # -m module / -c code: not a script file
-            j += 2 if t in ("-W", "-X") else 1  # -u, -B, -3, -3.11, -W arg ...
-            continue
         if t.startswith("--"):
-            j += 1
+            j += 2 if (t in _INTERP_VALUE_LONG) else 1
+            continue
+        if t.startswith("-"):
+            if launcher and _PY_LAUNCHER_FLAG_RE.match(t):
+                j += 1
+                continue
+            skip = 1
+            for k, ch in enumerate(t[1:], start=1):
+                if ch in "mc":
+                    return None  # -m module / -c code: not a script file
+                if ch in _INTERP_VALUE_SHORT:
+                    skip = 1 if k < len(t) - 1 else 2  # value attached, or next word
+                    break
+            j += skip
             continue
         break
     if j >= n:
@@ -1779,7 +1923,11 @@ def _writer_invocation(tokens: list[str]):
 
 
 def _writer_target(base: str, args: list[str]):
-    """(True, target) or (False, reason) for one recognized writer invocation."""
+    """(True, target) or (False, reason) for one recognized writer invocation.
+    Only ONE target per writer is checked (the argpos-th positional). So that an
+    option value cannot shift the positionals, any option (a `-`-prefixed word
+    with no `=`, other than a lone `--`) BEFORE the target denies: write options
+    as --flag=value, or after the target."""
     argpos = WRITER_SCRIPTS[base]
     positionals: list[tuple[int, str]] = []
     after_dd = False
@@ -1788,6 +1936,13 @@ def _writer_target(base: str, args: list[str]):
             after_dd = True
             continue
         if not after_dd and a.startswith("-") and a != "-":
+            if "=" not in a and len(positionals) < argpos:
+                return False, (
+                    f"{base} has option {a[:40]!r} before its target; an option "
+                    f"may take a separate value word and so shift which argument "
+                    f"is the target. Write options as --flag=value (or after the "
+                    f"target)"
+                )
             continue
         positionals.append((idx, a))
     if len(positionals) < argpos:
@@ -1813,10 +1968,12 @@ def _writer_target(base: str, args: list[str]):
 
 def _tokenize_ps(cmd: str) -> list[list[str]]:
     """Split a PowerShell command into simple-command token lists. Minimal and
-    conservative: honors '...' and "..." quoting (no backtick escapes: a token
-    containing a backtick is kept verbatim and later refused as an expansion);
-    treats ; | & ( ) { } and newlines outside quotes as command separators.
-    Raises ValueError on an unterminated quote."""
+    conservative: honors '...' and "..." quoting including the doubled-quote
+    escape ('' inside '...', "" inside "..."); a backtick inside "..." raises
+    (PowerShell's escape character is not modeled); treats ; | & ( ) { } and
+    newlines outside quotes as command separators. Raises ValueError on an
+    unterminated quote or a backtick inside double quotes. Redirections (>) and
+    Out-File / Set-Content style writes are NOT parsed."""
     segs: list[list[str]] = []
     cur: list[str] = []
     buf: list[str] = []
@@ -1839,12 +1996,22 @@ def _tokenize_ps(cmd: str) -> list[list[str]]:
     while i < n:
         c = cmd[i]
         if c in "'\"":
-            j = cmd.find(c, i + 1)
-            if j == -1:
-                raise ValueError("unterminated quote")
-            buf.append(cmd[i + 1:j])
+            i += 1
+            while True:
+                j = cmd.find(c, i)
+                if j == -1:
+                    raise ValueError("unterminated quote")
+                chunk = cmd[i:j]
+                if c == '"' and "`" in chunk:
+                    raise ValueError("backtick escape inside double quotes")
+                buf.append(chunk)
+                if cmd[j + 1:j + 2] == c:  # doubled quote = one literal quote
+                    buf.append(c)
+                    i = j + 2
+                    continue
+                i = j + 1
+                break
             have = True
-            i = j + 1
             continue
         if c in " \t":
             end_tok()
@@ -1964,7 +2131,8 @@ def _handle_crash(exc: BaseException) -> None:
     except Exception:
         pass
     if not _env_truthy("PLAN_GATE"):
-        allow("plan-gate: PLAN_GATE is not on/1/true/yes — gate disabled.")
+        _allow_or_defer("plan-gate: PLAN_GATE is not on/1/true/yes — gate disabled.",
+                        _CALL_CTX["tool"])
     if _env_truthy("PLAN_GATE_BYPASS"):
         reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
                   f"— emergency bypass (gate fault path).")
@@ -1972,7 +2140,7 @@ def _handle_crash(exc: BaseException) -> None:
             "allow", "gate", "emergency_bypass", _CALL_CTX["tool"],
             _CALL_CTX["tool_input"], reason, None,
         )
-        allow(reason)
+        _allow_or_defer(reason, _CALL_CTX["tool"])
     _fail_closed("unhandled exception in the gate", f"{type(exc).__name__}: {exc}")
 
 
@@ -1988,7 +2156,8 @@ def main() -> None:
 
     # Master gate switch. If off or unset, this hook is inert.
     if not _env_truthy("PLAN_GATE"):
-        allow("plan-gate: PLAN_GATE is not on/1/true/yes — gate disabled.")
+        _allow_or_defer("plan-gate: PLAN_GATE is not on/1/true/yes — gate disabled.",
+                        _peek_tool_name())
 
     # Emergency bypass. Logged (class=emergency_bypass) even in the deny-only
     # log mode — bypass usage is exception-class audit evidence. The payload
@@ -2006,7 +2175,7 @@ def main() -> None:
         b_reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
                     f"— emergency bypass.")
         _log_decision("allow", "gate", "emergency_bypass", b_tool, b_input, b_reason, None)
-        allow(b_reason)
+        _allow_or_defer(b_reason, b_tool if isinstance(b_tool, str) else "")
 
     try:
         payload = json.load(sys.stdin)
@@ -2056,13 +2225,15 @@ def main() -> None:
 
     if tool not in ("Edit", "Write", "NotebookEdit", "Bash", "PowerShell") + MCP_FILE_WRITE_TOOLS:
         if tool.startswith("mcp__"):
-            # An MCP tool the operator has not configured: allowed (default-
+            # An MCP tool the operator has not configured: not blocked (default-
             # denying unknown tools is a separate, backlogged item), but a row
             # is logged so every MCP call the hook sees is on the record.
-            gated_allow(
-                f"plan-gate: MCP tool {tool!r} is not in PLAN_GATE_MCP_WRITE_TOOLS.",
-                "mcp_unconfigured",
-            )
+            # NO decision (not "allow"): an allow would skip the harness's own
+            # permission prompt for a tool this gate did not actually check.
+            _log_decision("allow", "mcp", "mcp_unconfigured", tool, tool_input,
+                          f"plan-gate: MCP tool {tool!r} is not in "
+                          f"PLAN_GATE_MCP_WRITE_TOOLS.", None)
+            no_decision()
         allow(f"plan-gate: tool {tool!r} is outside the gated set.")
 
     # === Bypasses BEFORE active-plan check ===
@@ -2170,13 +2341,18 @@ def main() -> None:
                 "plan-gate: PowerShell tool_input has no 'command'.",
                 class_="empty_command",
             )
-        for prefix in READ_ONLY_PS_PREFIXES:
-            p = prefix.rstrip()
-            if cmd == p or cmd.startswith(prefix):
-                gated_allow(
-                    f"plan-gate: read-only PS bypass ({p!r}).",
-                    "read_only_bypass",
-                )
+        # The read-only fast path applies only to a SINGLE simple command: no
+        # separator, pipeline, redirection, subexpression, script block or
+        # backtick escape anywhere (otherwise `Get-ChildItem; Remove-Item ...`
+        # would ride the prefix). Anything else falls through to normal gating.
+        if not re.search(r"[;|&<>(){}`\n\r]", cmd):
+            for prefix in READ_ONLY_PS_PREFIXES:
+                p = prefix.rstrip()
+                if cmd == p or (cmd.startswith(p) and cmd[len(p)] in " \t"):
+                    gated_allow(
+                        f"plan-gate: read-only PS bypass ({p!r}).",
+                        "read_only_bypass",
+                    )
         # No bare-cd / Set-Location bypass for PS: the quote-aware Bash splitter
         # does not model PS compound semantics. Any PS compound needs an explicit
         # allowed_commands entry.

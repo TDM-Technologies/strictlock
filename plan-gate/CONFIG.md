@@ -31,45 +31,96 @@ everything.
   directories, then the active plan's `allowed_paths` (which also applies the worktree claim).
   **All** targets must pass. A missing, empty or non-string argument (or a non-string list
   element) is denied (decision-log class `mcp_target`). Relative paths never match an
-  `allowed_paths` entry.
+  `allowed_paths` entry. A call whose targets all pass gets an `allow` decision.
 - A tool **without** a spec (a bare name, or `tool:` with no argument names): denied while a
   plan is active, as before. If a tool appears both bare and with a spec, the bare entry wins.
-- MCP tools not listed are allowed, as before, but a row (`mcp_unconfigured`) is written to the
-  decision log when logging is on (subject to `PLAN_GATE_LOG_DECISIONS`).
-- The hook only sees MCP calls if the harness matcher routes them to it: the example
-  `settings.json` matcher is `Edit|Write|NotebookEdit|Bash|PowerShell|mcp__.*`.
-- Decision-log rows for a tool with a spec carry the tool name, `target` (the first target),
-  and `extra.targets` (each target, up to 20, each capped at 2048 characters; `extra.targets_n`
-  gives the total when more). Tool arguments other than the named paths are never logged.
+- **MCP tools that plan-gate does not affirmatively check get no decision at all** (exit 0, no
+  JSON on stdout), so the harness keeps its own permission prompt. That covers MCP tools not
+  listed here (a row with class `mcp_unconfigured` is written when logging is on, subject to
+  `PLAN_GATE_LOG_DECISIONS`), and any MCP call while the gate is off or `PLAN_GATE_BYPASS` is
+  set. An `allow` decision would skip that prompt.
+- The hook only sees MCP calls if the harness matcher routes them to it. The example
+  `settings.json` matcher is `^(Edit|Write|NotebookEdit|Bash|PowerShell)$|^mcp__`: the anchors
+  matter, because a matcher with punctuation is an unanchored regular expression (a bare
+  `Write|...|mcp__.*` would also match `TodoWrite`).
+- **Decision-log rows:** an `mcp_unconfigured` row records the tool name only. A tool with a
+  spec records the tool name, `target` (the first target) and `extra.targets` (each target, up
+  to 20, each capped at 2048 characters; `extra.targets_n` gives the total when more). No other
+  argument value or name is ever logged for an MCP call. A row is also capped at 32 KiB in total:
+  extra targets are dropped (`extra.targets_truncated`), then long strings are shortened with a
+  `...[truncated]` marker.
+
+Limits to know about:
+
+- **Only the arguments you list are checked.** A path argument you do not name (for example
+  the `source` of a move when you configured only `destination`) is not looked at.
+- **Nested arguments cannot be specified.** An argument name is a top-level key of the tool's
+  input; there is no dotted or indexed form.
+- **Tool and argument names are case-sensitive**, and tool names must match exactly (no
+  wildcards).
+- **A configured tool that the harness matcher does not route to the hook is ungated.** Keep
+  the matcher and this variable in step (the `^mcp__` matcher routes every MCP tool).
+- **Parsing:** entries are separated by `,`; whitespace around names is ignored; arguments are
+  joined by `+`; an entry with an empty name is dropped; `tool:` or `tool:+` (no usable
+  argument name) is treated as a bare name, i.e. default-deny.
 
 ## Writer scripts
 
 `python3 externalized-memory/atomic-write.py STATE.md` is a Bash command, and `allowed_commands`
 matches by prefix, so an entry admitting it would otherwise let the script write anywhere. A
-segment whose program is `python`, `python3`, `python3.N`, `py` (also `py -3`, a path ending in
-one of those, a `.exe` suffix, behind `VAR=val`, `env`, `nohup`, `time`, `exec`, `command`,
-`sudo` or `nice`) running a script whose **basename** is on the writer list is treated as a file
-write to the script's target argument. The target is gated exactly like a `>` redirect target:
-log self-protection, then always-writable directories, then the plan's `allowed_paths`. The
-segment must still be admitted by `allowed_commands`; the two checks are independent.
+segment that runs a script whose **basename** is on the writer list is treated as a file write
+to the script's target argument. The target is gated exactly like a `>` redirect target: log
+self-protection (raw and resolved forms), then always-writable directories, then the plan's
+`allowed_paths`. The segment must still be admitted by `allowed_commands`; the two checks are
+independent.
+
+Recognized forms:
+
+- an interpreter: `python`, `python3`, `python3.N`, `python3.13t`, `python3-dbg`, `pythonw`,
+  `pypy`, `pypy3`, `py` (with or without `.exe`, any directory prefix), including `py -3` and
+  `py -V:...`;
+- interpreter options before the script, including ones that take a value
+  (`-W x`, `-X x`, `--check-hash-based-pycs x`) and combined short flags (`-uX utf8`); `-m` and
+  `-c` mean no script file, so those are unaffected;
+- behind `VAR=val`, `&`, and the wrappers `env` (with `-i`, `--`, `-u NAME`, `VAR=val`),
+  `time`, `sudo`, `nice`, `timeout DURATION`, `nohup`, `exec`, `command`, each with its options;
+- direct execution, where the program itself is a writer (`./atomic-write.py STATE.md`).
+
+**Not recognized** (the writer's target is then not gated; only `allowed_commands` applies):
+other launchers or runners (`uv run`, `poetry run`, `pipx run`, `xargs`, `find -exec`,
+`bash -c "..."`, `sh script`), shell functions and aliases, `python -m runpy path`, and any
+wrapper not listed above. Admit writers in `allowed_commands` only by the narrow prefix.
 
 - **Built in:** `atomic-write.py`, target = its first (only) positional argument.
-- **Extend:** `PLAN_GATE_WRITER_SCRIPTS=name.py:argpos,other.py:argpos`. `argpos` is **1-based**:
-  1 is the script's first positional argument, 2 the second. Positional arguments are words that
-  do not start with `-`; everything after a bare `--` is positional. A flag's value counts as a
-  positional, so prefer the `--flag=value` form. `name.py` is a bare file name matched by
-  lowercased basename (not a path). An entry for a built-in name overrides its `argpos`.
-- **Unaffected:** `python -m module`, `python -c code`, and any script not on the list.
+- **Extend:** `PLAN_GATE_WRITER_SCRIPTS=name.py:argpos,other.py:argpos`. `argpos` is **1-based**
+  (1 to 64): 1 is the script's first positional argument, 2 the second. Positional arguments
+  are words not starting with `-`; everything after a bare `--` is positional. `name.py` is a
+  bare file name ending in `.py` (no `:`, `;`, spaces or path separators), matched by lowercased
+  basename. An entry for a built-in name overrides its `argpos`. Entries are separated by `,`.
+- **Only one target per writer is checked.** A writer script that has other output options or
+  writes to several files is not a good fit.
+- **Options before the target are refused.** An option (a `-`-prefixed word with no `=`, other
+  than a lone `--`) before the target position is denied, because it may take a separate value
+  word and shift which argument is the target (`--encoding ALLOWED /etc/evil`). Write options
+  as `--flag=value`, or after the target. `atomic-write.py` takes exactly one argument, so it
+  is unaffected.
 - **Deny (fail closed):** the target is missing; the target, or any argument before it, uses a
   shell expansion (`$VAR`, `$(...)`, backticks), a glob (`* ? [`) or a brace; the target is
-  relative after a `cd` in the same command; the command cannot be tokenized. For PowerShell the
-  command is split on `; | & ( ) { }` and newlines; there is no other compound parsing.
-- **Malformed `PLAN_GATE_WRITER_SCRIPTS`** (no `:`, empty name, a path instead of a name,
-  `argpos` not a positive integer, including `0`): every Bash/PowerShell command that is not
-  read-only is denied with a message naming the variable, until it is fixed or
-  `PLAN_GATE_BYPASS` is set. Read-only commands are not affected.
+  relative after a `cd` in the same command; the command cannot be tokenized.
+- **Malformed `PLAN_GATE_WRITER_SCRIPTS`** (no `:`, a name that is not a bare `*.py` file name
+  (so `a.py:1 b.py:2`, `a.py:2;b.py:1`, `a.py:2:b.py:1` and `a.py:1:2` are all malformed),
+  `argpos` not an integer from 1 to 64): every Bash/PowerShell command that is not read-only
+  is denied with a message naming the variable, until it is fixed or `PLAN_GATE_BYPASS` is
+  set. Read-only commands are not affected.
 - Decision-log class for these denials: `writer_script` (or `log_self_protect` for a log-dir
   target).
+
+**PowerShell:** the command is split on `; | & ( ) { }` and newlines (quotes, including the
+doubled-quote escape, are honored) only to find writer scripts. PowerShell redirections (`>`),
+`Out-File`, `Set-Content`, `Add-Content` and other cmdlet writes are **not** parsed or gated;
+they are controlled only by `allowed_commands`. The read-only fast path applies only to a single
+simple command; a command containing `; | & < > ( ) { }`, a newline or a backtick is checked
+against `allowed_commands` instead.
 
 ## Per-OS examples
 
