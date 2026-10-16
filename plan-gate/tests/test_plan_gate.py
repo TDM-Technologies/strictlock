@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -583,7 +584,8 @@ class BashSegmentTests(unittest.TestCase):
         # unquoted word; a real agent writes C:/... or quotes the path. Use the
         # forward-slash form so the command means what the test intends.
         if os.sep == "\\":
-            cmd = cmd.replace(str(self.root), self.root.as_posix())
+            cmd = re.sub(re.escape(str(self.root)) + r"[^\s'\"]*",
+                         lambda m: m.group(0).replace("\\", "/"), cmd)
         return run_gate({"tool_name": "Bash", "tool_input": {"command": cmd}},
                         self.plans, **kw)
 
