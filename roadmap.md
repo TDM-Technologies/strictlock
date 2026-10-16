@@ -48,7 +48,7 @@ These are honest slots, not promises with dates. Each is marked:
   teeth are the close-out log review. Dual-mode (Claude Code `PreToolUse` *or* git `pre-commit`).
   The detective complement to the born-weak `eslint-plugin-strictlock`.
 - **rituals** ([`rituals/`](rituals/)) — prose, not a gate: the session **kickoff** and
-  **close-out** checklists (each step with a "why this step exists" note and a distilled
+  **close-out** checklists (key steps carry a "why this step exists" note, plus a distilled
   lessons section), the **unit-of-work interaction analysis** (prior-unit deferred-marker grep +
   peer-unit collision pass, with the note that plan-gate's disjoint check now structurally backs
   the shared-file case), and the **pre-work currency check** (three questions, three verdicts).

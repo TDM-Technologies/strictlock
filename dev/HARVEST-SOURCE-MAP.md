@@ -42,13 +42,13 @@ needlessly resurrected or accidentally orphaned.
 | Blast-radius review-depth trigger | `.claude/scripts/blast-radius.py` · `.claude/scripts/_run_blast_radius_tests.py` · `docs/design/blast-radius-score.md` | planned — needs pattern-config genericization before it ports (currently HIPAAPath-pattern-coupled). |
 | ROI / harvest governance narrative | `docs/manifest/sessions/wp-roi-gate-meta-layer-9b2c7d10.md` · `docs/manifest/ats/roi-gate-meta-layer-3a7f1e90.md` | harvest-now — becomes a `GOVERNANCE.md` narrative, not code. |
 
-### Wave 4 (rituals + remaining gates — in progress)
+### Wave 4 (rituals + remaining gates — all four built; see DONE)
 | Item | HIPAAPath source | Verdict |
 |---|---|---|
 | test-protection co-commit guard | (already extracted) | **DONE** — landed in StrictLock `test-protection-guard/` (PR #7). |
-| WP-interaction analysis | `docs/design/wp-interaction-analysis.md` (+ `docs/manifest/ats/wp-interaction-*`) | harvest-now — discipline/checklist, no code. |
-| pre-WP currency check | `docs/design/pre-wp-currency-check.md` | planned — prose rubric. |
-| session-ritual checklists (kickoff/close) | HIPAAPath `CLAUDE.md` sections **+ the `*-hipaapath` skills (OFF-MACHINE — see below)** | planned — partly reconstructable from CLAUDE.md. |
+| WP-interaction analysis | `docs/design/wp-interaction-analysis.md` (+ `docs/manifest/ats/wp-interaction-*`) | **DONE** — `rituals/wp-interaction-analysis.md` (PR #14). |
+| pre-WP currency check | `docs/design/pre-wp-currency-check.md` | **DONE** — `rituals/pre-wp-currency-check.md` (PR #14). |
+| session-ritual checklists (kickoff/close) | the staged `start-` / `close-hipaapath` skills + their `learnings.md` (see STAGED below) | **DONE** — `rituals/session-kickoff.md`, `rituals/session-close.md` (PR #14). |
 
 ### Exploring (later — needs design/evidence first)
 | Item | HIPAAPath source | Verdict |
@@ -65,6 +65,8 @@ needlessly resurrected or accidentally orphaned.
 | `scope-lease/` | supersedes `.claude/scripts/conductor-lease.py` (advisory mtime hint; replaced by the vault's git-native CAS lease) |
 | `generated-sink-commit-gate/`, `generated-sink-prepush-gate/` | HIPAAPath manifest-freshness machinery |
 | `eslint-plugin-strictlock` | HIPAAPath `no-smoke-only-assertions` rule |
+| `test-protection-guard/` | the test-protection co-commit guard (PR #7) |
+| `rituals/` | the staged `start-` / `close-hipaapath` skills + learnings, `docs/design/wp-interaction-analysis.md` (+ the lens-2 note), `docs/design/pre-wp-currency-check.md` (PR #14) |
 
 ---
 
@@ -86,7 +88,8 @@ casually, just don't migrate them.
   and are STAGED locally in the maintainer's staging import (`skills/`)**, each with
   BOTH `SKILL.md` and `learnings.md` (~58KB of scar-tissue notes). Deliberately outside
   this public repo (they carry Windows machine paths + HIPAAPath-coupled internals — genericize on
-  the way in). Wave 4 / Wave 2 ritual items are therefore **faithful ports, not
+  the way in). **Update 2026-10-16:** `start-` and `close-` are now harvested (as `rituals/`, PR #14);
+  `harvest-` and `cleanup-` remain staged for Wave 2. Ritual items are **faithful ports, not
   reconstruction** — do NOT rebuild them from HIPAAPath `CLAUDE.md` (whose relevant
   sections were deleted in the 2026-06-24 rewrite anyway).
 - Historical plan files + the runtime deny log — still Windows-only (see `BACKLOG.md`
