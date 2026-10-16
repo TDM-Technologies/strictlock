@@ -12,14 +12,29 @@ WHAT IT DOES
   configured plans directory, and emits an allow/deny decision on stdout. An
   agent may only modify the exact files and run commands matching the command
   prefixes an approved plan enumerates. Anything else is denied BEFORE it runs.
-  The gate fails closed on policy: when in doubt, deny. (Its own crash or an
-  unparseable payload is the exception — see the hook contract below.)
+  The gate fails closed on policy AND on its own faults: when in doubt, deny.
 
 HOOK CONTRACT (typical agentic-harness PreToolUse convention)
   - Exit 0 with JSON {"hookSpecificOutput": {"permissionDecision": "allow|deny", ...}}
-  - Exit 1 + stderr  => non-blocking warning (fail-open for our OWN crashes only,
-                        so a bug in the gate never wedges the operator).
+                        every decision, INCLUDING the gate's own faults.
+  - Exit 1 + stderr  => non-blocking warning: the harness lets the action
+                        proceed. Deliberately UNUSED — a gate that exits 1 on its
+                        own crash fails open.
   - Exit 2           => hard block (unused here; we express blocks as "deny" JSON).
+
+FAULT POSTURE (fail closed, deliberately)
+  - A stdin payload that cannot be parsed, or any unhandled exception inside
+    the gate, emits a DENY decision (JSON on stdout, exit 0) whose reason says
+    what failed and how to bypass. The traceback goes to stderr and a
+    best-effort `gate_error` row goes to the decision log (a logging failure
+    never changes the decision).
+  - PLAN_GATE_BYPASS=on is honored IN the crash path: the top-level handler
+    re-checks PLAN_GATE and PLAN_GATE_BYPASS before it decides, so the
+    documented escape hatch still works when the fault is in the gate itself.
+    Every bypass use is logged (class emergency_bypass).
+  - Accepted trade-off: if the harness changes its payload protocol, the gate
+    denies until it is updated or bypassed. A visible, logged denial is the
+    safe failure; a silent allow is not.
 
 CONFIGURATION (all via environment; no machine-specific defaults are baked in)
   PLAN_GATE                 "on" to enable; anything else makes the hook inert.
@@ -45,9 +60,20 @@ RULES
   - Edit / Write / NotebookEdit:
       target file_path must EXACTLY match an entry in the plan's allowed_paths,
       OR sit under one of the PLAN_GATE_ALWAYS_WRITABLE directories.
-  - Bash / PowerShell:
-      command must start with an entry in allowed_commands,
-      OR be a known read-only / navigational command (bypass lists below).
+  - Bash:
+      the command is split into SEGMENTS on && || ; | & and unquoted newlines,
+      and the bodies of $(...), `...`, <(...), >(...) and ( ... ) are checked
+      as segments too. EACH segment must independently be a known read-only
+      command, a bare `cd`, or start with an entry in allowed_commands — a
+      compound command is only as authorized as its least-authorized segment.
+      Redirections that write (>, >>, >|, &>, N>) are file writes, gated
+      exactly like Edit/Write (/dev/null is always fine; >&N fd dups and
+      input redirection are not writes). Anything the splitter cannot
+      confidently parse is denied (class unparseable_command).
+  - PowerShell:
+      command must start with an entry in allowed_commands, OR be a known
+      read-only command (prefix-matched, NO compound parsing — list each shape
+      in allowed_commands; segment checking for PowerShell is a follow-up).
   - Bypass ordering: for Edit/Write the always-writable bypass runs BEFORE the
     active-plan check; for Bash/PowerShell the read-only bypass also runs BEFORE
     the active-plan check (so a session with no active plan can still inspect
@@ -66,13 +92,14 @@ PATH RESOLUTION
     dir), the WORKTREE ROOT is the anchor — not the main repo root. This is the
     fix for the silent-drift pattern where a worktree-CWD session wrote to the
     main repo because the plan listed main-repo absolute paths.
-  - Worktree guard: if CWD is under a worktree, a plan is active for that
+  - Worktree claim: if CWD is under a worktree, a plan is active for that
     session only if at least one ABSOLUTE allowed_paths entry resolves under the
-    worktree (or it declares `worktree_bypass: true`). A misaligned plan is not
-    active there, so gated writes and commands outside the read-only set are denied
-    ("no active plan"); read-only inspection and always-writable dirs stay
-    available. NOTE: the read-only set is prefix-matched today, so a chained or
-    redirected command starting with a read-only prefix passes (Fix B pending).
+    worktree (or it declares `worktree_bypass: true`) — claim-by-absolute, applied
+    in find_active_plans. A misaligned plan is not active there, so gated writes
+    and commands outside the read-only set are denied; read-only inspection and
+    always-writable dirs stay available. When active plans exist elsewhere the
+    deny says so ("N active plan(s) exist, none claims this worktree — likely
+    drift", class silent_drift) instead of the generic no-active-plan text.
     Fix the plan first.
   - Opt-out: a plan can declare `worktree_bypass: true` in frontmatter to skip
     the guard. Use when the work is deliberately cross-tree and the
@@ -84,6 +111,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -126,13 +154,21 @@ LOG_DECISIONS_MODE = (
 # prev-hash of the first row in a fresh log.
 _GENESIS = "0" * 64
 
-# Commands that are always safe — investigation and navigation.
-# `git config` is intentionally only allowed in `--get` form because the 2-arg
-# form `git config <key> <value>` writes; require the explicit flag.
-# `cd` is handled specially below: bare `cd <path>` bypasses; a compound
-# `cd <path> [&&|||;] <rest>` is checked segment-wise against this list plus the
-# plan's allowed_commands. A naive prefix match would let `cd anywhere && <rest>`
-# slip the gate.
+# Commands that are always safe — investigation and navigation. Each entry is
+# matched at a WORD BOUNDARY against ONE SEGMENT of a command (so `ls` does not
+# admit `lsof`, and `cat x; rm y` is two segments, the second of which fails).
+# Entries whose mutating forms exist carry an argument check (_RO_VALIDATORS):
+#   git branch   listing forms only (no -d/-D/-m/-M/-c/-C/-f/-u/--delete/...,
+#                no bare positional = create)
+#   git remote   bare, -v, show, get-url only
+#   git config   `--get*` forms only, and never with --add/--unset/--edit/...
+#   git diff/log/show  no --output[=file] (writes a file)
+#   find         no -delete/-exec/-execdir/-ok/-okdir/-fprint*/-fls
+#   rg           no --pre/--hostname-bin (they execute a program)
+# `git fetch` is NOT here (it writes refs/objects). Validated commands also
+# refuse shell expansions in their arguments ($, `, {): an expansion could
+# smuggle a mutating flag past the check.
+# `cd` is handled separately: a `cd <path>` segment is a navigation no-op.
 READ_ONLY_BASH_PREFIXES = (
     "git status",
     "git diff",
@@ -140,9 +176,13 @@ READ_ONLY_BASH_PREFIXES = (
     "git show",
     "git branch",
     "git rev-parse",
-    "git fetch",
     "git remote",
     "git config --get",
+    "git config --get-all",
+    "git config --get-regexp",
+    "git config --get-urlmatch",
+    "git config --get-color",
+    "git config --get-colorbool",
     "git check-ignore",
     "git ls-files",
     "git ls-tree",
@@ -153,17 +193,17 @@ READ_ONLY_BASH_PREFIXES = (
     "git worktree list",
     "ls",
     "pwd",
-    "echo ",
-    "cat ",
-    "rg ",
-    "grep ",
-    "find ",
-    "head ",
-    "tail ",
-    "wc ",
-    "which ",
-    "where ",
-    "test ",
+    "echo",
+    "cat",
+    "rg",
+    "grep",
+    "find",
+    "head",
+    "tail",
+    "wc",
+    "which",
+    "where",
+    "test",
     "true",
     "false",
 )
@@ -476,181 +516,701 @@ def norm(p: str) -> str:
     return p.replace("\\", "/").lower().rstrip("/")
 
 
-def _split_top_level(cmd: str) -> list[str]:
-    """Split cmd on top-level &&/||/; separators, respecting quoted contexts.
+_WORD_END = " \t\n;&|<>()"
+_MAX_NEST = 24
 
-    A separator is "top-level" only if it appears outside ALL of:
-      - single-quoted strings ('...') — no escapes per POSIX shell
-      - double-quoted strings ("...") — \\" escape supported
-      - $(...) subshells — balanced paren depth, entered only via the $( token
-      - heredoc bodies (<<TAG / <<-TAG / <<'TAG' / <<"TAG") — body runs from the
-        next newline through the line that consists of just the tag
 
-    The state machine is intentionally NOT a faithful shell parser. It does not
-    track $(...) interpolation inside "..." or backtick substitution. The goal is
-    to stop false-splitting on metacharacters obviously inside quoted contexts.
-    Cases not covered (bare `(...)` subshells, backtick substitution) keep the
-    over-splitting behavior, which fails toward a SAFE deny rather than an unsafe
-    allow — fake segments simply get checked against allowed_commands and lose.
+class _Parsed(object):
+    """One parsed command list (the top level, or the body of one substitution).
 
-    Returns top-level segments with separator chars removed and whitespace
-    trimmed. Empty/whitespace-only segments are filtered.
+    segments  simple-command texts, separators removed, redirection operators
+              and heredoc bodies removed (so prefix / argument checks see only
+              the command words)
+    redirects literal TARGETS of write redirections (>, >>, >|, &>, N>, <>)
+    subs      parsed bodies of $(...), `...`, <(...), >(...) and ( ... ) found
+              in this list — they EXECUTE, so they are checked like the rest
     """
-    parts: list[str] = []
-    buf: list[str] = []
 
-    in_single = False
-    in_double = False
-    subshell_depth = 0
-    heredoc_tag: str | None = None
+    def __init__(self):
+        self.segments = []
+        self.redirects = []
+        self.subs = []
 
-    i = 0
-    n = len(cmd)
-    while i < n:
-        ch = cmd[i]
+    def walk(self):
+        yield self
+        for sub in self.subs:
+            for node in sub.walk():
+                yield node
 
-        # Heredoc body: consume until a line consisting of just the tag.
-        if heredoc_tag is not None:
-            line_end = cmd.find("\n", i)
-            if line_end == -1:
-                buf.append(cmd[i:])
-                i = n
+
+class _Scanner(object):
+    """A conservative, fail-closed scanner for the shell subset an agent
+    realistically emits. It is NOT a faithful shell parser: anything it cannot
+    confidently place (unterminated quote or substitution, a redirection target
+    built from an expansion, an ambiguous `$((` , too-deep nesting) is recorded
+    in `problems`, and the gate denies on any problem.
+
+    Separators (outside quotes): && || ; | |& & and newline. Handled contexts:
+    '...' , "..." (with $( ) and backtick inside), $'...', backslash escapes,
+    comments, heredocs (quoted tag = literal body; unquoted tag = the body can
+    execute $( ) / backticks, so it is scanned for them), $(...), $((...)),
+    backticks, <( ) / >( ), bare ( ... ) groups, and redirections.
+    """
+
+    def __init__(self, s, problems, depth=0):
+        self.s = s
+        self.n = len(s)
+        self.i = 0
+        self.problems = problems
+        self.depth = depth
+
+    def _problem(self, msg):
+        if msg not in self.problems:
+            self.problems.append(msg)
+
+    # -- substitutions ------------------------------------------------------
+
+    def _group(self, res, start):
+        """Parse a ( ... ) body (self.i is just past the opening paren)."""
+        self.depth += 1
+        sub = self.parse_list(")")
+        self.depth -= 1
+        res.subs.append(sub)
+        return self.s[start:self.i]
+
+    def _dollar_paren(self, res):
+        """self.i is at `$(`. Consumes through the matching `)`."""
+        s, n = self.s, self.n
+        if s.startswith("$((", self.i):
+            j = self.i + 3
+            depth = 0
+            while j < n:
+                c = s[j]
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    if depth == 0:
+                        if j + 1 < n and s[j + 1] == ")":
+                            body = s[self.i + 3:j]
+                            if re.search(r"[`'\"]|\$\(", body):
+                                self._problem(
+                                    "arithmetic expansion containing quotes "
+                                    "or nested substitutions"
+                                )
+                            self.i = j + 2
+                            return
+                        self._problem("ambiguous `$((` ... `)` construct")
+                        self.i = n
+                        return
+                    depth -= 1
+                j += 1
+            self._problem("unterminated `$((`")
+            self.i = n
+            return
+        start = self.i
+        self.i += 2
+        self._group(res, start)
+
+    def _backtick(self, res, in_dq):
+        """self.i is at an opening backtick. Consumes through the closing one."""
+        s, n = self.s, self.n
+        j = self.i + 1
+        while j < n and s[j] != "`":
+            j += 2 if s[j] == "\\" else 1
+        if j >= n:
+            self._problem("unterminated backtick substitution")
+            self.i = n
+            return
+        body = s[self.i + 1:j]
+        self.i = j + 1
+        body = re.sub(r"\\([\\`$])", r"\1", body)
+        if in_dq:
+            body = body.replace('\\"', '"')
+        if self.depth + 1 > _MAX_NEST:
+            self._problem("substitutions nested too deeply")
+            return
+        sub = _Scanner(body, self.problems, self.depth + 1).parse_list(None)
+        res.subs.append(sub)
+
+    def _scan_expansions(self, res, until_dq):
+        """Walk text where only expansions matter (inside "..." , or a heredoc
+        body when until_dq is False), recording any substitution found."""
+        s, n = self.s, self.n
+        while self.i < n:
+            c = s[self.i]
+            if c == "\\":
+                self.i += 2
                 continue
-            line = cmd[i:line_end]
-            buf.append(cmd[i:line_end + 1])
-            if line.strip() == heredoc_tag:
-                heredoc_tag = None
-            i = line_end + 1
-            continue
+            if until_dq and c == '"':
+                self.i += 1
+                return
+            if c == "$" and s.startswith("$(", self.i):
+                self._dollar_paren(res)
+                continue
+            if c == "`":
+                self._backtick(res, until_dq)
+                continue
+            self.i += 1
+        self.i = min(self.i, n)
+        if until_dq:
+            self._problem("unterminated double quote")
 
-        # Single-quoted string: no escapes; closes at the next '
-        if in_single:
-            buf.append(ch)
-            if ch == "'":
-                in_single = False
-            i += 1
-            continue
+    # -- redirections -------------------------------------------------------
 
-        # Double-quoted string: \" escape; closes at the next unescaped "
-        if in_double:
-            if ch == "\\" and i + 1 < n:
+    def _read_operand(self, res):
+        """Read one shell word (a redirection operand). Returns
+        (raw, literal, expanded, quoted); `expanded` is True if the word needs
+        a runtime expansion to resolve ($var, $(...), backticks)."""
+        s, n = self.s, self.n
+        while self.i < n and s[self.i] in " \t":
+            self.i += 1
+        start = self.i
+        lit = []
+        expanded = False
+        quoted = False
+        glob = False  # an UNQUOTED * ? [ { : the shell may expand it
+        while self.i < n:
+            c = s[self.i]
+            if c in _WORD_END:
+                break
+            if c in "*?[{":
+                glob = True
+            if c == "\\":
+                quoted = True
+                if self.i + 1 < n:
+                    if s[self.i + 1] != "\n":
+                        lit.append(s[self.i + 1])
+                    self.i += 2
+                else:
+                    self.i += 1
+                continue
+            if c == "'":
+                quoted = True
+                j = s.find("'", self.i + 1)
+                if j == -1:
+                    self._problem("unterminated single quote")
+                    self.i = n
+                    break
+                lit.append(s[self.i + 1:j])
+                self.i = j + 1
+                continue
+            if c == '"':
+                quoted = True
+                st = self.i + 1
+                self.i += 1
+                self._scan_expansions(res, True)
+                inner = s[st:self.i - 1] if s[self.i - 1:self.i] == '"' else s[st:self.i]
+                if "$" in inner or "`" in inner:
+                    expanded = True
+                lit.append(re.sub(r'\\(["\\$`])', r"\1", inner))
+                continue
+            if c == "`":
+                expanded = True
+                self._backtick(res, False)
+                continue
+            if c == "$":
+                expanded = True
+                if s.startswith("$(", self.i):
+                    self._dollar_paren(res)
+                else:
+                    lit.append(c)
+                    self.i += 1
+                continue
+            lit.append(c)
+            self.i += 1
+        self._last_glob = glob
+        return s[start:self.i], "".join(lit), expanded, quoted
+
+    def _record_write(self, res, operand):
+        raw, lit, expanded, _quoted = operand
+        if getattr(self, "_last_glob", False):
+            self._problem(
+                "write redirection target contains an unquoted glob or brace "
+                f"character ({raw[:60]!r}); where it lands cannot be resolved "
+                "statically"
+            )
+            return
+        if not raw or not lit:
+            self._problem("write redirection with no usable target")
+            return
+        if expanded:
+            self._problem(
+                "write redirection target uses a shell expansion "
+                f"({raw[:60]!r}); it cannot be resolved statically"
+            )
+            return
+        if raw.startswith("~"):
+            lit = os.path.expanduser(lit)
+        res.redirects.append(lit)
+
+    def _strip_fd(self, buf):
+        """Drop a trailing all-digit token (`2` of `2>file`) from the segment."""
+        text = "".join(buf)
+        m = re.search(r"(^|[ \t])(\d+)$", text)
+        if m:
+            del buf[:]
+            buf.append(text[:m.start(2)])
+
+    def _handle_redirect(self, res, buf, pending):
+        """self.i is at `<` or `>` (outside quotes)."""
+        s, n = self.s, self.n
+        ch = s[self.i]
+        nxt = s[self.i + 1] if self.i + 1 < n else ""
+        if nxt == "(":  # process substitution: the inner command EXECUTES
+            start = self.i
+            self.i += 2
+            buf.append(self._group(res, start))
+            return
+        if ch == "<":
+            if s.startswith("<<<", self.i):  # here-string: not a write
+                self.i += 3
+                self._read_operand(res)
+                return
+            if nxt == "<":  # heredoc
+                self.i += 2
+                strip_tabs = False
+                if self.i < n and s[self.i] == "-":
+                    strip_tabs = True
+                    self.i += 1
+                raw, lit, _exp, quoted = self._read_operand(res)
+                if not raw:
+                    self._problem("heredoc without a delimiter")
+                elif _exp or "$" in raw or "`" in raw:
+                    # <<$'EOF' / <<$"EOF" / <<$X: the shell's idea of the
+                    # delimiter differs from the literal text we would look
+                    # for, so the body boundary cannot be placed. Fail closed.
+                    self._problem(
+                        "heredoc delimiter uses a `$` or backtick form "
+                        f"({raw[:30]!r})"
+                    )
+                else:
+                    pending.append((lit, quoted, strip_tabs))
+                return
+            if nxt == "&":  # <&N input fd dup: not a write
+                self.i += 2
+                self._read_operand(res)
+                return
+            if nxt == ">":  # <> opens read-write (creates): a write
+                self.i += 2
+                self._record_write(res, self._read_operand(res))
+                return
+            self.i += 1  # plain input redirection: not a write
+            self._read_operand(res)
+            return
+        # ch == ">"
+        self._strip_fd(buf)
+        self.i += 1
+        if nxt == ">" or nxt == "|":
+            self.i += 1
+        elif nxt == "&":
+            self.i += 1
+            op = self._read_operand(res)
+            if not op[2] and re.match(r"^(\d+-?|-)$", op[1]):
+                return  # >&N / >&- : fd dup or close, not a write
+            self._record_write(res, op)  # >&file : stdout+stderr to a file
+            return
+        self._record_write(res, self._read_operand(res))
+
+    def _read_heredoc_bodies(self, pending, res):
+        s, n = self.s, self.n
+        for tag, quoted, _strip in pending:
+            body = []
+            terminated = False
+            while self.i < n:
+                j = s.find("\n", self.i)
+                line = s[self.i:] if j == -1 else s[self.i:j]
+                self.i = n if j == -1 else j + 1
+                # Terminate on a tag line leniently (strip all whitespace):
+                # ending the body EARLY only means more text is checked as
+                # commands, never less.
+                if line.strip() == tag:
+                    terminated = True
+                    break
+                body.append(line)
+            if not terminated:
+                self._problem("unterminated heredoc (no closing delimiter line)")
+            if not quoted and body:
+                if self.depth + 1 > _MAX_NEST:
+                    self._problem("substitutions nested too deeply")
+                    continue
+                sub = _Scanner("\n".join(body), self.problems, self.depth + 1)
+                sub._scan_expansions(res, False)
+
+    # -- the command list ---------------------------------------------------
+
+    def parse_list(self, closer):
+        """Parse commands up to `closer` (None = end of input, ")" = the
+        matching close paren, which is consumed)."""
+        s, n = self.s, self.n
+        res = _Parsed()
+        buf = []
+        pending = []  # heredocs whose body starts at the next newline
+        closed = closer is None
+        groups = set()  # exact texts of bare ( ... ) groups appended to buf
+        # True only where bash would START A NEW WORD: input start, after an
+        # unescaped blank/newline, or after a separator the loop consumed. A `#`
+        # starts a comment only there; after anything else (an escape, a quote,
+        # a closed $(...) / `...` / <(...), a plain character) it is part of a
+        # word, and the rest of the line is real commands.
+        ws = True
+
+        def flush():
+            seg = "".join(buf).strip()
+            del buf[:]
+            # A segment that is nothing but a ( ... ) group has no command of
+            # its own: its body was parsed into `subs` and is checked there.
+            if seg and seg not in groups:
+                res.segments.append(seg)
+
+        if self.depth > _MAX_NEST:
+            self._problem("substitutions nested too deeply")
+            self.i = n
+            return res
+
+        while self.i < n:
+            ch = s[self.i]
+            was_ws = ws
+            ws = False
+            if ch == "\n":
+                flush()
+                self.i += 1
+                ws = True
+                if pending:
+                    self._read_heredoc_bodies(pending, res)
+                    del pending[:]
+                continue
+            if ch == " " or ch == "\t":
                 buf.append(ch)
-                buf.append(cmd[i + 1])
-                i += 2
+                self.i += 1
+                ws = True
                 continue
-            buf.append(ch)
+            if ch == "\\":
+                if self.i + 1 < n:
+                    if s[self.i + 1] == "\n":
+                        # Line continuation: bash deletes backslash-newline, so
+                        # the text on both sides is ONE continuous word (and a
+                        # `#` after it is a comment only if one would have been).
+                        ws = was_ws
+                    else:
+                        buf.append(s[self.i:self.i + 2])
+                    self.i += 2
+                else:
+                    buf.append(ch)
+                    self.i += 1
+                continue
+            if ch == "#" and was_ws:
+                j = s.find("\n", self.i)
+                self.i = n if j == -1 else j
+                continue
+            if ch == "'":
+                j = s.find("'", self.i + 1)
+                if j == -1:
+                    self._problem("unterminated single quote")
+                    buf.append(s[self.i:])
+                    self.i = n
+                else:
+                    buf.append(s[self.i:j + 1])
+                    self.i = j + 1
+                continue
             if ch == '"':
-                in_double = False
-            i += 1
-            continue
-
-        # Inside $(...): track paren depth; also recognize quote starts.
-        if subshell_depth > 0:
-            buf.append(ch)
-            if ch == "(":
-                subshell_depth += 1
-            elif ch == ")":
-                subshell_depth -= 1
-            elif ch == "'":
-                in_single = True
-            elif ch == '"':
-                in_double = True
-            i += 1
-            continue
-
-        # Top level — detect quote/subshell/heredoc starts and separators.
-
-        # Heredoc start: <<TAG / <<-TAG / <<'TAG' / <<"TAG"
-        if ch == "<" and i + 1 < n and cmd[i + 1] == "<":
-            j = i + 2
-            if j < n and cmd[j] == "-":
-                j += 1
-            while j < n and cmd[j] in " \t":
-                j += 1
-            quote_char = ""
-            if j < n and cmd[j] in ("'", '"'):
-                quote_char = cmd[j]
-                j += 1
-            tag_start = j
-            if quote_char:
-                while j < n and cmd[j] != quote_char:
-                    j += 1
-                tag = cmd[tag_start:j]
-                if j < n:
-                    j += 1  # consume closing quote
-            else:
-                while j < n and (cmd[j].isalnum() or cmd[j] == "_"):
-                    j += 1
-                tag = cmd[tag_start:j]
-            buf.append(cmd[i:j])
-            line_end = cmd.find("\n", j)
-            if line_end == -1 or not tag:
-                buf.append(cmd[j:])
-                i = n
+                start = self.i
+                self.i += 1
+                self._scan_expansions(res, True)
+                buf.append(s[start:self.i])
                 continue
-            buf.append(cmd[j:line_end + 1])
-            heredoc_tag = tag
-            i = line_end + 1
-            continue
-
-        # $(...) subshell start
-        if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
-            buf.append("$(")
-            subshell_depth = 1
-            i += 2
-            continue
-
-        # Quote starts
-        if ch == "'":
+            if ch == "`":
+                start = self.i
+                self._backtick(res, False)
+                buf.append(s[start:self.i])
+                continue
+            if ch == "$":
+                nxt = s[self.i + 1] if self.i + 1 < n else ""
+                if nxt == "(":
+                    start = self.i
+                    self._dollar_paren(res)
+                    buf.append(s[start:self.i])
+                    continue
+                if nxt == "'":  # $'...' ANSI-C quoting: \' does not close it
+                    j = self.i + 2
+                    while j < n and s[j] != "'":
+                        j += 2 if s[j] == "\\" else 1
+                    if j >= n:
+                        self._problem("unterminated $'...' string")
+                        buf.append(s[self.i:])
+                        self.i = n
+                    else:
+                        buf.append(s[self.i:j + 1])
+                        self.i = j + 1
+                    continue
+                buf.append(ch)
+                self.i += 1
+                continue
+            if ch == ";":
+                flush()
+                self.i += 1
+                ws = True
+                continue
+            if ch == "&":
+                nxt = s[self.i + 1] if self.i + 1 < n else ""
+                if nxt == "&":
+                    flush()
+                    self.i += 2
+                    ws = True
+                    continue
+                if nxt == ">":  # &> / &>> : stdout+stderr to a file
+                    self.i += 2
+                    if self.i < n and s[self.i] == ">":
+                        self.i += 1
+                    self._record_write(res, self._read_operand(res))
+                    continue
+                flush()  # lone & : background separator
+                self.i += 1
+                ws = True
+                continue
+            if ch == "|":
+                flush()
+                self.i += 2 if s.startswith(("||", "|&"), self.i) else 1
+                ws = True
+                continue
+            if ch == ")":
+                if closer == ")":
+                    flush()
+                    self.i += 1
+                    closed = True
+                    break
+                self._problem("unbalanced `)`")
+                buf.append(ch)
+                self.i += 1
+                continue
+            if ch == "(":
+                start = self.i
+                self.i += 1
+                gtxt = self._group(res, start)
+                groups.add(gtxt.strip())
+                buf.append(gtxt)
+                continue
+            if ch == "<" or ch == ">":
+                self._handle_redirect(res, buf, pending)
+                continue
             buf.append(ch)
-            in_single = True
-            i += 1
-            continue
-        if ch == '"':
-            buf.append(ch)
-            in_double = True
-            i += 1
-            continue
+            self.i += 1
 
-        # 2-char separator: && or ||
-        if i + 1 < n and cmd[i:i + 2] in ("&&", "||"):
-            seg = "".join(buf).strip()
-            if seg:
-                parts.append(seg)
-            buf = []
-            i += 2
-            continue
-
-        # 1-char separator: ;
-        if ch == ";":
-            seg = "".join(buf).strip()
-            if seg:
-                parts.append(seg)
-            buf = []
-            i += 1
-            continue
-
-        buf.append(ch)
-        i += 1
-
-    seg = "".join(buf).strip()
-    if seg:
-        parts.append(seg)
-    return parts
+        flush()
+        if pending:
+            self._problem("heredoc with no body (input ends before a newline)")
+        if not closed:
+            self._problem("unterminated `(` or `$(`")
+        return res
 
 
-def _has_compound_separator(cmd: str) -> bool:
-    """True if cmd contains a top-level &&, ||, or ; separator (quote-aware).
+def _parse_command(cmd: str):
+    """Parse a Bash command. Returns (parsed, problems); the gate denies on any
+    problem (fail closed)."""
+    problems: list[str] = []
+    parsed = _Scanner(cmd, problems).parse_list(None)
+    return parsed, problems
 
-    Used to decide whether `cd <path>` is bare navigation or a compound that
-    needs segment-level checks.
+
+def _split_top_level(cmd: str) -> list[str]:
+    """Top-level segments of cmd (separators, redirections and heredoc bodies
+    removed). Kept as the simple splitting entry point; the gate itself uses
+    _parse_command so it also sees substitution bodies and redirect targets."""
+    return _parse_command(cmd)[0].segments
+
+
+def _is_cd_noop(seg: str) -> bool:
+    return seg == "cd" or seg.startswith(("cd ", "cd\t"))
+
+
+def _is_cd_like(seg: str) -> bool:
+    """A segment that changes the shell's working directory."""
+    words = seg.split(None, 1)
+    return bool(words) and words[0] in ("cd", "pushd", "popd")
+
+
+# --- read-only segment checks ------------------------------------------------
+
+def _has_unsafe_expansion(seg: str) -> bool:
+    """True if `seg` has text the shell would expand at run time, so the
+    token-level argument checks cannot be trusted. Quote-aware:
+      - inside '...' nothing expands (a literal `$`, `{`, `*` is fine);
+      - inside "..." only `$` and a backtick expand;
+      - outside quotes `$`, a backtick, a glob character (* ? [) and a real
+        brace expansion ({a,b} / {a..b}) are refused. A `{...}` with no comma
+        and no `..` (git ref syntax `@{u}`, `stash@{0}`) is literal and passes.
+      - a backslash-escaped character is literal.
     """
-    return len(_split_top_level(cmd)) > 1
+    i, n = 0, len(seg)
+    while i < n:
+        c = seg[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            j = seg.find("'", i + 1)
+            if j == -1:
+                return True
+            i = j + 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n and seg[i] != '"':
+                if seg[i] == "\\":
+                    i += 2
+                    continue
+                if seg[i] in "$`":
+                    return True
+                i += 1
+            if i >= n:
+                return True
+            i += 1
+            continue
+        if c in "$`*?[":
+            return True
+        if c == "{":
+            j = seg.find("}", i + 1)
+            if j == -1:
+                return True
+            inner = seg[i + 1:j]
+            if "," in inner or ".." in inner or any(ch in inner for ch in "{$`\\'\"*?["):
+                return True
+            i = j + 1
+            continue
+        i += 1
+    return False
+
+
+def _v_no_output(args: list[str]) -> bool:
+    """git diff/log/show: `--output[=file]` (any unambiguous abbreviation) writes
+    a file."""
+    for a in args:
+        if a == "--":
+            break
+        name = a.split("=", 1)[0]
+        if name.startswith("--output-indicator-"):
+            continue  # a display flag, not --output
+        if len(name) >= 3 and name.startswith("--") and (
+            "--output".startswith(name) or name.startswith("--output")
+        ):
+            return False
+    return True
+
+
+def _v_branch(args: list[str]) -> bool:
+    """git branch: listing forms only. A bare positional creates a branch and
+    any -d/-D/-m/-M/-c/-C/-f/-u/... mutates, so only a closed set of flags and
+    (with --list) patterns are accepted."""
+    value_flags = (
+        "--merged", "--no-merged", "--contains", "--no-contains",
+        "--points-at", "--sort", "--format",
+    )
+    plain_flags = (
+        "--all", "--remotes", "--verbose", "--show-current", "--ignore-case",
+        "--color", "--no-color", "--column", "--no-column", "--abbrev",
+        "--no-abbrev", "--list",
+    )
+    list_mode = False
+    positional = 0
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a.startswith("--"):
+            name, eq, _val = a.partition("=")
+            if name in value_flags:
+                if not eq and i < len(args) and not args[i].startswith("-"):
+                    i += 1
+                continue
+            if name in plain_flags:
+                if name == "--list":
+                    list_mode = True
+                continue
+            return False
+        if a.startswith("-") and len(a) > 1:
+            if all(c in "arvi" for c in a[1:]):
+                continue
+            return False
+        positional += 1
+    return positional == 0 or list_mode
+
+
+def _v_remote(args: list[str]) -> bool:
+    if not args or args in (["-v"], ["--verbose"]):
+        return True
+    if args[0] == "show":
+        return all(a == "-n" or not a.startswith("-") for a in args[1:])
+    if args[0] == "get-url":
+        return all(a in ("--push", "--all") or not a.startswith("-") for a in args[1:])
+    return False
+
+
+def _v_config_get(args: list[str]) -> bool:
+    bad = (
+        "--add", "--unset", "--unset-all", "--replace-all", "--edit", "-e",
+        "--rename-section", "--remove-section", "--set",
+    )
+    return not any(a.split("=", 1)[0] in bad for a in args)
+
+
+def _v_find(args: list[str]) -> bool:
+    bad = (
+        "-delete", "-exec", "-execdir", "-ok", "-okdir",
+        "-fprint", "-fprint0", "-fprintf", "-fls",
+    )
+    return not any(a in bad for a in args)
+
+
+def _v_rg(args: list[str]) -> bool:
+    return not any(a.split("=", 1)[0] in ("--pre", "--hostname-bin") for a in args)
+
+
+_RO_VALIDATORS = {
+    "git diff": _v_no_output,
+    "git log": _v_no_output,
+    "git show": _v_no_output,
+    "git branch": _v_branch,
+    "git remote": _v_remote,
+    "git config --get": _v_config_get,
+    "git config --get-all": _v_config_get,
+    "git config --get-regexp": _v_config_get,
+    "git config --get-urlmatch": _v_config_get,
+    "git config --get-color": _v_config_get,
+    "git config --get-colorbool": _v_config_get,
+    "find": _v_find,
+    "rg": _v_rg,
+}
+
+
+def _ro_prefix(seg: str):
+    """The READ_ONLY_BASH_PREFIXES entry `seg` starts with, at a word boundary."""
+    for prefix in READ_ONLY_BASH_PREFIXES:
+        if seg == prefix or (seg.startswith(prefix) and seg[len(prefix)] in " \t"):
+            return prefix
+    return None
+
+
+def _is_read_only_plain(seg: str) -> bool:
+    prefix = _ro_prefix(seg)
+    if prefix is None:
+        return False
+    check = _RO_VALIDATORS.get(prefix)
+    if check is None:
+        return True
+    if _has_unsafe_expansion(seg):
+        return False  # an expansion could smuggle a mutating flag past the check
+    try:
+        tokens = shlex.split(seg)
+    except ValueError:
+        return False
+    words = prefix.split()
+    if tokens[:len(words)] != words:
+        return False
+    return check(tokens[len(words):])
 
 
 def _is_read_only_git_c(seg: str) -> bool:
-    """True if `seg` is `git -C <path> <subcommand>` where <subcommand> is one of
-    the read-only git subcommands from READ_ONLY_BASH_PREFIXES.
+    """True if `seg` is `git -C <path> <subcommand>` where <subcommand> is a
+    read-only git subcommand (same argument checks as without -C).
 
     Extends the read-only bypass family to the `git -C <path> ...` shape so
     cross-tree read-only commands don't require an explicit allowed_commands
@@ -659,54 +1219,48 @@ def _is_read_only_git_c(seg: str) -> bool:
     automatic `git -C` coverage. Non-git prefixes (`ls`, `pwd`, ...) are not
     eligible — they don't take `-C`.
     """
-    m = re.match(r"^git\s+-C\s+\S+\s+(.+)$", seg)
+    m = re.match(r"""^git\s+-C\s+("[^"]*"|'[^']*'|\S+)\s+(.+)$""", seg)
     if not m:
         return False
-    rest = m.group(1)
-    for prefix in READ_ONLY_BASH_PREFIXES:
-        if not prefix.startswith("git "):
-            continue
-        sub = prefix[4:]  # strip "git "
-        sub_stripped = sub.rstrip()
-        if rest == sub_stripped or rest.startswith(sub):
-            return True
-    return False
+    # The path must be a LITERAL: an unquoted `$(...)`, `${IFS}`, glob or brace
+    # there is word-split / expanded by the shell into extra arguments (e.g.
+    # `git -C $(cat<<<R${IFS}commit) status` runs `git -C R commit status`).
+    path = m.group(1)
+    if path[0] == "'":
+        if len(path) < 2 or path[-1] != "'" or "'" in path[1:-1]:
+            return False  # single-quoted and fully literal, or refuse
+    elif path[0] == '"' and path[-1] == '"' and len(path) >= 2:
+        if "$" in path or "`" in path or "\\" in path:
+            return False
+    elif _has_unsafe_expansion(path) or "'" in path or '"' in path:
+        return False
+    rest = "git " + m.group(2)
+    return _is_read_only_plain(rest) or _is_read_only_git_c(rest)
 
 
-def _check_cd_compound(cmd: str, allowed_cmds: list[str]) -> tuple[bool, str]:
-    """Validate a `cd <path> [&& | || | ;] <rest>` compound (quote-aware).
+def _is_read_only_segment(seg: str) -> bool:
+    return _is_read_only_plain(seg) or _is_read_only_git_c(seg)
 
-    First segment must be `cd <path>`; each subsequent segment must independently
-    match either READ_ONLY_BASH_PREFIXES or one of `allowed_cmds`. Additional
-    `cd <path>` segments are accepted as navigation no-ops. Returns (allowed,
-    reason).
-    """
-    parts = _split_top_level(cmd)
-    if not parts or not parts[0].startswith("cd "):
-        return False, "internal: _check_cd_compound called on non-cd command"
-    if len(parts) == 1:
-        return True, "bare cd (navigation)"
-    for seg in parts[1:]:
-        if seg.startswith("cd ") or seg == "cd":
-            continue
-        bypass_hit = False
-        for prefix in READ_ONLY_BASH_PREFIXES:
-            p = prefix.rstrip()
-            if seg == p or seg.startswith(prefix):
-                bypass_hit = True
-                break
-        if bypass_hit:
-            continue
-        if _is_read_only_git_c(seg):
-            continue
-        allowed_hit = any(seg.startswith(ac) for ac in allowed_cmds)
-        if allowed_hit:
-            continue
-        return False, (
-            f"cd-compound segment not allowed: {seg[:120]!r}. "
-            f"Must match read-only bypass or active plan's allowed_commands."
-        )
-    return True, f"cd-compound allowed; {len(parts) - 1} non-cd segment(s) checked"
+
+def _segment_class(seg: str, allowed_cmds: list[str]):
+    """Why one segment is permitted: "navigation" (cd no-op), "read_only",
+    "allowed_command" (an allowed_commands prefix) — or None (not permitted)."""
+    if _is_cd_noop(seg):
+        return "navigation"
+    if _is_read_only_segment(seg):
+        return "read_only"
+    for ac in allowed_cmds:
+        ac = str(ac)
+        if ac.strip() and seg.startswith(ac):
+            return "allowed_command"
+    return None
+
+
+def _first_bad_segment(segments: list[str], allowed_cmds: list[str]):
+    for seg in segments:
+        if _segment_class(seg, allowed_cmds) is None:
+            return seg
+    return None
 
 
 def _strip_scalar(raw_val: str) -> str:
@@ -959,7 +1513,127 @@ def _under_any(target_n: str, dirs: list[Path]) -> bool:
     return False
 
 
+def _is_under_log_dir(target: str) -> bool:
+    """True if `target` sits under PLAN_GATE_LOG_DIR. Checked in BOTH the raw and
+    the fully RESOLVED forms (realpath on target and log dir): a `..`-laundered
+    or symlinked target that the OS would open inside the log dir cannot slip a
+    lexical-only comparison."""
+    if LOGS_DIR is None:
+        return False
+    log_dirs = [LOGS_DIR]
+    try:
+        log_dirs.append(Path(os.path.realpath(str(LOGS_DIR))))
+    except (OSError, ValueError):
+        pass
+    target_n = norm(str(target))
+    try:
+        target_resolved_n = norm(os.path.realpath(str(target)))
+    except (OSError, ValueError):
+        target_resolved_n = target_n
+    return _under_any(target_n, log_dirs) or _under_any(target_resolved_n, log_dirs)
+
+
+def _classify_redirect(target: str, has_cd: bool):
+    """Classify one write-redirection target of a Bash command, mirroring the
+    Edit/Write sequence (log self-protection, then always-writable dirs, then
+    the plan's allowed_paths). Returns (kind, value):
+      ("null", None)    /dev/null (NUL on Windows) — never a real write
+      ("error", msg)    cannot be resolved safely -> deny
+      ("log", msg)      under PLAN_GATE_LOG_DIR -> deny (log_self_protect)
+      ("always", None)  under an always-writable directory -> allowed
+      ("plan", path)    absolute path that must match an allowed_paths entry
+    A RELATIVE target resolves against the session CWD — but not after a
+    `cd`/`pushd`/`popd` in the same command, whose destination is not known
+    statically, so that case is an error (use an absolute path).
+    """
+    if target in ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty",
+                  "/dev/fd/0", "/dev/fd/1", "/dev/fd/2") or (
+            os.name == "nt" and target.lower() == "nul"):
+        return "null", None
+    t = target
+    if not os.path.isabs(t):
+        if has_cd:
+            return "error", (
+                f"plan-gate: redirection target {target!r} is relative, but the "
+                f"command also changes directory, so where it lands cannot be "
+                f"resolved statically. Use an absolute path."
+            )
+        try:
+            base = os.getcwd()
+        except OSError:
+            return "error", (
+                f"plan-gate: redirection target {target!r} is relative and the "
+                f"working directory cannot be determined."
+            )
+        t = os.path.join(base, t)
+    t = os.path.normpath(t)
+    if _is_under_log_dir(t):
+        return "log", (
+            f"plan-gate: redirection target {t} is under PLAN_GATE_LOG_DIR; the "
+            f"gate never authorizes gated writes to its own decision log."
+        )
+    if _under_any(norm(t), ALWAYS_WRITABLE_DIRS):
+        return "always", None
+    return "plan", t
+
+
+# What the top-level handler knows about the call in flight, so a gate_error row
+# can say which tool/command was being decided when the fault hit.
+_CALL_CTX: dict = {"tool": "", "tool_input": {}}
+
+_BYPASS_HOWTO = (
+    "To proceed anyway, set PLAN_GATE_BYPASS=on inline for that command (in the "
+    "environment the hook runs in); every bypass use is logged as an "
+    "emergency_bypass row."
+)
+
+
+def _fail_closed(what: str, detail: str) -> None:
+    """The gate itself faulted (unparseable payload, unhandled exception): DENY.
+    JSON on stdout + exit 0 per the hook contract — never exit 1, which the
+    harness treats as a non-blocking warning (the action would proceed)."""
+    reason = (
+        f"plan-gate: INTERNAL ERROR — {what}: {detail[:300]}. The gate fails "
+        f"CLOSED on its own faults, so this tool call is DENIED, not allowed. "
+        f"{_BYPASS_HOWTO} The traceback (if any) is on stderr; please report it."
+    )
+    _log_decision(
+        "deny", "gate", "gate_error", _CALL_CTX["tool"], _CALL_CTX["tool_input"],
+        reason, None,
+    )
+    deny(reason)
+
+
+def _handle_crash(exc: BaseException) -> None:
+    """Top-level handler for an unhandled exception. Re-checks the master
+    switch and PLAN_GATE_BYPASS BEFORE deciding, so the documented escape hatch
+    works even when the fault is in the gate itself."""
+    try:
+        traceback.print_exc(file=sys.stderr)
+    except Exception:
+        pass
+    if os.environ.get("PLAN_GATE", "").strip().lower() != "on":
+        allow("plan-gate: PLAN_GATE != 'on' — gate disabled.")
+    if os.environ.get("PLAN_GATE_BYPASS", "").strip().lower() == "on":
+        reason = "plan-gate: PLAN_GATE_BYPASS=on — emergency bypass (gate fault path)."
+        _log_decision(
+            "allow", "gate", "emergency_bypass", _CALL_CTX["tool"],
+            _CALL_CTX["tool_input"], reason, None,
+        )
+        allow(reason)
+    _fail_closed("unhandled exception in the gate", f"{type(exc).__name__}: {exc}")
+
+
 def main() -> None:
+    # Test-only crash injection (see the test suite): proves the top-level
+    # handler denies, honors PLAN_GATE_BYPASS, and still allows when the gate is
+    # off, on a gate fault. "early" fires before anything else; "late" fires
+    # after the payload is parsed. Fail-closed direction only — setting it can
+    # make the gate deny, never allow.
+    _inject = os.environ.get("_PLAN_GATE_TEST_CRASH", "").strip().lower()
+    if _inject == "early":
+        raise RuntimeError("injected test crash (early)")
+
     # Master gate switch. If off or unset, this hook is inert.
     gate_env = os.environ.get("PLAN_GATE", "").strip().lower()
     if gate_env != "on":
@@ -987,11 +1661,25 @@ def main() -> None:
     try:
         payload = json.load(sys.stdin)
     except Exception as e:
-        print(f"plan-gate: could not parse stdin JSON ({e}); allowing.", file=sys.stderr)
-        sys.exit(1)
+        print(f"plan-gate: could not parse stdin JSON ({e}); denying.", file=sys.stderr)
+        _fail_closed("could not parse the hook payload on stdin as JSON", str(e))
 
+    if not isinstance(payload, dict):
+        _fail_closed(
+            "hook payload is not a JSON object",
+            f"got {type(payload).__name__}",
+        )
     tool = payload.get("tool_name", "") or ""
     tool_input = payload.get("tool_input") or {}
+    if not isinstance(tool, str) or not isinstance(tool_input, dict):
+        _fail_closed(
+            "hook payload has an unexpected shape",
+            f"tool_name is {type(tool).__name__}, tool_input is {type(tool_input).__name__}",
+        )
+    _CALL_CTX["tool"] = tool
+    _CALL_CTX["tool_input"] = tool_input
+    if _inject == "late":
+        raise RuntimeError("injected test crash (late)")
     plan_name: str | None = None
 
     def _surface() -> str:
@@ -1032,29 +1720,19 @@ def main() -> None:
                 f"plan-gate: no file_path in tool_input for {tool}.",
                 class_="empty_input",
             )
-        target_n = norm(str(target))
+        # Collapse `..` / `.` lexically so `<always-writable>/../x` cannot ride
+        # the directory prefix out of it (same treatment as redirect targets).
+        target_n = norm(os.path.normpath(str(target)))
         # Log self-protection — runs BEFORE the always-writable bypass and
         # before allowed_paths matching, so neither can shadow it: the gate
-        # never authorizes a gated write to its own decision log. Checked in
-        # BOTH the raw and the fully RESOLVED forms (realpath on target and
-        # log dir): a `..`-laundered or symlinked target that the OS would
-        # open inside the log dir cannot slip a lexical-only comparison.
-        if LOGS_DIR is not None:
-            log_dirs = [LOGS_DIR]
-            try:
-                log_dirs.append(Path(os.path.realpath(str(LOGS_DIR))))
-            except (OSError, ValueError):
-                pass
-            try:
-                target_resolved_n = norm(os.path.realpath(str(target)))
-            except (OSError, ValueError):
-                target_resolved_n = target_n
-            if _under_any(target_n, log_dirs) or _under_any(target_resolved_n, log_dirs):
-                gated_deny(
-                    f"plan-gate: {target} is under PLAN_GATE_LOG_DIR; the gate "
-                    f"never authorizes gated writes to its own decision log.",
-                    class_="log_self_protect",
-                )
+        # never authorizes a gated write to its own decision log (raw AND
+        # resolved forms; see _is_under_log_dir).
+        if _is_under_log_dir(str(target)):
+            gated_deny(
+                f"plan-gate: {target} is under PLAN_GATE_LOG_DIR; the gate "
+                f"never authorizes gated writes to its own decision log.",
+                class_="log_self_protect",
+            )
         if _under_any(target_n, ALWAYS_WRITABLE_DIRS):
             gated_allow(
                 "plan-gate: target is under an always-writable directory.",
@@ -1068,22 +1746,56 @@ def main() -> None:
                 "plan-gate: Bash tool_input has no 'command'.",
                 class_="empty_command",
             )
-        for prefix in READ_ONLY_BASH_PREFIXES:
-            p = prefix.rstrip()
-            if cmd == p or cmd.startswith(prefix):
+        # Parse the WHOLE command: segments (&& || ; | & newline), the bodies of
+        # $(...) / `...` / <(...) / ( ... ) which execute, and write
+        # redirections. Anything the scanner cannot confidently parse is denied.
+        parsed, problems = _parse_command(cmd)
+        if problems:
+            gated_deny(
+                "plan-gate: cannot safely parse this Bash command "
+                f"({'; '.join(problems[:3])}). Failing closed. Rewrite it as "
+                "simple commands (one per call), or enumerate it differently in "
+                "the plan. Command: " + cmd[:200],
+                class_="unparseable_command",
+            )
+        nodes = list(parsed.walk())
+        all_segs = [sg for nd in nodes for sg in nd.segments]
+        all_redirects = [rd for nd in nodes for rd in nd.redirects]
+        if not all_segs and not all_redirects:
+            gated_deny(
+                "plan-gate: no executable command found in this Bash command "
+                "after parsing. Failing closed. Command: " + cmd[:200],
+                class_="unparseable_command",
+            )
+        has_cd = any(_is_cd_like(sg) for sg in all_segs)
+        # Redirection-as-write: each target is a file write, gated like
+        # Edit/Write (log self-protection -> always-writable -> allowed_paths).
+        plan_targets: list[str] = []
+        for rd in all_redirects:
+            r_kind, r_val = _classify_redirect(rd, has_cd)
+            if r_kind == "error":
+                gated_deny(r_val)
+            elif r_kind == "log":
+                gated_deny(r_val, class_="log_self_protect")
+            elif r_kind == "plan":
+                plan_targets.append(r_val)
+        # Pre-plan read-only bypass: a compound is read-only only if EVERY
+        # segment is (a `cd` segment is a navigation no-op), and every write
+        # redirection is /dev/null or lands in an always-writable directory.
+        if not plan_targets and _first_bad_segment(all_segs, []) is None:
+            if all_segs and all(_is_cd_noop(sg) for sg in all_segs):
+                gated_allow("plan-gate: bare cd (navigation).", "navigation")
+            if not all_segs:
                 gated_allow(
-                    f"plan-gate: read-only bash bypass ({p!r}).",
-                    "read_only_bypass",
+                    "plan-gate: redirection-only command into an always-writable "
+                    "directory.",
+                    "always_writable",
                 )
-        if _is_read_only_git_c(cmd):
             gated_allow(
-                "plan-gate: read-only bash bypass (git -C <path> <subcmd>).",
+                f"plan-gate: read-only bash bypass ({len(all_segs)} segment(s), "
+                f"all read-only).",
                 "read_only_bypass",
             )
-        # Bare `cd <path>` (no compound) is pure navigation. A compound
-        # `cd <path> [&&|||;] <rest>` requires allowed_cmds; deferred below.
-        if cmd.startswith("cd ") and not _has_compound_separator(cmd):
-            gated_allow("plan-gate: bare cd (navigation).", "navigation")
 
     if tool == "PowerShell":
         cmd = (tool_input.get("command") or "").strip()
@@ -1127,6 +1839,24 @@ def main() -> None:
     actives = find_active_plans(worktree_root=worktree_root)
     if not actives:
         if worktree_root is not None:
+            # The REAL no-claim path: find_active_plans filtered every active
+            # plan out because none claims this worktree. If active plans exist
+            # elsewhere, say so — that is the silent-drift pattern.
+            elsewhere = find_active_plans(worktree_root=None)
+            if elsewhere:
+                shown = ", ".join(p.name for p, _ in elsewhere[:5])
+                if len(elsewhere) > 5:
+                    shown += ", ..."
+                gated_deny(
+                    f"plan-gate: {len(elsewhere)} active plan(s) exist ({shown}), "
+                    f"but none claims this worktree ({worktree_root}) — likely "
+                    f"drift: the plan's allowed_paths point at another tree. A "
+                    f"plan claims a worktree only through an ABSOLUTE "
+                    f"allowed_paths entry under it (or `worktree_bypass: true` "
+                    f"for deliberate cross-tree work). Add an absolute path "
+                    f"under {worktree_root} to the plan you meant to use.",
+                    class_="silent_drift",
+                )
             gated_deny(
                 "plan-gate: no plan file has `status: active` with allowed_paths "
                 f"under worktree {worktree_root} in the plans directory. Write one "
@@ -1190,22 +1920,13 @@ def main() -> None:
         except OSError:
             pass
 
-    # Hard guard — if CWD is under a worktree, at least one allowed_path must
-    # resolve under that worktree. Catches the silent-drift pattern (allowed_paths
-    # pointed at the main repo while CWD was the worktree). Opt-out: the plan
-    # declares `worktree_bypass: true` for deliberately cross-tree work.
+    # (The worktree "hard guard" that used to sit here was unreachable and has
+    # been removed: find_active_plans() above already admits a plan for a
+    # worktree session only if it has `worktree_bypass: true` or an ABSOLUTE
+    # allowed_paths entry resolving under worktree_root, so any plan that
+    # reaches this point already satisfies the guard's condition. The silent-
+    # drift diagnostic now fires from the no-claim path above.)
     bypass = str(fm.get("worktree_bypass", "")).strip().lower() == "true"
-    if worktree_root is not None and allowed_paths and not bypass:
-        wt_n = norm(str(worktree_root)) + "/"
-        under_worktree = [p for p in resolved_paths if norm(p).startswith(wt_n)]
-        if not under_worktree:
-            gated_deny(
-                f"plan-gate: session CWD {cwd} is under worktree {worktree_root}, "
-                f"but zero allowed_paths resolve under it (plan: {plan_path.name}). "
-                f"This matches the silent-drift pattern. Root allowed_paths at the "
-                f"worktree or use repo-root-relative paths.",
-                class_="silent_drift",
-            )
 
     # === Disjoint paths check ===
     # Skipped when MY plan is `worktree_bypass: true` (bypass plans are cross-tree
@@ -1231,23 +1952,37 @@ def main() -> None:
         )
 
     if tool == "Bash":
-        # cmd already computed above. Read-only bypass and bare `cd <path>` were
-        # handled there. Here: the `cd <path> [&&|||;] <rest>` compound (needs
-        # allowed_cmds) and the plain allowed_commands check.
-        if cmd.startswith("cd ") and _has_compound_separator(cmd):
-            ok, reason = _check_cd_compound(cmd, allowed_cmds)
-            if ok:
-                gated_allow(f"plan-gate: {reason}", "allowed_command")
-            gated_deny(f"plan-gate: {reason}")
-        for ac in allowed_cmds:
-            if cmd.startswith(ac):
-                gated_allow(
-                    f"plan-gate: matches allowed_command prefix {ac!r}.",
-                    "allowed_command",
+        # cmd / all_segs / plan_targets were computed in the pre-plan block
+        # (entirely read-only commands were already allowed there). Here EVERY
+        # segment — top level and substitution bodies — must independently be a
+        # read-only command, a cd no-op, or start with an allowed_commands
+        # entry, and every write-redirection target must be in allowed_paths.
+        bad_seg = _first_bad_segment(all_segs, allowed_cmds)
+        if bad_seg is not None:
+            gated_deny(
+                f"plan-gate: Bash command not allowed by active plan "
+                f"({plan_path.name}): segment {bad_seg[:120]!r} matches neither "
+                f"the read-only set, a bare cd, nor an allowed_commands prefix. "
+                f"Compound commands (&& || ; | & newline, $(...), backticks, "
+                f"<(...)) are checked segment by segment. Command: {cmd[:200]}"
+            )
+        for tgt in plan_targets:
+            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+                gated_deny(
+                    f"plan-gate: redirection target {tgt} is NOT in "
+                    f"allowed_paths of active plan ({plan_path.name}). A "
+                    f"redirection (>, >>, >|, &>) is a file write and is gated "
+                    f"like Edit/Write. Command: {cmd[:200]}"
                 )
-        gated_deny(
-            f"plan-gate: Bash command not allowed by active plan "
-            f"({plan_path.name}). Command: {cmd[:200]}"
+        used_plan_cmd = any(
+            _segment_class(sg, allowed_cmds) == "allowed_command" for sg in all_segs
+        )
+        gated_allow(
+            f"plan-gate: all {len(all_segs)} segment(s) permitted"
+            + (f"; {len(plan_targets)} redirection target(s) in allowed_paths"
+               if plan_targets else "")
+            + ".",
+            "allowed_command" if used_plan_cmd else "allowed_paths",
         )
 
     if tool == "PowerShell":
@@ -1255,7 +1990,7 @@ def main() -> None:
         # compound parsing. The read-only PS bypass was applied in the early
         # branch.
         for ac in allowed_cmds:
-            if cmd.startswith(ac):
+            if str(ac).strip() and cmd.startswith(ac):
                 gated_allow(
                     f"plan-gate: matches allowed_command prefix {ac!r}.",
                     "allowed_command",
@@ -1287,7 +2022,25 @@ if __name__ == "__main__":
         main()
     except SystemExit:
         raise
-    except Exception:
-        print("plan-gate: unhandled exception; allowing. Trace:", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        sys.exit(1)
+    except Exception as _exc:
+        # Fail CLOSED: a gate fault denies (exit 0 + deny JSON); it never exits
+        # 1, which the harness treats as a non-blocking warning. The handler
+        # re-checks PLAN_GATE / PLAN_GATE_BYPASS first.
+        try:
+            _handle_crash(_exc)
+        except SystemExit:
+            raise
+        except Exception:
+            # Last resort: the handler itself faulted. Still deny.
+            try:
+                print(json.dumps({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "plan-gate: INTERNAL ERROR in the crash handler. The gate "
+                        "fails CLOSED. " + _BYPASS_HOWTO
+                    ),
+                }}))
+            except Exception:
+                pass
+            sys.exit(0)
