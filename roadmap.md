@@ -1,16 +1,21 @@
 # StrictLock roadmap
 
-StrictLock ships as an umbrella that grows. The shipped suite now spans four families —
-**Gates** ([`plan-gate`](plan-gate/), [`commit-msg-gate`](commit-msg-gate/),
-[`generated-sink-commit-gate`](generated-sink-commit-gate/) /
-[`generated-sink-prepush-gate`](generated-sink-prepush-gate/),
-[`test-protection-guard`](test-protection-guard/),
-[`eslint-plugin-strictlock`](eslint-plugin-strictlock/)), **Hygiene**
-([`memory-cap`](memory-cap/), [`externalized-memory`](externalized-memory/) and its projection
-bundle), and **Concurrency** ([`scope-lease`](scope-lease/), [`sink-resolver`](sink-resolver/),
-[`liveness-scan`](liveness-scan/)), and **Rituals** ([`rituals`](rituals/), prose-only
-checklists the gates can't enforce mechanically) — plus a suite-wide [compliance mapping](COMPLIANCE.md). The README [Modules table](README.md#modules) is the
-authoritative shipped list; below are the siblings and docs still on deck.
+StrictLock ships as an umbrella that grows. The shipped suite spans four families, the same
+four the README [Modules table](README.md#modules) uses:
+
+- **Gates** — [`plan-gate`](plan-gate/), [`commit-msg-gate`](commit-msg-gate/),
+  [`generated-sink-commit-gate`](generated-sink-commit-gate/),
+  [`generated-sink-prepush-gate`](generated-sink-prepush-gate/),
+  [`test-protection-guard`](test-protection-guard/) and
+  [`eslint-plugin-strictlock`](eslint-plugin-strictlock/).
+- **Hygiene** — [`memory-cap`](memory-cap/) and [`externalized-memory`](externalized-memory/)
+  (including its projection bundle).
+- **Concurrency** — [`scope-lease`](scope-lease/), [`sink-resolver`](sink-resolver/) and
+  [`liveness-scan`](liveness-scan/).
+- **Rituals** — [`rituals`](rituals/), written checklists for the steps no hook can check.
+
+There is also a suite-wide [compliance mapping](COMPLIANCE.md). The README table is the
+authoritative list of what has shipped; below are the modules and docs still on deck.
 
 These are honest slots, not promises with dates. Each is marked:
 
@@ -23,8 +28,9 @@ These are honest slots, not promises with dates. Each is marked:
 ## Shipped since launch
 
 - **generated-sink integrity gates** — a commit-time freshness check plus a pre-push backstop,
-  byte-exact against a regenerate, so a stale generated artifact (manifest, index, schema,
-  README) never ships. Fail-closed; bypasses isolated per gate.
+  byte-exact against a regenerate, so a stale generated file (manifest, index, schema,
+  README) is refused at commit and push time. When a check cannot run, it refuses; each gate has
+  its own bypass variable.
 - **eslint-plugin-strictlock** (`no-smoke-only-assertions`) — flags false-safety-net tests
   (`toBeDefined`, a bare `expect(x)`, `toContain`-only). The suite's first JS sibling, shipped
   as a standalone npm package.
@@ -32,9 +38,10 @@ These are honest slots, not promises with dates. Each is marked:
   rendering layer (record schema + region renderer + fenced-region splicing + canonical-UTC
   guard + required-body validation) that turns the shared blackboard into an auditable,
   reproducible status projection.
-- **scope-lease** — a git-native, zero-service exclusive lock over a path set so N autonomous
-  agents never edit the same file at once. The multi-agent extension of plan-gate: enumerated
-  paths → enumerated **and exclusive**. The Concurrency flagship.
+- **scope-lease** — a git-native, zero-service exclusive lock over a path set. Agents that
+  call `acquire` cannot hold the same file at once; plan-gate does not read these locks yet, so
+  an agent that skips `acquire` is not excluded. Reads its path set from a plan-gate plan. The
+  Concurrency flagship.
 - **sink-resolver** — deterministic auto-resolution of generated-file merge conflicts:
   `merge=binary` on the sink + a `resolve` that regenerates from the merged sources, byte-checks,
   and escalates any non-sink conflict + a `check` CI backstop, with a coverage guard that refuses
@@ -46,7 +53,8 @@ These are honest slots, not promises with dates. Each is marked:
   "rewrite the failing test to match the buggy output" move (an existing assertion changed
   alongside source, no `TEST-CORRECTNESS:` justification). Always allows, never blocks; the
   teeth are the close-out log review. Dual-mode (Claude Code `PreToolUse` *or* git `pre-commit`).
-  The detective complement to the born-weak `eslint-plugin-strictlock`.
+  It looks for what a weak test rule (such as `eslint-plugin-strictlock`) cannot, which is
+  an assertion that was changed to make a failing test pass.
 - **rituals** ([`rituals/`](rituals/)) — prose, not a gate: the session **kickoff** and
   **close-out** checklists (key steps carry a "why this step exists" note, plus a distilled
   lessons section), the **unit-of-work interaction analysis** (prior-unit deferred-marker grep +

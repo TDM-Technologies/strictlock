@@ -1,6 +1,7 @@
 # StrictLock
 
-**Fail-closed action authorization for AI agents in regulated work.**
+**Checks what an AI agent is about to do against a written plan, and refuses anything the plan
+does not list.**
 
 AI agents don't just write text anymore — they *take actions*. They edit files, run
 commands, call APIs, and write to systems of record. In regulated work, an action the
@@ -8,89 +9,169 @@ operator never approved isn't a bad paragraph; it's a disclosed record, an unaut
 transaction, a reportable event.
 
 Today those agents are governed almost entirely by **prose** — "always ask before
-deleting," "never touch production." Prose governance **fails open**: the instruction is
-advisory, the model must choose to honor it every turn, and under momentum it's the first
-thing to slip. When it slips, nothing catches the action.
+deleting," "never touch production." Prose governance is advisory: the model has to choose to
+honor it on every turn, and under momentum it is the first thing to slip. When it slips,
+nothing catches the action.
 
-StrictLock moves governance **out of the prose and into a structural gate** at the tool
-boundary. Every file edit, shell command, and recognized external-write tool call is
-intercepted *before it runs* and checked against an explicitly approved plan. Unapproved, ambiguous, or surprising → **deny**. The agent
-can't talk its way past a check that executes in code it doesn't control. And the same gate
-emits a per-decision audit trail as a byproduct — the evidence SOC 2 and ISO ask for.
+StrictLock moves the rule **out of the prose and into code that runs at the tool boundary**.
+Before a file edit or shell command runs, the gate checks it against a plan that lists the
+exact files and command prefixes the work may use. If the action is not listed, or the gate
+cannot tell, the answer is **no**. The agent cannot talk its way past a check that runs in
+code it doesn't control. If you turn logging on, the same gate also writes a record of each
+decision, which is the kind of evidence SOC 2 and ISO audits ask for.
 
-> **fail-closed** is the principle. **StrictLock** is the suite. **plan-gate /
-> commit-msg-gate / memory-cap / externalized-memory / generated-sink gates** and the
-> others in the table below are the modules.
+> **Fail closed** means: when the gate is unsure, it refuses. The opposite, failing open, is
+> what advisory prose does. Two limits to know up front. A gate that never starts does not
+> gate (see [what is and isn't enforced today](#what-is-and-isnt-enforced-today)), and
+> approval of a plan is currently a convention, not a recorded step.
 
 ## Modules
 
-| Module | What it does | Status |
-|---|---|---|
-| [**plan-gate**](plan-gate/) | Flagship. A pre-action `PreToolUse` hook: an agent may modify only the exact files and run only commands matching the command prefixes an approved plan enumerates. Everything else is denied before it runs. Ships with the formal paper. | ✅ v1 |
-| [**commit-msg-gate**](commit-msg-gate/) | A `commit-msg` git hook that requires every commit to name a plan (a `plan: <slug>` line in the message body; with the opt-in `COMMIT_MSG_GATE_PLANS_DIR` the slug must resolve to a plan file in your plans directory) or carry an approved chore/docs prefix — so the version-control trail names the plan behind each change. A local hook: `--no-verify` skips it; an example CI job (one you add to your own workflow) runs the same check on the pushed commits. | ✅ v1 |
-| [**memory-cap**](memory-cap/) | A `PreToolUse` hook that structurally caps the size of an agent's auto-loaded memory index (length of each entry by default; entry-count and total-size caps opt-in), keeping per-session context cost in check instead of relying on a convention nobody enforces. | ✅ v1 |
-| [**externalized-memory**](externalized-memory/) | The shared blackboard: one on-disk state file as the source of truth across stateless agent sessions, written atomically. Ships as templates + an atomic-write reference + the design write-up — plus a **projection bundle** (deterministic, git-free/clock-free renderer + fenced-region splicing + UTC guard) for a reproducible status projection. | ✅ v1 |
-| [**generated-sink-commit-gate**](generated-sink-commit-gate/) | A `pre-commit` git hook: if a staged change touches a configured source, the gate re-runs the generator in `--check` mode and refuses the commit unless the checked-in generated artifact (manifest/index/schema/README) is a byte-exact regeneration. Refuses a commit whose staged generated file is stale (fail-closed at commit time; `--no-verify` skips it). | ✅ v1 |
-| [**generated-sink-prepush-gate**](generated-sink-prepush-gate/) | A `pre-push` git hook: the last-line backstop that validates the terminal sink in your working tree on *every* push (catching a stale artifact that slipped past commit time via `--no-verify` or a one-shot bypass). The hook checks your tree (fast, local); CI checks the pushed commit (authoritative) — a CI job you add to your own workflow, copied from the module's examples. Fail-closed; its bypass is isolated from the commit gate's. | ✅ v1 |
-| [**eslint-plugin-strictlock**](eslint-plugin-strictlock/) | The suite's first JS sibling, **published to npm** as [`eslint-plugin-strictlock`](https://www.npmjs.com/package/eslint-plugin-strictlock). Its `no-smoke-only-assertions` rule fails the lint when a whole test block asserts ~nothing (`toBeDefined` / bare `expect(x)` / `toContain`-only) — catching false-safety-net tests before they ship. Builds + tests in-repo. | ✅ v0.1.1 |
-| [**scope-lease**](scope-lease/) | Concurrency flagship. A git-native, zero-service exclusive lock over a path set (`refs/locks/*` compare-and-swap, off-branch, no daemon) so N autonomous agents never edit the same file at once. The multi-agent extension of plan-gate: enumerated paths → enumerated *and exclusive*. Reads its path set from an active plan-gate plan by default, or `--paths`/stdin/own-frontmatter standalone. Never walls a human's manual merge. | ✅ v1 |
-| [**sink-resolver**](sink-resolver/) | Concurrency / Gates. Deterministic auto-resolution of generated-file merge conflicts — a pure render has no merge, it has a *regenerate*. `merge=binary` on the sink + a `resolve` that regenerates from the merged sources, byte-checks, and **escalates any non-sink conflict**, plus a `check` CI backstop for web-UI merges. A coverage guard refuses to finalize a sink the generator didn't actually rewrite. Sound only for a pure, `--check`-able render — loud precondition on the tin. | ✅ v1 |
-| [**liveness-scan**](liveness-scan/) | Concurrency / Meta. A read-only reporter that triages a fleet of agent worktrees — running / stalled / done-unmerged / ambiguous / idle — on a heartbeat-or-commit-mtime signal, attributing each to its plan-gate session. **Report-only: never reaps, exits 0 always**; ambiguous stalls escalate with a non-destructive recovery command. Completes the concurrency family. | ✅ v1 |
-| [**test-protection-guard**](test-protection-guard/) | Gates. An **advisory** co-commit-coupling detector: when an *existing* test assertion is changed/removed in the same commit as non-test source — the "rewrite the failing test to match the buggy output" move — it flags + logs it unless a `TEST-CORRECTNESS:` justification is present. **Always allows, never blocks**; the teeth are the close-out log review. Dual-mode: a Claude Code `PreToolUse` hook *or* a universal git `pre-commit` hook over one shared core. The detective complement to the born-weak `eslint-plugin-strictlock`. | ✅ v1 |
-| [**rituals**](rituals/) | Rituals. **Prose, not a gate** — it enforces nothing. The kickoff and close-out checklists, the unit-of-work interaction analysis (prior-unit deferred-marker grep + peer-unit collision pass), and the pre-work currency check: the judgment-shaped discipline around a plan that no hook can check, wired to the gates that *can* back each step ([`plan-gate`](plan-gate/), [`commit-msg-gate`](commit-msg-gate/), [`externalized-memory`](externalized-memory/), [`scope-lease`](scope-lease/)). Key steps carry a "why this step exists" note from a real miss. | ✅ v1 |
+Each module is **standalone** — adopt one without the others. They are plain files with no
+machine-specific defaults; the Python and shell modules are configured entirely through
+environment variables, and the ESLint plugin through ESLint rule options. Detail, caveats and
+configuration live in each module's own README.
 
-Each module is **standalone** — adopt one without the others — plain files with no
-machine-specific defaults baked in; the Python and shell gates are **configured entirely by
-environment variables** (the ESLint plugin takes ESLint rule options instead).
+The modules fall into four families:
 
-See [**roadmap.md**](roadmap.md) for the planned sibling modules (the governance-of-governance
-work and more) and what has shipped since launch.
+- **Gates** — checks that allow or refuse an action, or flag it.
+- **Hygiene** — keeping an agent's memory and state small and durable.
+- **Concurrency** — several agents working in the same repository.
+- **Rituals** — written checklists for the judgment calls no hook can check.
+
+| Module | Family | What it does | Status |
+|---|---|---|---|
+| [**plan-gate**](plan-gate/) | Gates | The flagship: before an agent edits a file or runs a command, checks it against a written plan and refuses anything the plan does not list. | v1 |
+| [**commit-msg-gate**](commit-msg-gate/) | Gates | A git hook that rejects a commit unless its message names a plan or uses an approved prefix such as `docs:`. | v1 |
+| [**generated-sink-commit-gate**](generated-sink-commit-gate/) | Gates | A git hook that refuses a commit when a generated file (an index, manifest or schema) is not an exact regeneration from its source. | v1 |
+| [**generated-sink-prepush-gate**](generated-sink-prepush-gate/) | Gates | A git hook that re-checks generated files at push time, as a second line behind the commit-time check. | v1 |
+| [**test-protection-guard**](test-protection-guard/) | Gates | Flags, but never blocks, a change to an existing test assertion made in the same commit as source code, unless the commit says why. | v1 |
+| [**eslint-plugin-strictlock**](eslint-plugin-strictlock/) | Gates | An ESLint rule ([on npm](https://www.npmjs.com/package/eslint-plugin-strictlock)) that fails the lint when a whole test asserts almost nothing. | v0.1.1 |
+| [**memory-cap**](memory-cap/) | Hygiene | A hook that refuses edits that would make an agent's auto-loaded memory index too long. | v1 |
+| [**externalized-memory**](externalized-memory/) | Hygiene | Templates and small scripts for keeping project state in one file on disk that every session reads first and writes atomically. | v1 |
+| [**scope-lease**](scope-lease/) | Concurrency | A git-based lock that agents which ask for it use to claim a set of files; plan-gate does not read these locks yet. | v1 |
+| [**sink-resolver**](sink-resolver/) | Concurrency | Resolves merge conflicts in generated files by regenerating them from the merged sources. | v1 |
+| [**liveness-scan**](liveness-scan/) | Concurrency | A read-only report on which agent worktrees are still running, stalled, or finished but not merged. | v1 |
+| [**rituals**](rituals/) | Rituals | Prose checklists for starting and closing a session and for planning checks; it enforces nothing. | v1 |
+
+"Sink" in two module names means a generated file that other files are built into, such as an
+index or manifest; those module READMEs define it fully. A *worktree* is a separate checked-out
+copy of a repository that shares its history, which many agent tools create per session.
+
+See [**roadmap.md**](roadmap.md) for planned modules and what has shipped since launch.
+
+## What is and isn't enforced today
+
+The sections below describe what the code does now. Each item has a planned change in
+[`dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](dev/CLAIMS-TRUE-ROUND-2-SPEC.md).
+
+- **Plan approval is a convention.** A plan is live when its frontmatter says
+  `status: active`. Nothing records who approved it or when, and with the example settings a
+  gated agent can write an active plan itself. Recorded approval is planned, not built.
+- **MCP tools** (tools provided by connected servers): the ones you name in
+  `PLAN_GATE_MCP_WRITE_TOOLS` are always denied while a plan is active; their arguments are not
+  read. The example hook `matcher` does not route MCP tools to the gate, so add them (for
+  example `mcp__.*`) or the gate never sees them. Other MCP tools are not gated.
+- **Scripts are matched as commands.** Allowing a command such as
+  `python3 atomic-write.py STATE.md` does not check the file it writes against `allowed_paths`.
+- **Leases are voluntary.** scope-lease excludes only agents that call `acquire` themselves.
+  plan-gate does not read lock refs, and any merge-time check on a lease is something you
+  build.
+- **A hook that cannot start does not gate.** A wrong interpreter name or script path makes the
+  harness proceed without the check. Verify the gate after wiring it (below).
 
 ## The thesis, in four moves
 
 1. **Put the rule at the tool boundary, not in the prompt.** A pre-action hook that checks
-   every file edit, shell command, and recognized external-write call against an approved plan
-   changes your risk posture immediately.
-2. **Fail closed.** When an action is unapproved, ambiguous, or surprising, block it and
+   every file edit and shell command against a written plan changes your risk posture
+   immediately.
+2. **Fail closed.** When an action is unlisted, ambiguous, or surprising, block it and
    stop for a human. Bias the whole system toward consent over completion.
 3. **Enumerate; never grant broadly.** Authorize the exact files and enumerated command
-   prefixes — not the directory, not the tool. Broad grants are fail-open invitations.
-4. **Let the floor be your audit trail.** Log every gate decision and you've already
+   prefixes — not the directory, not the tool. Broad grants are invitations to fail open.
+4. **Keep a record of every decision.** Turn on the decision log and you have already
    produced most of what SOC 2 and ISO ask you to evidence.
 
 The full argument is in [`plan-gate/paper.md`](plan-gate/paper.md).
 
-## 60-second quickstart (plan-gate)
+## Install plan-gate
 
 The modules target the [Claude Code](https://docs.claude.com/en/docs/claude-code)
 `PreToolUse` hook convention, but the mechanism is harness-agnostic — adapt the JSON
 contract to whatever agent runtime you use.
 
-```bash
-# 1. Point the gate at a plans directory and turn it on.
-export PLAN_GATE=on
-export PLAN_GATE_PLANS_DIR="$HOME/.agent/plans"
+The step-by-step path, from a fresh clone to a gate you have seen deny something, is in
+[**plan-gate/README.md: Install plan-gate in a project**](plan-gate/README.md#install-plan-gate-in-a-project-first-install).
+In short:
 
-# 2. Write an approved plan (see plan-gate/SCHEMA.md and plan-gate/examples/).
-#    A plan enumerates allowed_paths and allowed_commands in YAML frontmatter.
+1. Clone this repository somewhere the agent does not work, and use the absolute path to
+   `plan-gate/plan-gate.py` in the hook command.
+2. Name the interpreter `python3` in the hook command, and check `python3 --version` is 3.8+.
+3. Set `PLAN_GATE=on`, `PLAN_GATE_PLANS_DIR` and `PLAN_GATE_LOG_DIR` (all absolute paths).
+4. Write a plan with **absolute** `allowed_paths`; a plan with only relative paths cannot claim
+   a git worktree, and the gate then denies everything there.
+5. Wire the hook (see [`plan-gate/examples/settings.json`](plan-gate/examples/settings.json)).
+6. **Check the gate is live:** ask the agent to edit a file that is not in the plan. You should
+   see a `plan-gate:` deny and a new row in the decision log.
 
-# 3. Wire plan-gate.py as a PreToolUse hook (see plan-gate/examples/settings.json).
-#    Now the agent can only touch what the active plan names.
-```
+**Why step 6 is not optional.** A hook command that cannot start (for example `python` on a
+system that only has `python3`, or a path that does not resolve) is treated by the harness as
+a non-blocking error, so the agent's action proceeds with no deny and no log row. The gate
+fails closed only once it is running.
 
-Full configuration (all `PLAN_GATE_*` env vars, on Windows/Linux/macOS) is in
+Full configuration (all `PLAN_GATE_*` variables, on Windows, Linux and macOS) is in
 [`plan-gate/CONFIG.md`](plan-gate/CONFIG.md).
+
+## Switches and bypass values
+
+Every gate has an on-switch or a bypass variable, and the accepted values **differ by module
+today**. A value a module does not accept is silently ignored, so for example
+`MEMORY_CAP_BYPASS=on` does nothing because that module wants `1`. All variables are read from
+the process environment; a planned change will make every module accept `on`, `1`, `true` and
+`yes`.
+
+| Module | Turn on | Bypass variable | Value accepted today |
+|---|---|---|---|
+| plan-gate | `PLAN_GATE=on` (any case) | `PLAN_GATE_BYPASS` | `on` only (any case) |
+| memory-cap | `MEMORY_CAP=on` (any case) | `MEMORY_CAP_BYPASS` | `1` only |
+| generated-sink-commit-gate | `GENERATED_SINK_COMMIT_GATE=on` (any case) | `GENERATED_SINK_COMMIT_GATE_BYPASS` | `1` only |
+| generated-sink-prepush-gate | `GENERATED_SINK_PREPUSH_GATE=on` (any case) | `GENERATED_SINK_PREPUSH_GATE_BYPASS` | `1` only |
+| commit-msg-gate | the hook being installed (no switch) | `COMMIT_MSG_GATE_BYPASS` | lowercase `on` only |
+| test-protection-guard | `TEST_PROTECTION_GUARD=on` (any case) | none (it never blocks) | not applicable |
+| scope-lease | runs unless disabled | `SCOPE_LEASE` as an opt-out | `on`, `1`, `true`, `yes` mean enabled; any other set value disables it |
+| sink-resolver | runs unless disabled | `SINK_RESOLVER` as an opt-out | `on`, `1`, `true`, `yes` mean enabled; any other set value disables it |
+| liveness-scan | no switch (read-only) | none | not applicable |
+
+One further `1`-only switch: `MEMORY_CAP_DECISION_LOG` (the opt-in decision log).
+
+**Where the variable has to be set.**
+
+- **Hooks run by the agent harness** (plan-gate, memory-cap, test-protection-guard's agent mode)
+  are started by the harness, not by the agent's shell. They see the environment the harness was
+  launched with and the `env` block in its settings. `export X=on` in the agent's own Bash
+  tool, or typing `X=on` before the agent's command, does **not** reach them. Set the variable
+  where you set the gate's other variables, then restart the session.
+- **Git hooks** (commit-msg-gate, generated-sink-commit-gate, generated-sink-prepush-gate,
+  test-protection-guard's pre-commit mode, the sink-resolver `post-merge` example) run inside
+  whatever process calls git. The variable must be present in the environment of **every** such
+  process: a terminal you did not export it in, a GUI git client, an IDE's commit button, a
+  script or CI job. Where it is missing, an on-switch means the gate is simply off for that
+  commit, and a bypass variable does not apply. Set it for the processes you mean, and for
+  one-off bypasses prefer an inline prefix on the git command itself
+  (`COMMIT_MSG_GATE_BYPASS=on git commit ...`).
+- `git commit --no-verify` and `git push --no-verify` skip git hooks entirely.
 
 ## Design principles
 
-- **Fail closed.** When in doubt, deny. A bug in the gate fails toward safety: if plan-gate's
-  own code crashes or receives an unparseable payload, it denies with a loud message (the
-  emergency bypass is still honored, and logged).
+- **Fail closed.** When in doubt, deny. If plan-gate's own code crashes or receives a payload
+  it cannot parse, it denies with a loud message (the emergency bypass is still honored, and
+  logged). This covers a gate that is running; a hook that fails to start does not gate.
 - **Least privilege by construction.** Exact-path, enumerated-command-prefix authorization,
   scoped per unit of work and then retired.
-- **Compliance as exhaust.** The audit trail is a byproduct of the gate doing its job — not
-  a separate feature you build. See [`COMPLIANCE.md`](COMPLIANCE.md) for the suite-wide
-  SOC 2 / ISO 42001 / ISO 9001 control mapping.
+- **Evidence from the gate itself.** With `PLAN_GATE_LOG_DIR` set, each decision is written to
+  a hash-chained log as the gate makes it; it is opt-in, not automatic. See
+  [`COMPLIANCE.md`](COMPLIANCE.md) for the suite-wide SOC 2 / ISO 42001 / ISO 9001 control
+  mapping.
 - **No magic.** Plain hooks, plain config, no daemon, no service. Read the code; it's small.
 
 ## License
