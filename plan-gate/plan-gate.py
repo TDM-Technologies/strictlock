@@ -57,7 +57,11 @@ CONFIGURATION (all via environment; no machine-specific defaults are baked in)
                             like a `>` target. Malformed value fails closed.
   PLAN_GATE_MCP_WRITE_TOOLS optional comma-separated list of MCP tool names that
                             modify external state (e.g. a cloud-drive create/copy
-                            tool). Default-denied when set; see the MCP section.
+                            tool). A bare name is default-denied. `tool:arg` or
+                            `tool:arg1+arg2` names the argument(s) holding target
+                            paths (a list of strings = every string a target):
+                            each is checked like an Edit/Write file_path. A
+                            missing/empty/non-string argument denies.
 
 RULES
   - If PLAN_GATE != "on" (case-insensitive), allow everything.
@@ -249,11 +253,67 @@ READ_ONLY_PS_PREFIXES = (
 # is that no external-state writes happen during a gated unit of work by design.
 # Telemetry to the MCP log falsifies that premise — if legitimate usage appears,
 # add an `allowed_mcp_tools` opt-in surface (left as a v2 exercise here).
-MCP_FILE_WRITE_TOOLS = tuple(
-    t.strip()
-    for t in os.environ.get("PLAN_GATE_MCP_WRITE_TOOLS", "").split(",")
-    if t.strip()
+#
+# An entry may name the argument(s) that hold the target path: `tool:arg` or
+# `tool:arg1+arg2`. A tool WITH an argument spec has every target (a string
+# argument, or every string of a list-of-strings argument) checked exactly like
+# an Edit/Write file_path: log self-protection, always-writable dirs, then the
+# plan's allowed_paths; a missing/empty/non-string argument denies. A tool
+# WITHOUT a spec (a bare name) stays default-denied. A bare entry wins over a
+# spec entry for the same tool (the stricter reading).
+def _parse_mcp_write_tools(raw: str):
+    """(tool_names, {tool: (arg, ...)}) from PLAN_GATE_MCP_WRITE_TOOLS."""
+    names: list[str] = []
+    specs: dict = {}
+    bare: set = set()
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, sep, spec = entry.partition(":")
+        name = name.strip()
+        if not name:
+            continue
+        if name not in names:
+            names.append(name)
+        args = tuple(a.strip() for a in spec.split("+") if a.strip()) if sep else ()
+        if not args:
+            bare.add(name)  # no (usable) spec: default-deny, as before
+            continue
+        merged = specs.get(name, ())
+        specs[name] = merged + tuple(a for a in args if a not in merged)
+    for name in bare:
+        specs.pop(name, None)
+    return tuple(names), specs
+
+
+MCP_FILE_WRITE_TOOLS, MCP_TOOL_ARGS = _parse_mcp_write_tools(
+    os.environ.get("PLAN_GATE_MCP_WRITE_TOOLS", "")
 )
+
+
+def _mcp_targets(tool: str, tool_input: dict):
+    """(targets, problem) for an MCP tool that has an argument spec. Each named
+    argument must be a non-empty string, or a non-empty list of non-empty
+    strings (every string is a target). Anything else is a problem (deny)."""
+    targets: list[str] = []
+    for arg in MCP_TOOL_ARGS.get(tool, ()):
+        val = tool_input.get(arg)
+        if isinstance(val, str):
+            vals = [val]
+        elif isinstance(val, list) and val:
+            vals = val
+        else:
+            return targets, (
+                f"argument {arg!r} is missing, empty or not a string / list of strings"
+            )
+        for v in vals:
+            if not isinstance(v, str) or not v.strip():
+                return targets, (
+                    f"argument {arg!r} holds an empty or non-string path"
+                )
+            targets.append(v)
+    return targets, None
 
 
 def _emit(decision: str, reason: str) -> None:
@@ -415,6 +475,18 @@ def _log_decision(
             command = _safe_str(tin.get("command") or "", 500)
         elif surface == "mcp":
             summary_fields = ("title", "parentId", "fileId", "mimeType", "newTitle")
+            if tool in MCP_TOOL_ARGS:
+                # Configured with an argument spec: record each target path
+                # (same per-path cap as a file target; at most 20 listed).
+                try:
+                    mt, _prob = _mcp_targets(tool, tin)
+                    if mt:
+                        target = _safe_str(mt[0], 2048)
+                        extra["targets"] = [_safe_str(t, 2048) for t in mt[:20]]
+                        if len(mt) > 20:
+                            extra["targets_n"] = len(mt)
+                except Exception:
+                    extra["targets_error"] = True
             try:
                 for key in summary_fields:
                     if key in tin:
@@ -1967,7 +2039,7 @@ def main() -> None:
             return "bash"
         if tool == "PowerShell":
             return "ps"
-        if tool in MCP_FILE_WRITE_TOOLS:
+        if tool in MCP_FILE_WRITE_TOOLS or tool.startswith("mcp__"):
             return "mcp"
         return "gate"
 
@@ -1983,6 +2055,14 @@ def main() -> None:
         allow(reason)
 
     if tool not in ("Edit", "Write", "NotebookEdit", "Bash", "PowerShell") + MCP_FILE_WRITE_TOOLS:
+        if tool.startswith("mcp__"):
+            # An MCP tool the operator has not configured: allowed (default-
+            # denying unknown tools is a separate, backlogged item), but a row
+            # is logged so every MCP call the hook sees is on the record.
+            gated_allow(
+                f"plan-gate: MCP tool {tool!r} is not in PLAN_GATE_MCP_WRITE_TOOLS.",
+                "mcp_unconfigured",
+            )
         allow(f"plan-gate: tool {tool!r} is outside the gated set.")
 
     # === Bypasses BEFORE active-plan check ===
@@ -2109,6 +2189,7 @@ def main() -> None:
         if w_problem:
             gated_deny(w_problem[0], class_=w_problem[1])
 
+    mcp_plan_targets: list[str] = []
     if tool in MCP_FILE_WRITE_TOOLS:
         # Distinguish "empty payload" from "non-empty, also denied" in telemetry.
         # No read-only equivalent: every external-state write is mutating.
@@ -2117,6 +2198,39 @@ def main() -> None:
                 f"plan-gate: MCP tool {tool!r} has empty tool_input.",
                 class_="empty_input",
             )
+        if tool in MCP_TOOL_ARGS:
+            # Tool with an argument spec: every target is checked exactly like
+            # an Edit/Write file_path (log self-protection, always-writable,
+            # then allowed_paths below). All must pass.
+            mcp_targets, mcp_problem = _mcp_targets(tool, tool_input)
+            if mcp_problem:
+                gated_deny(
+                    f"plan-gate: MCP tool {tool!r}: {mcp_problem} (configured "
+                    f"path argument(s): {', '.join(MCP_TOOL_ARGS[tool])}). "
+                    f"Failing closed.",
+                    class_="mcp_target",
+                )
+            for mt in mcp_targets:
+                if _is_under_log_dir(mt):
+                    gated_deny(
+                        f"plan-gate: {mt} is under PLAN_GATE_LOG_DIR; the gate "
+                        f"never authorizes gated writes to its own decision log.",
+                        class_="log_self_protect",
+                    )
+            for mt in mcp_targets:
+                extra_reason = _extra_write_target_checks(mt)
+                if extra_reason:
+                    gated_deny(extra_reason, class_="mcp_target")
+            mcp_plan_targets = [
+                mt for mt in mcp_targets
+                if not _under_any(norm(os.path.normpath(mt)), ALWAYS_WRITABLE_DIRS)
+            ]
+            if not mcp_plan_targets:
+                gated_allow(
+                    f"plan-gate: all {len(mcp_targets)} MCP target(s) are under "
+                    f"an always-writable directory.",
+                    "always_writable",
+                )
 
     # === Session-CWD-aware roots ===
     # Hoisted above the active-plan check so find_active_plans() can filter by
@@ -2312,8 +2426,24 @@ def main() -> None:
             f"({plan_path.name}). Command: {cmd[:200]}"
         )
 
+    if tool in MCP_TOOL_ARGS:
+        resolved_n = {norm(rp) for rp in resolved_paths}
+        for mt in mcp_plan_targets:
+            if norm(os.path.normpath(mt)) not in resolved_n:
+                gated_deny(
+                    f"plan-gate: MCP tool {tool!r} target {mt} is NOT in "
+                    f"allowed_paths of active plan ({plan_path.name}). An MCP "
+                    f"write tool's configured path arguments are checked like "
+                    f"Edit/Write. Update the plan or stop."
+                )
+        gated_allow(
+            f"plan-gate: all {len(mcp_plan_targets)} MCP target(s) of {tool!r} "
+            f"match allowed_paths.",
+            "allowed_paths",
+        )
+
     if tool in MCP_FILE_WRITE_TOOLS:
-        # Conservative default-DENY. No opt-in surface here; the premise is no
+        # Conservative default-DENY (a tool with no argument spec). No opt-in surface here; the premise is no
         # external-state writes during a gated unit of work. Telemetry falsifies
         # that premise — if legitimate usage appears, add an `allowed_mcp_tools`
         # opt-in surface (v2). The empty-input early-deny was applied above.

@@ -978,6 +978,207 @@ class BashSegmentTests(unittest.TestCase):
         ])
 
 
+class McpPathTests(unittest.TestCase):
+    """PLAN_GATE_MCP_WRITE_TOOLS entries may be `tool:arg` / `tool:arg1+arg2`:
+    every path in the named arguments is checked like an Edit/Write file_path.
+    A bare tool name stays default-denied."""
+
+    TOOL = "mcp__fs__write_file"
+    MOVE = "mcp__fs__move"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self.plans = self.root / "plans"
+        self.plans.mkdir()
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.logs = self.root / "logs"
+        self.a = (self.work / "a.txt").as_posix()
+        self.b = (self.work / "b.txt").as_posix()
+        self.c = (self.work / "c.txt").as_posix()
+        self.cfg = "mcp__fs__write_file:path,mcp__fs__move:source+destination,mcp__fs__multi:paths"
+        write_active_plan(self.plans, self.a)
+        self.add_paths(self.b)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def add_paths(self, *extra):
+        txt = (self.plans / "active.md").read_text(encoding="utf-8")
+        txt = txt.replace("allowed_commands:", "".join("  - %s\n" % e for e in extra)
+                          + "allowed_commands:")
+        (self.plans / "active.md").write_text(txt, encoding="utf-8")
+
+    def call(self, tool, tool_input, cfg=None, **kw):
+        env = {"PLAN_GATE_MCP_WRITE_TOOLS": self.cfg if cfg is None else cfg}
+        env.update(kw.pop("extra_env", {}))
+        kw.setdefault("cwd", self.work)
+        return run_gate({"tool_name": tool, "tool_input": tool_input}, self.plans,
+                        extra_env=env, **kw)
+
+    def assertDenied(self, tool, tool_input, contains=None, **kw):
+        p = self.call(tool, tool_input, **kw)
+        self.assertEqual(decision(p), "deny", "should DENY: %r %r\n%s" % (tool, tool_input, p.stdout))
+        if contains:
+            self.assertIn(contains, p.stdout)
+        return p
+
+    def assertAllowed(self, tool, tool_input, **kw):
+        p = self.call(tool, tool_input, **kw)
+        self.assertEqual(decision(p), "allow", "should ALLOW: %r %r\n%s" % (tool, tool_input, p.stdout))
+        return p
+
+    def rows(self):
+        text = (self.logs / "plan-gate-decisions.log").read_text(encoding="utf-8")
+        return [json.loads(l) for l in text.splitlines()]
+
+    def test_single_arg_allowed_path_passes(self):
+        self.assertAllowed(self.TOOL, {"path": self.a, "content": "x"})
+
+    def test_single_arg_out_of_plan_denies(self):
+        self.assertDenied(self.TOOL, {"path": self.c, "content": "x"},
+                          contains="NOT in allowed_paths")
+
+    def test_multi_arg_all_must_pass(self):
+        self.assertAllowed(self.MOVE, {"source": self.a, "destination": self.b})
+        self.assertDenied(self.MOVE, {"source": self.a, "destination": self.c})
+        self.assertDenied(self.MOVE, {"source": self.c, "destination": self.b})
+
+    def test_list_of_strings_every_string_is_a_target(self):
+        self.assertAllowed("mcp__fs__multi", {"paths": [self.a, self.b]})
+        self.assertDenied("mcp__fs__multi", {"paths": [self.a, self.c]})
+
+    def test_bad_argument_values_deny(self):
+        for ti in ({}, {"content": "x"}, {"path": ""}, {"path": "   "}, {"path": None},
+                   {"path": 5}, {"path": {"x": 1}}, {"path": True}):
+            self.assertDenied(self.TOOL, ti)
+        for paths in ([], [""], [self.a, ""], [self.a, 3], [self.a, None], [[self.a]]):
+            self.assertDenied("mcp__fs__multi", {"paths": paths})
+        # one good, one missing argument of a two-argument spec
+        self.assertDenied(self.MOVE, {"source": self.a})
+        self.assertDenied(self.MOVE, {"source": self.a, "destination": ""})
+
+    def test_bad_argument_deny_names_the_argument(self):
+        p = self.assertDenied(self.TOOL, {"content": "x"}, contains="'path'")
+        self.assertIn("Failing closed", p.stdout)
+
+    def test_bare_entry_is_default_denied_even_for_allowed_paths(self):
+        self.assertDenied(self.TOOL, {"path": self.a}, cfg=self.TOOL,
+                          contains="default-denied")
+        self.assertDenied(self.TOOL, {"path": self.a}, cfg=self.TOOL + ":")
+
+    def test_bare_entry_wins_over_spec_for_same_tool(self):
+        self.assertDenied(self.TOOL, {"path": self.a},
+                          cfg=self.TOOL + ":path," + self.TOOL)
+        self.assertDenied(self.TOOL, {"path": self.a},
+                          cfg=self.TOOL + "," + self.TOOL + ":path")
+
+    def test_spec_whitespace_and_repeats_are_tolerated(self):
+        cfg = " mcp__fs__move : source + destination , "
+        self.assertAllowed(self.MOVE, {"source": self.a, "destination": self.b}, cfg=cfg)
+        self.assertDenied(self.MOVE, {"source": self.a, "destination": self.c}, cfg=cfg)
+        cfg2 = "mcp__fs__move:source,mcp__fs__move:destination"
+        self.assertDenied(self.MOVE, {"source": self.a, "destination": self.c}, cfg=cfg2)
+
+    def test_empty_tool_input_still_denies(self):
+        self.assertDenied(self.TOOL, {}, contains="empty tool_input")
+
+    def test_log_dir_target_denies(self):
+        self.logs.mkdir()
+        logfile = (self.logs / "plan-gate-decisions.log").as_posix()
+        self.add_paths(logfile)
+        p = self.assertDenied(self.TOOL, {"path": logfile}, log_dir=self.logs,
+                              contains="PLAN_GATE_LOG_DIR")
+        self.assertEqual(self.rows()[-1]["class"], "log_self_protect")
+        # one log-dir target among good ones denies the whole call
+        self.assertDenied(self.MOVE, {"source": self.a, "destination": logfile},
+                          log_dir=self.logs)
+
+    def test_always_writable_targets_pass_without_a_plan_entry(self):
+        aw = self.root / "mem"
+        aw.mkdir()
+        env = {"PLAN_GATE_ALWAYS_WRITABLE": str(aw)}
+        note = (aw / "n.md").as_posix()
+        self.assertAllowed(self.TOOL, {"path": note}, extra_env=env)
+        # mixed: the always-writable one passes, the other still needs the plan
+        self.assertAllowed(self.MOVE, {"source": note, "destination": self.a}, extra_env=env)
+        self.assertDenied(self.MOVE, {"source": note, "destination": self.c}, extra_env=env)
+
+    def test_always_writable_works_before_any_plan_exists(self):
+        aw = self.root / "mem"
+        aw.mkdir()
+        (self.plans / "active.md").unlink()
+        env = {"PLAN_GATE_ALWAYS_WRITABLE": str(aw)}
+        self.assertAllowed(self.TOOL, {"path": (aw / "n.md").as_posix()}, extra_env=env)
+        self.assertDenied(self.TOOL, {"path": self.a}, extra_env=env,
+                          contains="no plan file")
+
+    def test_dotdot_cannot_ride_an_always_writable_prefix(self):
+        aw = self.root / "mem"
+        aw.mkdir()
+        sneaky = aw.as_posix() + "/../work/c.txt"
+        self.assertDenied(self.TOOL, {"path": sneaky},
+                          extra_env={"PLAN_GATE_ALWAYS_WRITABLE": str(aw)})
+
+    def test_no_active_plan_denies(self):
+        (self.plans / "active.md").unlink()
+        self.assertDenied(self.TOOL, {"path": self.a}, contains="no plan file")
+
+    def test_relative_target_never_matches_an_absolute_entry(self):
+        self.assertDenied(self.TOOL, {"path": "a.txt"})
+
+    def test_unconfigured_mcp_tool_allowed_and_logged(self):
+        p = self.assertAllowed("mcp__other__read", {"q": "x"}, log_dir=self.logs)
+        (row,) = self.rows()
+        self.assertEqual((row["decision"], row["surface"], row["class"], row["tool"]),
+                         ("allow", "mcp", "mcp_unconfigured", "mcp__other__read"))
+
+    def test_unconfigured_mcp_allow_row_respects_deny_only_mode(self):
+        self.assertAllowed("mcp__other__read", {"q": "x"}, log_dir=self.logs,
+                           extra_env={"PLAN_GATE_LOG_DECISIONS": "deny"})
+        self.assertFalse((self.logs / "plan-gate-decisions.log").exists())
+
+    def test_non_mcp_unknown_tool_still_unlogged(self):
+        self.assertAllowed("Read", {"file_path": self.a}, log_dir=self.logs)
+        self.assertFalse((self.logs / "plan-gate-decisions.log").exists())
+
+    def test_unconfigured_mcp_allowed_with_no_plan(self):
+        (self.plans / "active.md").unlink()
+        self.assertAllowed("mcp__other__read", {"q": "x"})
+
+    def test_log_rows_record_tool_and_each_target(self):
+        self.assertAllowed(self.MOVE, {"source": self.a, "destination": self.b},
+                           log_dir=self.logs)
+        self.assertDenied("mcp__fs__multi", {"paths": [self.a, self.c]}, log_dir=self.logs)
+        ok, no = self.rows()
+        self.assertEqual((ok["surface"], ok["tool"], ok["decision"]), ("mcp", self.MOVE, "allow"))
+        self.assertEqual(ok["extra"]["targets"], [self.a, self.b])
+        self.assertEqual(ok["target"], self.a)
+        self.assertEqual(no["extra"]["targets"], [self.a, self.c])
+        self.assertEqual(no["decision"], "deny")
+
+    def test_log_rows_cap_target_length_and_count_and_omit_content(self):
+        long_path = (self.work / ("d" * 3000)).as_posix()
+        many = [(self.work / ("f%d.txt" % i)).as_posix() for i in range(25)]
+        self.assertDenied("mcp__fs__multi", {"paths": [long_path] + many, "content": "SECRET-BODY"},
+                          log_dir=self.logs)
+        (row,) = self.rows()
+        self.assertEqual(len(row["extra"]["targets"]), 20)
+        self.assertEqual(row["extra"]["targets_n"], 26)
+        self.assertLessEqual(len(row["extra"]["targets"][0]), 2048)
+        self.assertNotIn("SECRET-BODY", json.dumps(row))
+
+    def test_row_for_bad_argument_logs_without_targets(self):
+        self.assertDenied(self.TOOL, {"content": "SECRET-BODY"}, log_dir=self.logs)
+        (row,) = self.rows()
+        self.assertEqual(row["class"], "mcp_target")
+        self.assertNotIn("SECRET-BODY", json.dumps(row))
+
+    def test_bypass_honored(self):
+        self.assertAllowed(self.TOOL, {"path": self.c}, extra_env={"PLAN_GATE_BYPASS": "on"})
+
+
 class WriterScriptTests(unittest.TestCase):
     """A python/python3/py segment running a writer script (built-in:
     atomic-write.py) is a file write to its target argument, gated like a `>`

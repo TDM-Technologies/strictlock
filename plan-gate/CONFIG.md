@@ -13,13 +13,34 @@ everything.
 | `PLAN_GATE_ALWAYS_WRITABLE` | no | `os.pathsep`-separated list of directories that are *always* writable regardless of plan state. Intended for the plans dir itself and any agent-memory dir that never ships. Same blast radius as plan files — keep it tight. |
 | `PLAN_GATE_LOG_DIR` | no | Directory for the append-only, hash-chained decision log (`plan-gate-decisions.log`). This log is your audit trail; if unset, no log is written. |
 | `PLAN_GATE_LOG_DECISIONS` | no | `all` (default) records every decision on a gated surface, allow and deny; `deny` records denials plus emergency-bypass rows only. |
-| `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated list of MCP tool names that modify external state (e.g. a cloud-drive create/copy tool). When set, those tools are **default-denied** so they can't evade the gate. |
+| `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated MCP tools that modify external state. Each entry is `tool` (a bare name: **default-denied**, arguments never read) or `tool:arg` / `tool:arg1+arg2` (the argument(s) that hold target paths; see below). |
 | `PLAN_GATE_WRITER_SCRIPTS` | no | Extra "writer scripts", comma-separated `name.py:argpos`. A Bash/PowerShell command that runs `python`/`python3`/`py` on a listed script is treated as a file write to that script's target argument and gated like a `>` redirect target (see below). `atomic-write.py:1` is built in. A malformed value **fails closed**. |
 | `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` / `1` / `true` / `yes` (case-insensitive) disables the gate for the call (set it inline per command; every use is logged). Also honored when the gate itself faults. Use deliberately. |
 | `_PLAN_GATE_TEST_PLANS_DIR` | no | Test-only override that redirects the plans scan to a temp dir. Not a security boundary — used by the test suite. |
 
 `os.pathsep` is `;` on Windows and `:` on Linux/macOS — it applies to
 `PLAN_GATE_ALWAYS_WRITABLE`.
+
+## MCP write tools
+
+`PLAN_GATE_MCP_WRITE_TOOLS=mcp__fs__write_file:path,mcp__fs__move:source+destination,mcp__drive__create`
+
+- A tool **with** an argument spec: every path in the named argument(s) is a target. A string
+  argument is one target; a list-of-strings argument makes every string a target. Each target
+  is checked exactly like an Edit/Write `file_path`: log self-protection, then always-writable
+  directories, then the active plan's `allowed_paths` (which also applies the worktree claim).
+  **All** targets must pass. A missing, empty or non-string argument (or a non-string list
+  element) is denied (decision-log class `mcp_target`). Relative paths never match an
+  `allowed_paths` entry.
+- A tool **without** a spec (a bare name, or `tool:` with no argument names): denied while a
+  plan is active, as before. If a tool appears both bare and with a spec, the bare entry wins.
+- MCP tools not listed are allowed, as before, but a row (`mcp_unconfigured`) is written to the
+  decision log when logging is on (subject to `PLAN_GATE_LOG_DECISIONS`).
+- The hook only sees MCP calls if the harness matcher routes them to it: the example
+  `settings.json` matcher is `Edit|Write|NotebookEdit|Bash|PowerShell|mcp__.*`.
+- Decision-log rows for a tool with a spec carry the tool name, `target` (the first target),
+  and `extra.targets` (each target, up to 20, each capped at 2048 characters; `extra.targets_n`
+  gives the total when more). Tool arguments other than the named paths are never logged.
 
 ## Writer scripts
 
