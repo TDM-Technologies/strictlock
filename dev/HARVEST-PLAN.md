@@ -73,9 +73,9 @@ the rest landing as **labeled sibling families** so the headline doesn't blur:
 
 | Family | What it is | Members (✓ = shipped) |
 |---|---|---|
-| **Gates** | Fail-closed / proposal-side authorization at the tool boundary | plan-gate ✓, commit-msg-gate ✓, memory-cap ✓, blast-radius, smoke-only ESLint, generated-sink gates, binary-sink resolver, test-protection co-commit, pre-WP currency, reversibility-tiers |
+| **Gates** | Fail-closed / proposal-side authorization at the tool boundary | plan-gate ✓, commit-msg-gate ✓, memory-cap ✓, blast-radius, smoke-only ESLint ✓, generated-sink gates ✓, binary-sink resolver ✓, test-protection co-commit ✓, pre-WP currency ✓ (shipped as a `rituals/` prose rubric), reversibility-tiers |
 | **Hygiene** | State-file / context / worktree drift control | externalized-memory ✓ (+ projection bundle), memory-cap fix, autohygiene, read-discipline KPI |
-| **Rituals** | Kickoff / close-out / plan-authoring discipline | session-ritual checklists, WP-interaction analysis, skill-learnings siblings |
+| **Rituals** | Kickoff / close-out / plan-authoring discipline | session-ritual checklists ✓, WP-interaction analysis ✓, pre-WP currency check ✓ (all in `rituals/`), skill-learnings siblings |
 | **Meta-process** | Governance-of-governance (the marquee layer) | rule-archaeology/Cleanup-Day, ROI gate, harvest ritual, liveness scanner, escalation substrate, auto-commit |
 | **Docs** | Reference material that lowers adoption friction | plan-authoring guide, compliance-mapping, plans-into-repo examples |
 | **Concurrency** | Multi-session coordination primitives | scope-lease (+ resolver/scanner straddle Gates/Meta) |
@@ -110,10 +110,10 @@ Dispositions: **harvest-now** (clean, ready) · **planned** (ship soon; mostly p
 | liveness scanner (conductor-scan) | Meta/Conc | H | M | harvest-now | 3 |
 | ~~scope-lease (HIPAAPath mtime hint)~~ | Concurrency | L | L | superseded by vault lease above | — |
 | escalation-briefing substrate (conductor-escalate) | Meta | M | M | exploring (needs LLM "Layer 2") | later |
-| WP-interaction analysis | Rituals | H | H | harvest-now (discipline/checklist, no code) | 4 |
-| pre-WP currency check | Gates/Rituals | H | M | planned (prose rubric) | 4 |
-| test-protection co-commit guard | Gates | M | M | planned (clean extraction) | 4 |
-| session-ritual checklists (kickoff/close) | Rituals | H | M | planned | 4 |
+| WP-interaction analysis | Rituals | H | H | **shipped** — `rituals/` (PR #14) | 4 |
+| pre-WP currency check | Gates/Rituals | H | M | **shipped** — `rituals/` prose rubric (PR #14) | 4 |
+| test-protection co-commit guard | Gates | M | M | **shipped** — `test-protection-guard/` (PR #7) | 4 |
+| session-ritual checklists (kickoff/close) | Rituals | H | M | **shipped** — `rituals/` (PR #14) | 4 |
 | reversibility-tiered authorization | Gates | M | M | exploring (needs auto-commit) | later |
 | auto-commit / drift | Meta | M | L | exploring | later |
 | autohygiene (worktree housekeeping) | Hygiene | M | M | exploring | later |
@@ -217,6 +217,7 @@ only (for the web-UI-merge placement variant + circuit-breaker maturity if neede
   escalation substrate as exploring.
 - **Wave 4 — rituals + remaining gates.** session-ritual checklist templates · WP-
   interaction analysis · pre-WP currency check · test-protection co-commit guard.
+  *(All four built: test-protection-guard PR #7; the three prose items as `rituals/`, PR #14.)*
 - **Later / experimental.** reversibility-tiers + auto-commit (need a 2–3 month evidence
   window together) · autohygiene · read-discipline doc · skill-learnings template ·
   plans-into-repo + compound-FP analysis (both blocked on off-machine import).

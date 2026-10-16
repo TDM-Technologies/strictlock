@@ -1,20 +1,16 @@
 # StrictLock — state (the shared blackboard)
 
 ## Meta
-- last_session: 2026-10-16 (claims-truth PR 2 of 2 — Stage 2 code + restored claims; see [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) §7 ledger and §8 dispositions)
+- last_session: 2026-10-16 (claims-truth PR 1 + PR 2 merged; Wave 4 rituals rebased onto main in PR #14)
 - agent: Claude Code
-- git_ref: branch `feat/claims-truth-code` (local, **not pushed**), stacked on `docs/claims-truth-reword`
-  (PR 1) over origin/main 81cad04 (the tip after PR #11, the authorizations record, and PR #12). Full suite run
-  on this branch: **367 Python tests across 10 suites** (plan-gate 78 · memory-cap 35 · externalized-memory
-  7 + 38 · generated-sink-commit-gate 13 · generated-sink-prepush-gate 12 · scope-lease 43 · sink-resolver
-  39 · liveness-scan 46, 1 skipped (symlink test) · test-protection-guard 56) **+ 30 shell checks**
-  (commit-msg-gate), all green on macOS. **Windows and macOS CI legs have not run yet** — they run for the
-  first time on this PR's first CI run (CI is now 13 jobs: 9 Python matrix + node + 2 shell + secret-scan).
-  Wave 3 (`scope-lease` + `sink-resolver` + `liveness-scan`) shipped via PR #6 (`d17e1a9`); README +
-  COMPLIANCE (§K/§L) + CI + roadmap all registered.
-- touched (this session): README.md, roadmap.md, COMPLIANCE.md, plan-gate/*, memory-cap/*,
-  commit-msg-gate/*, generated-sink-*/*, scope-lease/*, sink-resolver/*, liveness-scan/*,
-  test-protection-guard/*, externalized-memory/DESIGN.md, dev/*, .github/workflows/ci.yml
+- git_ref: origin/main **0e5746a** (PR #17 merge) — on top of 720a24e (PR #15 merge) and PR #16 (park note).
+  Full suite on main: **367 Python tests across 10 test files** (plan-gate 78 · memory-cap 35 ·
+  externalized-memory 7 + 38 · generated-sink-commit-gate 13 · generated-sink-prepush-gate 12 · scope-lease 43 ·
+  sink-resolver 39 · liveness-scan 46, 1 skipped · test-protection-guard 56) **+ 30 shell checks**
+  (commit-msg-gate). **CI: 13 jobs, all green on Windows, macOS and Ubuntu** (9-entry Python matrix + node +
+  2 shell + secret-scan) at PR #17's head `91844d8`.
+- touched (this session): README.md, roadmap.md, rituals/*, dev/BACKLOG.md, dev/STATE.md,
+  dev/HARVEST-SOURCE-MAP.md, dev/HARVEST-PLAN.md, dev/WORK-QUEUE.md
 
 ## Next Action
 **Pause ended — project thawed 2026-09-29.** The ❄ pause (2026-07-05, link-only evidence during the
@@ -24,21 +20,23 @@ PR #11** (one unified, hash-chained `plan-gate-decisions.log`, allow+deny, all s
 log-dir self-protection; spec [AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-RECORD-SPEC.md)). That closed
 the `paper-§6-reconcile` thread.
 
-**Current focus (2026-10-16):** the claims-truth pass ([CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md), decisions
-made 2026-07-07): **PR 1** (docs-only rewords) is in review; **PR 2** (`feat/claims-truth-code`: the Stage 2
-code, then the strong wording restored where code and a test back it) is built locally and not pushed.
-Pending: its first CI run (Windows/macOS legs unproven until then) and Tim's merge call. What was
-and was not built is in CLAIMS-FIX-SPEC §8; leftovers are in BACKLOG "Open after Stage 2". Open-work
-inventory: [WORK-QUEUE.md](WORK-QUEUE.md). Merge to public main stays with Tim.
+**Current state (2026-10-16):** the claims-truth pass ([CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md), decisions
+made 2026-07-07) is **merged**: **PR #15** (docs-only rewords, merge `720a24e`) and **PR #17** (Stage 2 code +
+strong wording restored where code and a test back it, merge `0e5746a`). PR #17's first Windows runs found two
+real bugs, both fixed before merge: scope-lease sent git its stdin in text mode (CRLF broke every lease
+transaction on Windows), and the externalized-memory projection CLI wrote cp1252/CRLF to Windows pipes (now
+UTF-8/LF on every OS). What was and was not built is in CLAIMS-FIX-SPEC §8; leftovers are in BACKLOG "Open
+after Stage 2". **Wave 4 remainder (the `rituals/` prose ports) is in review as PR #14.** Next harvest: Wave 2
+(marquee, last). Open-work inventory and its close-out: [WORK-QUEUE.md](WORK-QUEUE.md). Merge to public main
+stays with Tim.
 
 1. **Wave 3 — DONE + LIVE** (PR #6, `d17e1a9`, 2026-06-25): scope-lease + sink-resolver + liveness-scan.
-2. **Wave 4 — 1 of 4 SHIPPED:** the **test-protection co-commit guard is DONE + MERGED** (PR #7, 43 tests,
-   2026-06-30; this file previously still called it "next build" — stale, corrected 2026-07-05). The
-   **harvest source map** also landed (PR #8, `dev/HARVEST-SOURCE-MAP.md`).
-3. **Wave 4 remainder — the 3 prose items:** session-ritual checklists · WP-interaction
-   analysis · pre-WP currency check. **Faithful ports, not reconstruction:** sources are STAGED in the
-   maintainer's local staging import (all four `*-hipaapath` skills + ~58KB learnings, imported
-   2026-06-26 — see the corrected HARVEST-SOURCE-MAP §OFF-MACHINE/STAGED). Then Wave 2 (marquee IP, last).
+2. **Wave 4 — 4 of 4 built:** the **test-protection co-commit guard** (PR #7, 2026-06-30) plus the three prose
+   items — session-ritual checklists (kickoff + close-out), WP-interaction analysis, pre-WP currency check —
+   shipped as `rituals/` in **PR #14 (in review)**. Faithful ports of the maintainer's staged `start-` /
+   `close-` skills (+ learnings) and two private design docs, genericized; two Opus review lenses
+   (public-safety, fidelity) → 10 blocking findings fixed. The **harvest source map** also landed (PR #8).
+3. **Next:** Wave 2 (marquee IP, last) — design-heavy; needs Tim's direction before building.
 4. **(Done)** `eslint-plugin-strictlock` PUBLISHED to npm — `0.1.0` (2026-06-25) + `0.1.1` (2026-07-05),
    acct `downsmullen`: <https://www.npmjs.com/package/eslint-plugin-strictlock>.
 
@@ -97,15 +95,19 @@ HIPAAPath, exact paths, and whether each item is already safe. In brief:
   (allow+deny, hash-chained, verifier, log self-protection) makes the paper's §6 claims code-backed. Still
   open from that family at the time: the memory-cap decision-log mirror and the scope-lease / sink-resolver log
   gap-fills (CLAIMS-FIX-SPEC §1, Q3) — built in PR 2 2026-10-16, apart from the leftovers in BACKLOG.
-- claims-truth-pass — **PR 1 in review; PR 2 built locally 2026-10-16 (not pushed)** —
+- claims-truth-pass — **DONE 2026-10-16** — PR #15 (merge `720a24e`) + PR #17 (merge `0e5746a`);
   [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) §6, ledger in §7, dispositions in §8.
-- ci-os-matrix — built 2026-10-16 (9-entry Python matrix, shell on ubuntu + macOS); Windows/macOS legs run
-  for the first time on PR 2's first CI run.
+- harvest-wave-4 — **4 of 4 built** — test-protection-guard (PR #7) + `rituals/` (PR #14, in review).
+- ci-os-matrix — **DONE 2026-10-16** (PR #17) — 13 CI jobs green on Windows, macOS and Ubuntu; the first
+  Windows runs found and fixed two real bugs (scope-lease stdin CRLF, projection CLI encoding).
 - plans-into-repo — pending — import the historical plan files as worked examples (off-machine).
 - false-positive-analysis — pending — quantify read-only compound denies from real deny-log data (off-machine).
 - reversibility-tiers / auto-commit — exploring (later) — need a shared 2–3 month evidence window.
 
 ## Decisions
+- 2026-10-16 — **Claims-truth PR 1 + PR 2 merged by Tim** (#15 → `720a24e`, #17 → `0e5746a`). CI 13/13 green
+  across Windows/macOS/Ubuntu before merge. **Wave 4 rituals (PR #14) rebased onto that main** with the Wave 4
+  dev-doc close-out; merge stays with Tim.
 - 2026-10-16 — **Claims-truth PR 2 (Stage 2) integrated** on `feat/claims-truth-code` (four piece branches
   merged `--no-ff`: plan-gate, state-modules, hook-modules, ci; no conflicts). Strong wording restored in
   README, COMPLIANCE and module docs where code + a test back it; interim wording kept for what was not built

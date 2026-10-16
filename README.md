@@ -37,13 +37,14 @@ emits a per-decision audit trail as a byproduct — the evidence SOC 2 and ISO a
 | [**sink-resolver**](sink-resolver/) | Concurrency / Gates. Deterministic auto-resolution of generated-file merge conflicts — a pure render has no merge, it has a *regenerate*. `merge=binary` on the sink + a `resolve` that regenerates from the merged sources, byte-checks, and **escalates any non-sink conflict**, plus a `check` CI backstop for web-UI merges. A coverage guard refuses to finalize a sink the generator didn't actually rewrite. Sound only for a pure, `--check`-able render — loud precondition on the tin. | ✅ v1 |
 | [**liveness-scan**](liveness-scan/) | Concurrency / Meta. A read-only reporter that triages a fleet of agent worktrees — running / stalled / done-unmerged / ambiguous / idle — on a heartbeat-or-commit-mtime signal, attributing each to its plan-gate session. **Report-only: never reaps, exits 0 always**; ambiguous stalls escalate with a non-destructive recovery command. Completes the concurrency family. | ✅ v1 |
 | [**test-protection-guard**](test-protection-guard/) | Gates. An **advisory** co-commit-coupling detector: when an *existing* test assertion is changed/removed in the same commit as non-test source — the "rewrite the failing test to match the buggy output" move — it flags + logs it unless a `TEST-CORRECTNESS:` justification is present. **Always allows, never blocks**; the teeth are the close-out log review. Dual-mode: a Claude Code `PreToolUse` hook *or* a universal git `pre-commit` hook over one shared core. The detective complement to the born-weak `eslint-plugin-strictlock`. | ✅ v1 |
+| [**rituals**](rituals/) | Rituals. **Prose, not a gate** — it enforces nothing. The kickoff and close-out checklists, the unit-of-work interaction analysis (prior-unit deferred-marker grep + peer-unit collision pass), and the pre-work currency check: the judgment-shaped discipline around a plan that no hook can check, wired to the gates that *can* back each step ([`plan-gate`](plan-gate/), [`commit-msg-gate`](commit-msg-gate/), [`externalized-memory`](externalized-memory/), [`scope-lease`](scope-lease/)). Key steps carry a "why this step exists" note from a real miss. | ✅ v1 |
 
 Each module is **standalone** — adopt one without the others — plain files with no
 machine-specific defaults baked in; the Python and shell gates are **configured entirely by
 environment variables** (the ESLint plugin takes ESLint rule options instead).
 
-See [**roadmap.md**](roadmap.md) for the planned sibling modules (session-ritual
-checklists, the governance-of-governance work, and more).
+See [**roadmap.md**](roadmap.md) for the planned sibling modules (the governance-of-governance
+work and more) and what has shipped since launch.
 
 ## The thesis, in four moves
 

@@ -4,9 +4,21 @@ Every open item, checked against `main` @ 81cad04 on 2026-10-16. Sources: the cl
 (`dev/CLAIMS-FIX-SPEC.md`, previously only on an unmerged branch), `dev/BACKLOG.md`, `dev/STATE.md`,
 and the maintainer's private project notes. Draft for Tim's review — order and grouping are re-arguable.
 
-**Status 2026-10-16:** Stage 1 (items 1–3 below) is carried by PR 1 on branch
-`docs/claims-truth-reword` (in review): the claims-fix spec now lives at `dev/CLAIMS-FIX-SPEC.md`
-with a per-claim ledger (§7) that Stage 2 uses to restore the strong wording as code lands.
+## Close-out (2026-10-16)
+All three stages were run as one PR each; merging stayed with Tim.
+
+| Stage | PR | Disposition |
+|---|---|---|
+| 1 — make the public repo read true (docs) | #15 | **merged** (`720a24e`) — spec on main at `dev/CLAIMS-FIX-SPEC.md`, per-claim ledger §7 |
+| 2 — code that makes the stronger claims true | #17 | **merged** (`0e5746a`) — dispositions in CLAIMS-FIX-SPEC §8; CI 13/13 green on Windows/macOS/Ubuntu; two real Windows bugs fixed on the way |
+| 3 — Wave 4 remainder (three prose ports) | #14 | **in review** — `rituals/`, rebased onto main with the Wave 4 dev-doc close-out |
+
+Not built in Stage 2 (each kept its interim wording; tracked in BACKLOG "Open after Stage 2"): PowerShell
+compound/redirect handling, scope-lease denied-acquire rows, sink-resolver no-conflict/dry-run rows,
+memory-cap total caps for `NotebookEdit`, and a wider adversarial bypass-hunt pass. Design calls the
+2026-07-07 decisions did not cover are listed in PR #17's description for Tim.
+
+The tables below are the original 2026-10-16 inventory, kept as written.
 
 ## Stage 1 — make the public repo read true (no code; all decisions already made 2026-07-07)
 1. **Land the claims-fix spec on main** — it exists only on an unmerged branch.
@@ -40,8 +52,8 @@ internals on the way in.
 - **Blocked on the Windows machine:** plans-into-repo, false-positive analysis.
 - **Exploring, needs discussion first:** reversibility tiers, auto-commit, per-project tiering.
 - **Ready but unqueued:** secret / non-public spill gate.
-- **Hygiene note:** the unmerged branch that held the only copy of the claims-fix spec is safe
-  to reap only after Stage 1 item 1 lands.
+- **Hygiene note:** the unmerged branch that held the only copy of the claims-fix spec is now
+  safe to reap: Stage 1 item 1 landed with PR #15 (reaping is Tim's call).
 
 ## Standing rules for whoever runs this
 - Merging to public main stays with Tim (flagship + public claims). Agents open PRs only.

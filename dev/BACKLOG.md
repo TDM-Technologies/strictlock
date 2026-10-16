@@ -52,9 +52,11 @@ inversion (zero-fire telemetry = the guard working, not dead) and the trip-test 
 + harvest ritual as one governance narrative (`GOVERNANCE.md`) · blast-radius review-depth trigger
 (after pattern-config genericization).
 
-### Wave 4 — rituals + remaining gates — *1 of 4 shipped (test-protection-guard, PR #7)*
-**SHIPPED:** the test-protection co-commit guard (`test-protection-guard`, PR #7). **Still planned:**
-session-ritual checklist templates · WP-interaction analysis · pre-WP currency check.
+### Wave 4 — rituals + remaining gates — *4 of 4 built (PR #7 merged; PR #14 in review)*
+**SHIPPED:** the test-protection co-commit guard (`test-protection-guard`, PR #7). **In review (PR #14):** the
+three prose items as [`rituals/`](../rituals/) — session kickoff + close-out checklists, WP-interaction analysis,
+pre-WP currency check — faithful, genericized ports. Follow-ups: see *rituals follow-ups* under
+[Open after Stage 2](#open-after-stage-2-2026-10-16).
 
 ### Later / experimental
 reversibility-tiers + auto-commit (entries below; need a shared evidence window) · autohygiene ·
@@ -268,10 +270,10 @@ eliminates, spill risk).
 
 ## ci
 
-### OS test matrix — *built 2026-10-16 (Stage 2 / PR 2); first real run pending*
-The matrix is in `.github/workflows/ci.yml` (see [Done](#done)). **Open:** the Windows and macOS legs have
-not yet run on a real runner; the claim is "proven" only once the PR's first CI run is green, and any real
-failure there is iterated to green. The `macos-15-intel` runner choice for Python 3.8 is unverified.
+### OS test matrix — *DONE 2026-10-16 (PR #17, merged)*
+The matrix is in `.github/workflows/ci.yml` (see [Done](#done)): 13 jobs, all green on Windows, macOS and
+Ubuntu (incl. `macos-15-intel` for Python 3.8). Every Python test step runs even after an earlier one fails, so
+one run shows every module's failures. The first Windows runs found two real bugs, fixed before merge.
 Original scoping: CI ran ubuntu-only; add `windows-latest` + `macos-latest` to the
 Python matrix so the suite's OS-agnostic claim is **proven**, not just reviewed (the memory-cap
 CRLF test then runs on a real Windows box).
@@ -304,9 +306,16 @@ Built-but-narrower or deliberately not built in PR 2; each keeps its interim wor
 - **sink-resolver no-conflict `resolve` and dry-run rows** — not built; they still write no row.
 - **memory-cap total caps for `NotebookEdit`** — not evaluated (a notebook edit carries one cell, not the file).
 - **commit-msg-gate subject = first paragraph vs line 1** — unchanged (line 2+ is body); Tim's call.
-- **shellcheck on the commit-msg-gate additions** — not run locally; CI's shellcheck job is the first check.
+- **shellcheck on the commit-msg-gate additions** — not run locally; CI's shellcheck job passed on PR #17.
+- **rituals follow-ups (PR #14):** (1) a lessons-file template so adopters can grow per-checklist learnings
+  (HARVEST-PLAN "skill learnings siblings", still exploring); (2) a one-line COMPLIANCE.md pointer if a
+  procedural-controls row is ever added (skipped: COMPLIANCE maps gate evidence; `rituals/` enforces nothing).
 
 ## Done
+- **2026-10-16** — **Windows CI bring-up (PR #17)** — two real bugs fixed: scope-lease fed `git update-ref
+  --stdin` in text mode (CRLF → every lease transaction failed on Windows; now bytes); the externalized-memory
+  projection CLI wrote cp1252/CRLF to Windows pipes (now UTF-8/LF on every OS). Two test bugs fixed
+  (unquoted `C:\` paths in plan-gate test commands; `:` instead of `os.pathsep` in sink-resolver tests).
 - **2026-10-16** — **Claims-truth PR 2 (Stage 2) — code that makes the interim claims true.** Built: plan-gate
   segment-wise Bash checking + redirection-as-write + read-only list audit + deny-on-crash + worktree no-claim
   diagnostic; memory-cap decision log (`verify-log`), `NotebookEdit` baseline, opt-in total caps; scope-lease
@@ -316,7 +325,7 @@ Built-but-narrower or deliberately not built in PR 2; each keeps its interim wor
   per-worktree `--explain`, true WP-age ceiling; generated-sink-prepush-gate CI example. Strong wording restored
   where code + a test back it. See CLAIMS-FIX-SPEC §8.
 - **2026-10-16** — **ci-os-matrix** — built: Python job is a 9-entry matrix (ubuntu 3.8–3.12, windows 3.8 + 3.12,
-  macOS 3.8 + 3.12), shell job on ubuntu + macOS; **first real run on Windows/macOS is the PR's first CI run**.
+  macOS 3.8 + 3.12), shell job on ubuntu + macOS; **all 13 jobs green on Windows/macOS/Ubuntu before PR #17 merged**.
 - **2026-10-16** — **memory-cap decision-log mirror** — built (`MEMORY_CAP_DECISION_LOG=1`, hash-chained, `verify-log`).
 - **2026-10-16** — **COMPLIANCE.md discoverability** — closed: cross-linked from the root `README.md`
   (Design principles) and `roadmap.md`; moved here from the docs section (it had been marked *ready* long
