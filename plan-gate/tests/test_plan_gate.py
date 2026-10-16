@@ -1626,10 +1626,58 @@ class PowerShellTests(unittest.TestCase):
                     "Get-Content a >> b.txt", "Get-ChildItemX", "Get-Content-Evil x"):
             self.assertEqual(decision(self.ps(cmd)), "deny", cmd)
 
-    def test_fast_path_fallthrough_uses_normal_gating(self):
-        self.plan(commands=("Get-ChildItem | Select-Object",))
-        self.assertEqual(decision(self.ps("Get-ChildItem | Select-Object Name")), "allow")
-        self.assertEqual(decision(self.ps("Get-ChildItem | Remove-Item")), "deny")
+    def test_each_segment_must_be_read_only_or_allowed(self):
+        self.plan(commands=("npm test", "Select-Object"))
+        deny = ("npm test; Remove-Item -Recurse C:/x", "npm test && evil", "npm test || evil",
+                "npm test | evil", "npm test & evil", "npm test\nevil", "evil; npm test",
+                "npm testing", "Get-ChildItem | Remove-Item")
+        for cmd in deny:
+            self.assertEqual(decision(self.ps(cmd)), "deny", cmd)
+        allow = ("npm test", "npm test; npm test", "npm test && npm test -- --x",
+                 "Get-ChildItem | Select-Object Name",       # read-only + allowed
+                 "Get-ChildItem; npm test", "npm test\nGet-Location",
+                 "Get-ChildItem | Select-Object Name; npm test")
+        for cmd in allow:
+            self.assertEqual(decision(self.ps(cmd)), "allow", cmd)
+
+    def test_two_allowed_segments_allow(self):
+        self.plan(commands=("npm test", "npm run build"))
+        self.assertEqual(decision(self.ps("npm test; npm run build")), "allow")
+        self.assertEqual(decision(self.ps("npm test && npm run build | evil")), "deny")
+
+    def test_unplaceable_constructs_deny_even_after_an_allowed_prefix(self):
+        self.plan(commands=("npm test", "Get-Content"))
+        for cmd in ("npm test $(evil)", "npm test @(evil)", 'npm test "$(evil)"',
+                    "npm test { evil }", "npm test (evil)", "npm test `; evil",
+                    "npm test > out.txt", "npm test >> out.txt", "npm test 2> err.txt",
+                    "npm test < in.txt", "npm test 'unterminated", "Get-Content (evil)",
+                    "Get-Content a > b", "npm test @{a=1}"):
+            p = self.ps(cmd)
+            self.assertEqual(decision(p), "deny", cmd)
+        p = self.ps("npm test $(evil)")
+        self.assertIn("Failing closed", p.stdout)
+
+    def test_quoted_separators_do_not_split(self):
+        self.plan(commands=("npm test",))
+        self.assertEqual(decision(self.ps("npm test 'a; evil' \"b | c\"")), "allow")
+
+    def test_unchecked_file_writing_cmdlets_deny(self):
+        self.plan(commands=("npm test", "Out-File", "Set-Content", "Copy-Item"))
+        for cmd in ("Out-File x.txt", "npm test | Out-File x.txt", "Set-Content x 1",
+                    "Add-Content x 1", "New-Item x", "Copy-Item a b", "Move-Item a b",
+                    "& Out-File x", "sc x 1", "cp a b"):
+            p = self.ps(cmd)
+            self.assertEqual(decision(p), "deny", cmd)
+        self.assertIn("cannot check", self.ps("Out-File x.txt").stdout)
+
+    def test_call_operator_segment_matches_an_ampersand_entry(self):
+        self.plan(commands=("& python3",))
+        self.assertEqual(decision(self.ps("& python3 tool.py")), "allow")
+        self.assertEqual(decision(self.ps("& python3 tool.py; & evil")), "deny")
+
+    def test_no_plan_read_only_chain_still_allowed(self):
+        self.assertEqual(decision(self.ps("Get-ChildItem; Get-Location | Get-Content x")), "allow")
+        self.assertEqual(decision(self.ps("Get-ChildItem; Remove-Item x")), "deny")
 
     def test_doubled_quote_escapes_do_not_hide_a_writer(self):
         self.plan(commands=("python3",))

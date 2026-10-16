@@ -115,12 +115,20 @@ wrapper not listed above. Admit writers in `allowed_commands` only by the narrow
 - Decision-log class for these denials: `writer_script` (or `log_self_protect` for a log-dir
   target).
 
-**PowerShell:** the command is split on `; | & ( ) { }` and newlines (quotes, including the
-doubled-quote escape, are honored) only to find writer scripts. PowerShell redirections (`>`),
-`Out-File`, `Set-Content`, `Add-Content` and other cmdlet writes are **not** parsed or gated;
-they are controlled only by `allowed_commands`. The read-only fast path applies only to a single
-simple command; a command containing `; | & < > ( ) { }`, a newline or a backtick is checked
-against `allowed_commands` instead.
+**PowerShell:** checked segment by segment, like Bash. The command is split on `;`, `|`, `||`,
+`&`, `&&` and newlines outside quotes (single and double quotes, including the doubled-quote
+escape, are honored; a leading `&` call operator stays with its command). **Each segment** must
+be a known read-only command, or start with an `allowed_commands` entry **at a word boundary**
+(so `npm test` admits `npm test -- x` but not `npm testing`). Writer-script detection applies per
+segment. The gate refuses outright (fail closed, class `unparseable_command`) a command that
+contains anything it cannot check: a backtick, `$(` or `@(`, parentheses, a script block `{ }`,
+a redirection (`>`, `>>`, `2>`, `<`), or an unterminated quote. It also refuses (class
+`ps_unchecked_write`) a segment that runs a file-writing cmdlet whose target it cannot check
+(`Out-File`, `Set-Content`, `Add-Content`, `New-Item`, `Copy-Item`, `Move-Item`, `Tee-Object`,
+`Export-Csv`, `Export-Clixml` and their common aliases), even if `allowed_commands` lists it; use
+Edit/Write, which is gated by `allowed_paths`. Earlier versions matched the whole command against
+`allowed_commands` by prefix, so an allowed prefix followed by `; other-command` was admitted;
+that no longer works.
 
 ## Per-OS examples
 

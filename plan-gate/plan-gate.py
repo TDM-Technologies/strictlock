@@ -83,9 +83,10 @@ RULES
       A segment running a writer script (python atomic-write.py TARGET, see
       PLAN_GATE_WRITER_SCRIPTS) is a file write to TARGET, gated the same way.
   - PowerShell:
-      command must start with an entry in allowed_commands, OR be a known
-      read-only command (prefix-matched, NO compound parsing — list each shape
-      in allowed_commands; segment checking for PowerShell is a follow-up).
+      split on ; | || & && and newlines; EACH segment must be a known read-only
+      command or start (at a word boundary) with an allowed_commands entry.
+      Subexpressions, script blocks, backticks, redirection and file-writing
+      cmdlets (Out-File, Set-Content, ...) are refused (fail closed).
   - Bypass ordering: for Edit/Write the always-writable bypass runs BEFORE the
     active-plan check; for Bash/PowerShell the read-only bypass also runs BEFORE
     the active-plan check (so a session with no active plan can still inspect
@@ -231,10 +232,8 @@ READ_ONLY_BASH_PREFIXES = (
 )
 
 # Conservative PowerShell read-only bypass. PS commands that don't mutate state.
-# NO compound parsing for PS: if you need `Get-Foo; Get-Bar`, either use Bash or
-# list both shapes in the plan's allowed_commands explicitly. (PS has its own
-# compound semantics — `;` chains, `&&`/`||` in PS7+, the `Set-Location` alias,
-# here-strings, backtick escapes — that the Bash splitter below does not model.)
+# Matched per SEGMENT at a word boundary (see _ps_segments): a compound is
+# read-only only if every segment is.
 READ_ONLY_PS_PREFIXES = (
     "Get-ChildItem",
     "Get-Content",
@@ -2025,6 +2024,107 @@ def _tokenize_ps(cmd: str) -> list[list[str]]:
     return segs
 
 
+# --- PowerShell segments ------------------------------------------------------
+# Mirrors the Bash path: the command is split into simple commands and EACH must
+# independently be read-only or start with an allowed_commands entry. Anything the
+# splitter cannot place with confidence is refused (fail closed).
+_PS_UNCHECKED_WRITERS = (
+    "out-file", "set-content", "add-content", "new-item", "copy-item", "move-item",
+    "tee-object", "export-csv", "export-clixml",
+    "sc", "ac", "ni", "cpi", "cp", "copy", "mi", "mv", "move", "tee",
+)
+
+
+def _ps_segments(cmd: str):
+    """(segments, problem). Segments are the raw simple-command texts, split on
+    ; | || & && and newlines outside quotes (quotes, including the doubled-quote
+    escape, are honored). A leading `&` (call operator) stays in its segment.
+    `problem` is a message when the command contains something the gate cannot
+    check: a backtick, $( or @( , a script block or parenthesis, a redirection
+    (> >> 2> <), or an unterminated quote."""
+    segs: list[str] = []
+    start = 0
+    i, n = 0, len(cmd)
+
+    def push(end):
+        t = cmd[start:end].strip()
+        if t:
+            segs.append(t)
+
+    while i < n:
+        c = cmd[i]
+        if c in "'\"":
+            i += 1
+            while True:
+                j = cmd.find(c, i)
+                if j == -1:
+                    return [], "unterminated quote"
+                chunk = cmd[i:j]
+                if "`" in chunk:
+                    return [], "a backtick escape"
+                if c == '"' and "$(" in chunk:
+                    return [], "a $( ) subexpression inside double quotes"
+                if cmd[j + 1:j + 2] == c:  # doubled quote = one literal quote
+                    i = j + 2
+                    continue
+                i = j + 1
+                break
+            continue
+        if c == "`":
+            return [], "a backtick escape"
+        if c in "(){}":
+            return [], f"{c!r} (a subexpression, grouping or script block)"
+        if c in "<>":
+            return [], f"a redirection ({c!r})"
+        if c in ";\n\r":
+            push(i)
+            start = i + 1
+        elif c == "|":
+            push(i)
+            i += 2 if cmd[i + 1:i + 2] == "|" else 1
+            start = i
+            continue
+        elif c == "&":
+            nxt = cmd[i + 1:i + 2]
+            if not cmd[start:i].strip() and nxt in (" ", "\t", "'", '"', "$"):
+                i += 1  # call operator at the start of a command
+                continue
+            push(i)
+            i += 2 if nxt == "&" else 1
+            start = i
+            continue
+        i += 1
+    push(n)
+    return segs, None
+
+
+def _ps_prefix_match(seg: str, prefix: str) -> bool:
+    p = str(prefix).strip()
+    if not p:
+        return False
+    if seg == p:
+        return True
+    return seg.startswith(p) and (p[-1] in " \t" or seg[len(p)] in " \t")
+
+
+def _ps_read_only(seg: str) -> bool:
+    return any(_ps_prefix_match(seg, pre) for pre in READ_ONLY_PS_PREFIXES)
+
+
+def _ps_unchecked_writer(seg: str):
+    """The cmdlet name if `seg` runs a file-writing cmdlet whose target the gate
+    cannot check, else None."""
+    try:
+        segs = _tokenize_ps(seg)
+    except ValueError:
+        return None
+    for toks in segs[:1]:
+        words = [t for t in toks if t not in ("&", ".")]
+        if words and words[0].lower() in _PS_UNCHECKED_WRITERS:
+            return words[0]
+    return None
+
+
 def _extra_write_target_checks(target: str):
     """Hook point for additional per-target write checks. Returns a deny reason
     or None. Runs for every resolved writer-script target (and, when added, any
@@ -2341,27 +2441,46 @@ def main() -> None:
                 "plan-gate: PowerShell tool_input has no 'command'.",
                 class_="empty_command",
             )
-        # The read-only fast path applies only to a SINGLE simple command: no
-        # separator, pipeline, redirection, subexpression, script block or
-        # backtick escape anywhere (otherwise `Get-ChildItem; Remove-Item ...`
-        # would ride the prefix). Anything else falls through to normal gating.
-        if not re.search(r"[;|&<>(){}`\n\r]", cmd):
-            for prefix in READ_ONLY_PS_PREFIXES:
-                p = prefix.rstrip()
-                if cmd == p or (cmd.startswith(p) and cmd[len(p)] in " \t"):
-                    gated_allow(
-                        f"plan-gate: read-only PS bypass ({p!r}).",
-                        "read_only_bypass",
-                    )
-        # No bare-cd / Set-Location bypass for PS: the quote-aware Bash splitter
-        # does not model PS compound semantics. Any PS compound needs an explicit
-        # allowed_commands entry.
+        # Split into simple commands (like the Bash path). Anything the splitter
+        # cannot place is refused outright.
+        ps_segs, ps_problem = _ps_segments(cmd)
+        if ps_problem:
+            gated_deny(
+                f"plan-gate: cannot safely check this PowerShell command "
+                f"({ps_problem}). Failing closed. Rewrite it as simple commands "
+                f"(one per call, separated by ; | && || or newlines), without "
+                f"subexpressions, script blocks, backticks or redirection. "
+                f"Command: {cmd[:200]}",
+                class_="unparseable_command",
+            )
+        if not ps_segs:
+            gated_deny(
+                "plan-gate: no executable command found in this PowerShell "
+                "command after parsing. Failing closed.",
+                class_="unparseable_command",
+            )
+        for sg in ps_segs:
+            cmdlet = _ps_unchecked_writer(sg)
+            if cmdlet:
+                gated_deny(
+                    f"plan-gate: PowerShell {cmdlet} writes a file whose target "
+                    f"the gate cannot check; use Edit/Write (gated by "
+                    f"allowed_paths) instead. Command: {cmd[:200]}",
+                    class_="ps_unchecked_write",
+                )
+        # Read-only fast path: every segment is a known read-only command.
+        if all(_ps_read_only(sg) for sg in ps_segs):
+            gated_allow(
+                f"plan-gate: read-only PS bypass ({len(ps_segs)} segment(s), all "
+                f"read-only).",
+                "read_only_bypass",
+            )
         # Writer scripts (python atomic-write.py TARGET ...): the target is a
         # file write, gated like a redirect target.
         if _WRITER_CFG_ERROR:
             gated_deny(_writer_cfg_deny_reason(), class_="writer_script")
         ps_writer_plan_targets, w_problem = _collect_writer_targets(
-            [cmd], "ps", False)
+            ps_segs, "ps", False)
         if w_problem:
             gated_deny(w_problem[0], class_=w_problem[1])
 
@@ -2580,26 +2699,32 @@ def main() -> None:
         )
 
     if tool == "PowerShell":
-        # Conservative: startswith match against allowed_commands only. NO
-        # compound parsing. The read-only PS bypass was applied in the early
-        # branch.
-        for ac in allowed_cmds:
-            if str(ac).strip() and cmd.startswith(ac):
-                for tgt, script in ps_writer_plan_targets:
-                    if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
-                        gated_deny(
-                            f"plan-gate: {script} target {tgt} is NOT in "
-                            f"allowed_paths of active plan ({plan_path.name}). "
-                            f"A writer script's target is a file write and is "
-                            f"gated like Edit/Write. Command: {cmd[:200]}"
-                        )
-                gated_allow(
-                    f"plan-gate: matches allowed_command prefix {ac!r}.",
-                    "allowed_command",
+        # EVERY segment must be read-only or start (at a word boundary) with an
+        # allowed_commands entry, exactly like the Bash path.
+        used_ps_cmd = False
+        for sg in ps_segs:
+            if _ps_read_only(sg):
+                continue
+            if not any(_ps_prefix_match(sg, ac) for ac in allowed_cmds):
+                gated_deny(
+                    f"plan-gate: PowerShell command not allowed by active plan "
+                    f"({plan_path.name}): segment {sg[:120]!r} is neither "
+                    f"read-only nor starts with an allowed_commands entry. "
+                    f"Compound commands (; | && || & newline) are checked segment "
+                    f"by segment. Command: {cmd[:200]}"
                 )
-        gated_deny(
-            f"plan-gate: PowerShell command not allowed by active plan "
-            f"({plan_path.name}). Command: {cmd[:200]}"
+            used_ps_cmd = True
+        for tgt, script in ps_writer_plan_targets:
+            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+                gated_deny(
+                    f"plan-gate: {script} target {tgt} is NOT in "
+                    f"allowed_paths of active plan ({plan_path.name}). "
+                    f"A writer script's target is a file write and is "
+                    f"gated like Edit/Write. Command: {cmd[:200]}"
+                )
+        gated_allow(
+            f"plan-gate: all {len(ps_segs)} PowerShell segment(s) permitted.",
+            "allowed_command" if used_ps_cmd else "allowed_paths",
         )
 
     if tool in MCP_TOOL_ARGS:
