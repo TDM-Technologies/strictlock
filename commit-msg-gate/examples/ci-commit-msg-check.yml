@@ -1,0 +1,70 @@
+# Copyable GitHub Actions job: run commit-msg-gate over every commit message that a
+# pull request adds on top of its base branch.
+#
+# Why: the local commit-msg hook is skipped by `git commit --no-verify` and by a clone
+# that never installed it. CI is the merge boundary where those commits get caught.
+#
+# To adopt: copy this file to .github/workflows/commit-msg-check.yml in YOUR repo and
+# make sure commit-msg-gate.sh is checked in at GATE below (adjust the path).
+# Not wired into the StrictLock repo's own CI: this repo's own commits don't follow the
+# gate's defaults.
+name: commit-msg-check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  commit-msg-gate:
+    name: commit messages name a plan
+    runs-on: ubuntu-latest
+    env:
+      GATE: tools/commit-msg-gate/commit-msg-gate.sh   # where you vendored the script
+      # Optional: require each `plan: <slug>` to resolve to <slug>.md in this directory.
+      # COMMIT_MSG_GATE_PLANS_DIR: plans
+      # Optional: same override the local hook honours.
+      # COMMIT_MSG_GATE_PREFIXES: '^(wip:|chore:|docs:)'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                                  # need history to enumerate the range
+          ref: ${{ github.event.pull_request.head.sha }}  # the PR head, not the synthetic merge
+      - name: Gate every commit in origin/<base>..HEAD
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -u
+          # Deliberately NOT honouring COMMIT_MSG_GATE_BYPASS in CI.
+          unset COMMIT_MSG_GATE_BYPASS
+          fails=0
+          # Resolve the range first and fail closed: a failure inside a `for ... in $(...)`
+          # list is swallowed, which would turn an unresolvable base into a green job.
+          # --no-merges: merge commits carry git-generated subjects, not authored ones.
+          shas="$(git rev-list --no-merges "origin/${BASE}..HEAD")" || {
+            echo "::error::cannot resolve origin/${BASE}"
+            exit 1
+          }
+          for sha in $shas; do
+            msg="$(mktemp)"
+            git log -1 --format=%B "$sha" > "$msg"
+            # The gate exits 0 on an empty message (git rejects those locally), but
+            # --no-verify --allow-empty-message gets past git, so CI rejects them here.
+            if [ -z "$(tr -d '[:space:]' < "$msg")" ]; then
+              echo "::error::commit $sha has an empty message"
+              fails=$((fails + 1))
+              rm -f "$msg"
+              continue
+            fi
+            if ! bash "$GATE" "$msg"; then
+              echo "::error::commit $sha was rejected by commit-msg-gate"
+              fails=$((fails + 1))
+            fi
+            rm -f "$msg"
+          done
+          if [ "$fails" -gt 0 ]; then
+            echo "$fails commit(s) failed commit-msg-gate"
+            exit 1
+          fi
+          echo "all commits in origin/${BASE}..HEAD pass commit-msg-gate"

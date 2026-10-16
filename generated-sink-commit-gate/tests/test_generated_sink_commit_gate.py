@@ -237,5 +237,27 @@ class CommitGateTests(unittest.TestCase):
         self.assertIn("block", logfile.read_text(encoding="utf-8"))
 
 
+class SplitCommandTests(unittest.TestCase):
+    """Windows-style (posix=False) splitting must strip one layer of outer quotes."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gate_under_test", Path(__file__).resolve().parent.parent / "generated-sink-commit-gate.py")
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def test_windows_quoted_path_with_spaces(self):
+        argv = self.m._split_command(r'"C:\Program Files\Python\python.exe" gen.py --check', posix=False)
+        self.assertEqual(argv, [r"C:\Program Files\Python\python.exe", "gen.py", "--check"])
+
+    def test_windows_unquoted_untouched(self):
+        self.assertEqual(self.m._split_command(r"python C:\x\gen.py", posix=False),
+                         ["python", r"C:\x\gen.py"])
+
+    def test_posix_unchanged(self):
+        self.assertEqual(self.m._split_command("'a b' c", posix=True), ["a b", "c"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

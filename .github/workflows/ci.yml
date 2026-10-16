@@ -8,36 +8,71 @@ on:
 
 jobs:
   python:
-    name: python tests (${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: python tests (${{ matrix.label }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    # `shell: bash` everywhere: Git Bash on Windows, so the step invocations are
+    # identical on all three OSes (no PowerShell quoting differences).
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
+      # 9 jobs: the full 3.8-3.12 range on Linux, the two endpoints (3.8 + 3.12)
+      # on Windows and macOS.
+      #
+      # macOS 3.8 runs on `macos-15-intel`, not `macos-latest`: macos-latest is
+      # Apple Silicon (arm64), and in actions/python-versions only 3.8.10 has an
+      # arm64 build (3.8.11-3.8.18 are x64-only). The Intel runner tests the
+      # latest 3.8 patch release on x64; 3.12 runs on the arm64 `macos-latest`,
+      # so both CPU architectures are covered. (If GitHub retires macos-15-intel,
+      # drop the macOS 3.8 entry rather than raising the floor silently.)
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+        include:
+          - { label: ubuntu,  os: ubuntu-latest,  python-version: "3.8" }
+          - { label: ubuntu,  os: ubuntu-latest,  python-version: "3.9" }
+          - { label: ubuntu,  os: ubuntu-latest,  python-version: "3.10" }
+          - { label: ubuntu,  os: ubuntu-latest,  python-version: "3.11" }
+          - { label: ubuntu,  os: ubuntu-latest,  python-version: "3.12" }
+          - { label: windows, os: windows-latest, python-version: "3.8" }
+          - { label: windows, os: windows-latest, python-version: "3.12" }
+          - { label: macos,   os: macos-15-intel, python-version: "3.8" }
+          - { label: macos,   os: macos-latest,   python-version: "3.12" }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      # Each test step runs even if an earlier one failed (the job still fails
+      # if any step does), so one run surfaces every module's failures.
       - name: plan-gate tests
+        if: ${{ !cancelled() }}
         run: python plan-gate/tests/test_plan_gate.py
       - name: memory-cap tests
+        if: ${{ !cancelled() }}
         run: python memory-cap/tests/test_memory_cap.py
       - name: externalized-memory tests
+        if: ${{ !cancelled() }}
         run: python externalized-memory/tests/test_atomic_write.py
       - name: externalized-memory projection tests
+        if: ${{ !cancelled() }}
         run: python externalized-memory/tests/test_projection.py
       - name: generated-sink-commit-gate tests
+        if: ${{ !cancelled() }}
         run: python generated-sink-commit-gate/tests/test_generated_sink_commit_gate.py
       - name: generated-sink-prepush-gate tests
+        if: ${{ !cancelled() }}
         run: python generated-sink-prepush-gate/tests/test_generated_sink_prepush_gate.py
       - name: scope-lease tests
+        if: ${{ !cancelled() }}
         run: python scope-lease/tests/test_scope_lease.py
       - name: sink-resolver tests
+        if: ${{ !cancelled() }}
         run: python sink-resolver/tests/test_sink_resolver.py
       - name: liveness-scan tests
+        if: ${{ !cancelled() }}
         run: python liveness-scan/tests/test_liveness_scan.py
       - name: test-protection-guard tests
+        if: ${{ !cancelled() }}
         run: python test-protection-guard/tests/test_test_protection_guard.py
 
   node:
@@ -56,12 +91,21 @@ jobs:
       - name: eslint-plugin-strictlock tests
         run: npm test
 
+  # Shell tests run on Linux and macOS (BSD sed/grep differences matter for the
+  # gate). Not run on Windows: commit-msg-gate is a POSIX bash hook, and Windows
+  # users get bash only via Git for Windows, whose coreutils the tests don't
+  # target. shellcheck is lint, not a behaviour check, so it stays Linux-only.
   shell:
-    name: shell lint + tests
-    runs-on: ubuntu-latest
+    name: shell lint + tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
+        if: runner.os == 'Linux'
         run: |
           shellcheck commit-msg-gate/commit-msg-gate.sh
           shellcheck commit-msg-gate/tests/test_commit_msg_gate.sh

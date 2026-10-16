@@ -1,0 +1,59 @@
+# Copyable GitHub Actions job: regenerate the generated sink on the pull request's head
+# commit and fail the check if the checked-in sink is not a byte-exact match.
+#
+# The pre-push hook checks YOUR tree (fast, local). This job checks the PUSHED COMMIT
+# (authoritative): in CI the checkout IS the commit that arrived, so running the gate's
+# --check logic here validates exactly what was pushed. That covers every arrival path
+# the local hook cannot: `git push --no-verify`, a clone that never installed the hook,
+# and a working tree that diverged from the pushed tip.
+#
+# To adopt: copy this file to .github/workflows/sink-check.yml in YOUR repo, point GATE at
+# where you vendored generated-sink-prepush-gate.py, and set GENERATOR to your own
+# generator's --check command. Not wired into the StrictLock repo's own CI.
+name: sink-check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sink-fresh:
+    name: generated sink matches a fresh regeneration
+    runs-on: ubuntu-latest
+    env:
+      # Where you vendored the gate script (Python 3.8+, standard library only).
+      GATE: tools/generated-sink-prepush-gate/generated-sink-prepush-gate.py
+      # Your generator's CHECK mode: exits non-zero iff the sink is not byte-exact, and
+      # does not mutate the tree. Shell-style word splitting; no shell is invoked.
+      GENERATED_SINK_PREPUSH_GATE: "on"
+      GENERATED_SINK_PREPUSH_GATE_GENERATOR: "npm run build:manifest -- --check"
+      # Optional: run the generator from a subproject directory.
+      # GENERATED_SINK_PREPUSH_GATE_GENERATOR_CWD: "app"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}  # the PR head, not the synthetic merge
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # - uses: actions/setup-node@v4        # whatever your generator needs
+      #   with: { node-version: 20 }
+      # - run: npm ci
+      - name: Regenerate and compare (the gate's --check)
+        run: |
+          set -eu
+          # Bypass is a local escape hatch; it must not exist at the authoritative check.
+          unset GENERATED_SINK_PREPUSH_GATE_BYPASS
+          # The checkout is clean, so tree == pushed commit. Run the gate; a stale sink or
+          # any fail-closed condition (missing generator, error, timeout) exits non-zero.
+          python3 "$GATE"
+      - name: Confirm the check did not mutate the tree
+        run: |
+          set -eu
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::the generator's --check mode modified the working tree"
+            git status --porcelain
+            exit 1
+          fi

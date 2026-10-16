@@ -532,6 +532,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Same bytes on every OS: UTF-8 in and out, LF-only stdout. Without this a Windows pipe
+    # gets the locale code page (e.g. cp1252) and CRLF, so `render` output would differ by OS.
+    for _stream, _kw in ((sys.stdin, {"encoding": "utf-8"}),
+                         (sys.stdout, {"encoding": "utf-8", "newline": "\n"}),
+                         (sys.stderr, {"encoding": "utf-8"})):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(**_kw)
     try:
         sys.exit(main())
     except RecordValidationError as exc:

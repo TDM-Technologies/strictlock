@@ -72,7 +72,8 @@ are blind to it — then `git add`-ing that sink would stage its unmerged **'our
 silently drop the peer's edit. So `resolve` does not trust that assumption: between regenerate and
 `git add`, it checks that **every conflicted sink actually changed**. A conflicted sink left
 byte-identical to its 'ours' bytes means the generator did not rewrite it → **escalate** (restore
-the conflicted sinks to 'ours', write nothing, exit 4). Its one false positive — a sink whose
+**every** configured sink — conflicted or not — to its pre-regenerate bytes, so the merge is left
+exactly as found; write nothing, exit 4). Its one false positive — a sink whose
 merged render legitimately equals 'ours' (e.g. a subset merge) — over-escalates to a human, the
 safe direction. This is what makes "the generator/oracle covers every sink" a *checked* property,
 not an operator promise.

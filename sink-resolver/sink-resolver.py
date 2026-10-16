@@ -218,10 +218,27 @@ def normalize_sinks(root: Path, sinks: list[str]) -> list[str]:
     return keys
 
 
+def _split_command(value: str, posix=None) -> list:
+    """shlex.split a configured command line, correct on every OS.
+
+    On Windows shlex runs with posix=False, which keeps the surrounding quote
+    characters inside each token; one matching outer layer is stripped so a quoted
+    path with spaces ("C:\\Program Files\\Python\\python.exe" gen.py) launches.
+    `posix` is overridable for tests.
+    """
+    if posix is None:
+        posix = os.name != "nt"
+    argv = shlex.split(value, posix=posix)
+    if not posix:
+        argv = [t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t
+                for t in argv]
+    return argv
+
+
 # ── the configured generator ─────────────────────────────────────────────────────────
 def _parse_cmd(value: str, what: str) -> list[str]:
     try:
-        argv = shlex.split(value, posix=(os.name != "nt"))
+        argv = _split_command(value)
     except ValueError as exc:
         raise ResolveError(f"{what} is not a parseable command ({exc}) — fail-closed.") from exc
     if not argv:
@@ -413,7 +430,8 @@ def resolve_merge(
     A COVERAGE GUARD runs between regenerate and `git add`: a conflicted sink that the regenerate
     left byte-identical to its 'ours' bytes means the generator does not actually cover it, so
     finalizing would silently stage 'ours' and lose the peer edit — that escalates (write nothing,
-    leave the merge as found) rather than trusting the generator/oracle to cover every sink. (Its
+    leave the merge exactly as found: every configured sink, conflicted or not, is restored to
+    its pre-regenerate bytes) rather than trusting the generator/oracle to cover every sink. (Its
     one false positive — a sink whose merged render legitimately equals 'ours', e.g. a subset
     merge — over-escalates to a human, the safe direction.) NOTE: the generator must confine its
     output to the configured sink set; a generator that writes other tracked files leaves them
@@ -444,9 +462,12 @@ def resolve_merge(
     if dry_run:
         return "would-resolve", conflicted_sinks
 
-    # Capture the unmerged 'ours' bytes of each conflicted sink BEFORE regenerating, for the
-    # coverage guard below.
-    ours_before = _sink_bytes(root, conflicted_sinks)
+    # Snapshot EVERY configured sink BEFORE regenerating. The generator may rewrite sinks that
+    # were not in conflict; if the coverage guard escalates, ALL of them are restored so the
+    # merge is left exactly as found. The conflicted sinks' snapshot doubles as their 'ours'
+    # bytes for the guard below.
+    all_before = _sink_bytes(root, sink_rel)
+    ours_before = {rel: all_before[rel] for rel in conflicted_sinks}
 
     _regenerate(root)                              # regenerate from the merged sources
 
@@ -454,12 +475,12 @@ def resolve_merge(
     # CONFLICT but is byte-IDENTICAL to its 'ours' bytes after regenerate means the generator did
     # not actually rewrite it — so it does not cover this sink, and `git add`-ing it here would
     # silently stage 'ours' and DROP the peer's edit. We refuse rather than trust that the
-    # configured generator/oracle covers every configured sink. Restore the conflicted sinks to
-    # 'ours' so the merge state is left exactly as we found it, then escalate.
+    # configured generator/oracle covers every configured sink. Restore every configured sink to
+    # its pre-regenerate bytes so the merge state is left exactly as we found it, then escalate.
     unchanged = [rel for rel in conflicted_sinks
                  if (root / rel).is_file() and (root / rel).read_bytes() == ours_before.get(rel)]
     if unchanged:
-        _restore_sink_bytes(root, ours_before)
+        _restore_sink_bytes(root, all_before)
         raise Escalation(
             "the generator did NOT rewrite these conflicted sink(s) — a regenerate left them "
             "byte-identical to 'ours', so finalizing would silently stage 'ours' and LOSE the "
@@ -584,6 +605,7 @@ def main(argv: list[str] | None = None) -> int:
         root = resolve_repo_root(start)
     except ResolveError as exc:
         print(f"sink-resolver: ERROR: {exc}", file=sys.stderr)
+        _log_decision("error", str(exc).splitlines()[0], {"verb": args.cmd, "stage": "repo-root"})
         return EXIT_ERROR
 
     if args.cmd == "resolve":
@@ -614,11 +636,14 @@ def main(argv: list[str] | None = None) -> int:
             fresh, msg = check_fresh(root=root, sinks=sinks)
         except ResolveError as exc:
             print(f"sink-resolver: ERROR: {exc}", file=sys.stderr)
+            _log_decision("error", str(exc).splitlines()[0], {"verb": "check"})
             return EXIT_ERROR
         if fresh:
             print(f"CHECK OK: {msg}")
+            _log_decision("check-fresh", msg.splitlines()[0], {"verb": "check"})
             return EXIT_OK
         print(f"sink-resolver: CHECK FAILED — {msg}", file=sys.stderr)
+        _log_decision("check-stale", msg.splitlines()[0], {"verb": "check"})
         return EXIT_ERROR
 
     ap.error(f"unknown command {args.cmd!r}")  # unreachable (subparser required)

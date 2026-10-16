@@ -69,13 +69,18 @@ is the worked example, not the only supported target.
 command, a pre-action hook reads the single active plan and decides allow/deny. An
 `Edit`/`Write` target must *exactly* match an `allowed_paths` entry — a directory entry
 authorizes **nothing** inside it; each file is enumerated. A `Bash`/`PowerShell` command
-must *start with* an `allowed_commands` prefix (or be a known read-only command); only
-`cd`-led compounds are split and checked segment by segment today, and a chained command that
-begins with an allowed prefix is matched on that start (per-segment checking of every chained
-command is in progress). The envelope is approved per unit of work, then retired. This is least privilege by
-construction: the agent can touch only what an approved plan names, scoped to the session,
-and nothing broader through the file-edit tools; shell commands are bounded by prefix, per the
-caveat above.
+must *start with* an `allowed_commands` prefix (or be a known read-only command). A `Bash`
+command is split into segments (`&&`, `||`, `;`, `|`, a lone `&`, newlines, and the bodies of
+`$(...)`, backticks and `<(...)`) and *each segment* must independently match, so a compound
+command is only as authorized as its least-authorized segment; a redirection that writes
+(`>`, `>>`, `2>`, ...) is a file write gated like `Edit`/`Write`, and a command the gate cannot
+confidently parse is denied. (`PowerShell` commands are still matched by prefix only, with no
+compound parsing or redirection handling yet, and that includes the read-only cmdlet set, so
+`Get-Content x; Remove-Item y` passes with or without a plan; route agent shell work through Bash
+where that matters.) The envelope is
+approved per unit of work, then retired. This is least privilege by construction: the agent can
+touch only what an approved plan names, scoped to the session, bounded by enumerated paths and
+command prefixes.
 
 **Evidence it emits.** A per-plan record of exactly which files and commands each agent
 was permitted to use, for one specific unit of work, with explicit start and retirement.
@@ -130,10 +135,14 @@ confirmed items and *only* confirmed items (EXECUTE). The earliest form of the c
 staged all agent output to a review directory before it merged — *nothing the agent
 produces reaches the real system unreviewed.* [`commit-msg-gate`](commit-msg-gate/) closes
 the loop at commit time: a `commit-msg` git hook rejects any commit that does not either
-name a plan (`plan: <slug>`; the slug is not validated against a plans directory) or carry
-an approved ceremony prefix (`chore:`/`docs:`/`ci:`/`build:`), so the version-control history
-itself names the plan behind each functional change. It is a local hook, so `--no-verify`
-skips it.
+name a plan (a `plan: <slug>` line in the message body) or carry an approved ceremony prefix
+(`chore:`/`docs:`/`ci:`/`build:`), so the version-control history itself names the plan behind
+each functional change. With the opt-in `COMMIT_MSG_GATE_PLANS_DIR`, the slug must also resolve
+to a plan file (`<slug>.md`) in your plans directory (its `status` is not inspected), and the
+gate fails closed if that directory is unreadable. It is a local hook, so `--no-verify` skips
+it; the module's `examples/` include a CI job (one adopters add to their own workflow) that
+runs the same check over every non-merge commit on the PR head, with the bypass variable
+ignored, which is the check that does not depend on the committer's hook.
 
 **Evidence it emits.** A documented approve → act → record cycle for every change, plus a
 git history in which each functional commit names the plan that authorized it.
@@ -200,13 +209,19 @@ Any unauthorized tool execution or unexpected system behavior triggers an immedi
 manual review rather than an attempt to recover and proceed — surprise resolves toward stopping,
 not improvisation. A human is the **sole authorizing authority**: the entity that proposes is not
 the entity that executes, and neither is the entity that authorizes. When the system is uncertain,
-unapproved, or surprised, the action does not happen — fail closed. (One exception today: if
-`plan-gate`'s own code crashes or receives an unparseable payload, it exits non-zero with a
-warning, which the harness treats as non-blocking; deny-on-crash is planned.) A worktree-anchored
-guard treats a plan as active for a worktree session only if an absolute authorized path resolves
-under that worktree; otherwise gated writes and commands outside the read-only set are denied (read-only
-inspection stays available (the read-only set is itself prefix-matched, so a chained or `>`-redirected command that starts with a read-only prefix, e.g. `cat x; rm y` or `echo x > f`, is still allowed today; per-segment checking and redirection-as-write are in progress)), so a plan misaligned with where the session is actually running
-fails closed loudly on the first gated action.
+unapproved, or surprised, the action does not happen — fail closed. That includes the gate's own
+faults: a payload it cannot parse, or an unhandled exception inside the gate, produces a deny
+(with a loud message naming the failure and the emergency bypass, which is honored and logged
+even on that path), never a non-zero exit that a harness would treat as "proceed". A
+worktree-anchored guard treats a plan as active for a worktree session only if an absolute
+authorized path resolves under that worktree; otherwise gated writes and commands outside the
+read-only set are denied (read-only inspection stays available, and a compound or
+`>`-redirected command counts as read-only only if every segment is and every redirect target is
+`/dev/null` or an always-writable location — Bash only: PowerShell's read-only cmdlets are
+still prefix-matched, so a PowerShell command that starts with one, e.g. `Get-Content x; Remove-Item y`,
+is allowed even with no active plan), and when active plans exist but none claims the
+worktree the deny names that drift. A plan misaligned with where the session is actually running
+therefore fails closed loudly on the first gated action.
 
 **Evidence it emits.** Demonstrated human oversight of the AI system and a defined escalation path
 for anomalous behavior — every authorization carries a human signature, and every surprise produces
@@ -236,10 +251,14 @@ register credible.
 
 **Maps to:** **ISO 9001 §6.1** (risk-based thinking); **SOC 2 CC9** (risk assessment).
 
-### H. Structural per-entry cap on auto-loaded memory, with a per-gate bypass → controlled operation / configuration integrity (ISO/IEC 42001; supports CC6/CC7)
+### H. Structural cap on auto-loaded memory, with a per-gate bypass → controlled operation / configuration integrity (ISO/IEC 42001; supports CC6/CC7)
 
-**Mechanism** ([`memory-cap`](memory-cap/)). A pre-action hook refuses any write to the configured
-memory-*index* file that would introduce an over-length index entry (default 200 chars per `- ` line),
+**Mechanism** ([`memory-cap`](memory-cap/)). A pre-action hook refuses any `Write`/`Edit`/`NotebookEdit` to the
+configured memory-*index* file (shell writes are not inspected; total caps are not evaluated for
+`NotebookEdit`) that would introduce an over-length index entry (default 200 chars per `- ` line)
+or, when the opt-in total caps are set (`MEMORY_CAP_MAX_ENTRIES`, `MEMORY_CAP_TOTAL_CHARS`), grow the
+index past an entry-count or total-size limit (never wedging an index that is already over: only a
+write that is over the cap *and* larger than before is refused),
 denying at the boundary before the bad write lands — the same fail-closed posture as the rest of the
 suite, applied to a different resource (bounded per-session context cost). Its bypass variable is
 *distinct* (`MEMORY_CAP_BYPASS`), deliberately **not** shared with `plan-gate` or `commit-msg-gate`, so
@@ -247,11 +266,13 @@ a narrow, deliberate escape from one cap can never silently disable the others. 
 single-use by convention (set inline per command; every use is logged, on stderr, so a lingering bypass
 is visible in the trail). An *invalid* path-matching regex falls back to the default rather than
 disabling the cap; a valid-but-wrong pattern still matches the wrong file, which the code cannot detect.
-The cap is per entry — there is no limit yet on the number of entries or the index's total size.
+An opt-in, hash-chained decision log (`MEMORY_CAP_DECISION_LOG=1` + `MEMORY_CAP_LOG_DIR`, verified with
+`memory-cap.py verify-log`) records allow, deny and bypass decisions on the capped index.
 
-**Evidence it emits.** A structurally-enforced per-entry operational bound (rather than a convention nobody
+**Evidence it emits.** A structurally-enforced operational bound on the index (rather than a convention nobody
 enforces), plus a configuration design in which disabling one gate cannot silently disable another and an
-invalid configuration falls back toward the control being on.
+invalid path regex falls back toward the control being on (an invalid total-cap value disables that
+opt-in cap, announced on stderr).
 
 **What an auditor can trace.** *That a stated operational limit is enforced in code rather than by convention,
 and that the controls' bypasses are independent* — the per-gate bypass isolation and the invalid-regex
@@ -272,9 +293,10 @@ mode and **refuse** (loud non-zero exit, no working-tree mutation, no auto-stage
 committed artifact is a *byte-exact* regeneration. The commit gate fires only when a staged
 change touches a configured source; the push gate validates the terminal artifact on *every*
 push, so a stale sink that slipped past commit time (via `--no-verify` or a one-shot bypass)
-is still caught before it leaves the machine. (The push gate checks your working tree, not the
-pushed commit; a CI job that checks the pushed commit is planned, not yet built. `--no-verify`
-on the push itself also skips the hook.) Both fail closed on a missing, misconfigured, or
+is still caught before it leaves the machine. (The hook checks your tree (fast, local); CI checks
+the pushed commit (authoritative). The CI half is a job adopters add to their own workflow, copied
+from the push gate's `examples/ci-sink-check.yml`; it is an example, not part of this repo's own CI.
+`--no-verify` on the push itself skips the hook.) Both fail closed on a missing, misconfigured, or
 erroring generator — a generator that cannot run is a block, never a silent allow — and each
 gate honors only its own uniquely-named, logged bypass (single-use by convention: set inline
 per command; every use is logged, so a lingering bypass is visible in the trail), so escaping
@@ -288,7 +310,7 @@ same exhaust pattern as row B).
 **What an auditor can trace.** *That a committed/pushed generated artifact that passed through
 the hooks corresponds to the sources it claims to derive from*, and, from the log, *when a stale
 artifact was caught and blocked* or a gate was bypassed by its env var. (`--no-verify` skips both
-hooks without a log row; the CI check that closes that path is planned.) The bypass isolation and fail-closed-on-misconfiguration posture are observable in
+hooks without a log row; the example CI job above, once adopted, checks the pushed commit and closes that path.) The bypass isolation and fail-closed-on-misconfiguration posture are observable in
 the configuration.
 
 **Maps to:** **SOC 2 CC8** (change management — a generated artifact cannot drift from its
@@ -310,8 +332,8 @@ it fails *loud* rather than silently degrading exclusion.
 
 **Evidence it emits.** A record (when a log directory is configured) of which agent held which paths, for
 which lock, until when (one row per successful acquire) — plus every reclaim of an expired holder, named in
-that acquire row and surfaced on stderr with its incremented token. Releases are logged with the lock id and
-released paths; denied acquires are not logged. Exclusive
+that acquire row (evicted holder, deadline and the new token) and surfaced on stderr. Releases that drop at
+least one scope are logged with the lock id, the lock's owner, the releasing owner and released paths; denied acquires are not logged. Exclusive
 access becomes an observable, after-the-fact artifact rather than a coordination convention.
 
 **What an auditor can trace.** *That concurrent automated actors operated under enforced segregation* — no two
@@ -337,8 +359,9 @@ rewrite, so a peer's edit can never be silently dropped. Sound only under the lo
 that the sink is a pure, deterministic, `--check`-able render of its sources.
 
 **Evidence it emits.** When a decision-log directory is configured, an append-only record of each
-auto-resolution (which sink, which oracle), each escalation, and each fail-closed `resolve` error (the
-`check` verb writes no row) — proof that a
+auto-resolution (which sink, which oracle), each escalation, each fail-closed error (including a repo-root
+failure), and every `check` outcome (fresh, stale, error); a no-conflict `resolve` and a dry-run that would
+auto-resolve write no row — proof that a
 generated artifact of record entered the merged history as a verified regeneration, not a hand-blend.
 
 **What an auditor can trace.** *That a derived artifact remained provably consistent with its sources across

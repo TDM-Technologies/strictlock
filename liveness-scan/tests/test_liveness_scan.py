@@ -45,10 +45,14 @@ def _ct(minutes_ago: float) -> int:
 
 
 class FakeProbe(ls.GitProbe):
-    def __init__(self, worktrees, commit_times=None, ahead=None):
+    def __init__(self, worktrees, commit_times=None, ahead=None, starts=None):
         self._wts = worktrees
         self._ct = commit_times or {}
         self._ahead = ahead or {}
+        self._starts = starts or {}
+
+    def branch_start_unixtime(self, sha, base):
+        return self._starts.get(sha)
 
     def worktrees(self):
         return self._wts
@@ -150,6 +154,132 @@ class TestClassify(unittest.TestCase):
         self.assertIn("git status", r["recovery"])
 
 
+class TestWpAgeCeiling(unittest.TestCase):
+    """Q8b: CEILING_MIN is a whole-WP bound (time since the earliest branch commit not on base)."""
+
+    def setUp(self):
+        self.th = ls.Thresholds()  # ceiling 480
+        self.wt = {"path": "/repo/wt-feat", "branch": "feat", "head": "deadbeef"}
+
+    def _c(self, **kw):
+        base = dict(active_plan=_plan("p", "active", []), executed_plan=None,
+                    commit_age_min=None, ahead_of_base=None, heartbeat_age_min=None, th=self.th)
+        base.update(kw)
+        return ls.classify(self.wt, NOW, **base)
+
+    def test_old_wp_escalates_even_on_fresh_signal(self):
+        r = self._c(heartbeat_age_min=1.0, wp_age_min=600.0)
+        self.assertEqual(r["status"], "ambiguous")
+        self.assertTrue(r["escalate"])
+        self.assertIn("whole-WP ceiling", r["reason"])
+        self.assertNotIn("reset --hard", r["recovery"])
+
+    def test_young_wp_with_fresh_signal_is_running(self):
+        r = self._c(heartbeat_age_min=1.0, wp_age_min=100.0)
+        self.assertEqual(r["status"], "running")
+
+    def test_unknown_wp_age_does_not_escalate_on_fresh_signal(self):
+        r = self._c(heartbeat_age_min=1.0, wp_age_min=None)
+        self.assertEqual(r["status"], "running")
+
+    def test_stale_signal_past_ceiling_still_escalates_without_wp_age(self):
+        r = self._c(heartbeat_age_min=600.0, wp_age_min=None)
+        self.assertEqual(r["status"], "ambiguous")
+
+    def test_unowned_worktree_ignores_wp_age(self):
+        r = self._c(active_plan=None, ahead_of_base=True, wp_age_min=9999.0)
+        self.assertEqual(r["status"], "done-unmerged")
+        self.assertFalse(r["escalate"])
+
+    def test_gather_computes_wp_age_for_owned_worktree(self):
+        plan = _plan("big-wp", "active", ["/repo/wt-a/src/x.py"])
+        wts = [{"path": "/repo/wt-a", "branch": "feat-a", "head": "a"}]
+        # head commit 1 minute ago (fresh), but the branch's earliest commit is 600 minutes old.
+        probe = FakeProbe(wts, commit_times={"a": _ct(1)}, starts={"a": _ct(600)})
+        orig = ls.load_plans
+        ls.load_plans = lambda d: [plan]
+        try:
+            digest = ls.gather(plans_dir=Path("/x"), base="origin/main", heartbeat_relpath=None,
+                               now=NOW, probe=probe, th=self.th)
+        finally:
+            ls.load_plans = orig
+        s = digest["sessions"][0]
+        self.assertEqual(s["status"], "ambiguous")
+        self.assertAlmostEqual(s["internals"]["wp_age_min"], 600.0, places=0)
+        self.assertEqual(len(digest["escalations"]), 1)
+
+    def test_gather_young_branch_fresh_signal_runs(self):
+        plan = _plan("wp", "active", ["/repo/wt-a/src/x.py"])
+        wts = [{"path": "/repo/wt-a", "branch": "feat-a", "head": "a"}]
+        probe = FakeProbe(wts, commit_times={"a": _ct(1)}, starts={"a": _ct(30)})
+        orig = ls.load_plans
+        ls.load_plans = lambda d: [plan]
+        try:
+            digest = ls.gather(plans_dir=Path("/x"), base="origin/main", heartbeat_relpath=None,
+                               now=NOW, probe=probe, th=self.th)
+        finally:
+            ls.load_plans = orig
+        self.assertEqual(digest["sessions"][0]["status"], "running")
+
+
+class TestEnvIntAndExplain(unittest.TestCase):
+    def setUp(self):
+        self._saved = os.environ.get("LIVENESS_SCAN_CEILING_MIN")
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("LIVENESS_SCAN_CEILING_MIN", None)
+        else:
+            os.environ["LIVENESS_SCAN_CEILING_MIN"] = self._saved
+
+    def _call(self, value):
+        import contextlib
+        import io
+        os.environ["LIVENESS_SCAN_CEILING_MIN"] = value
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            got = ls._env_int("LIVENESS_SCAN_CEILING_MIN", 480)
+        return got, buf.getvalue()
+
+    def test_zero_announces_and_falls_back(self):
+        got, err = self._call("0")
+        self.assertEqual(got, 480)
+        self.assertIn("LIVENESS_SCAN_CEILING_MIN", err)
+        self.assertIn("480", err)
+
+    def test_negative_announces_and_falls_back(self):
+        got, err = self._call("-5")
+        self.assertEqual(got, 480)
+        self.assertIn("LIVENESS_SCAN_CEILING_MIN", err)
+
+    def test_non_integer_announces_and_falls_back(self):
+        got, err = self._call("abc")
+        self.assertEqual(got, 480)
+        self.assertIn("not an integer", err)
+
+    def test_valid_value_is_silent(self):
+        got, err = self._call("120")
+        self.assertEqual(got, 120)
+        self.assertEqual(err, "")
+
+    def test_explain_emits_per_worktree_internals(self):
+        wts = [{"path": "/repo", "branch": "main", "head": "m"},
+               {"path": "/repo/wt-a", "branch": "feat-a", "head": "a"}]
+        probe = FakeProbe(wts, commit_times={"m": _ct(1), "a": _ct(5)}, ahead={"a": True},
+                          starts={"a": _ct(50)})
+        th = ls.Thresholds()
+        digest = ls.gather(plans_dir=None, base="origin/main", heartbeat_relpath=None,
+                           now=NOW, probe=probe, th=th)
+        text = ls._explain(digest, th)
+        self.assertIn("CEILING_MIN=", text)
+        self.assertIn("/repo/wt-a", text)
+        self.assertIn("feat-a", text)
+        for key in ("signal_age=", "commit_age=", "heartbeat_age=", "wp_age=",
+                    "active_plan=", "ahead_of_base="):
+            self.assertIn(key, text)
+        self.assertIn("commit_age=5m", text)
+
+
 class TestAttribution(unittest.TestCase):
     def test_absolute_path_under_worktree_claims(self):
         p = _plan("p", "active", ["/repo/wt-feat/src/a.py"])
@@ -163,6 +293,14 @@ class TestAttribution(unittest.TestCase):
         # bypass plan with NO absolute path under this wt -> not attributed (the key correctness lesson)
         p = _plan("p", "active", [], bypass=True)
         self.assertFalse(ls.plan_specifically_claims(p, "/repo/wt-feat"))
+
+    def test_worktree_bypass_excluded_even_with_absolute_path_under_worktree(self):
+        # the regression: a bypass plan that CARRIES an absolute path under the worktree must
+        # still not attribute (it is the session of none).
+        p = _plan("p", "active", ["/repo/wt-feat/src/a.py"], bypass=True)
+        self.assertFalse(ls.plan_specifically_claims(p, "/repo/wt-feat"))
+        non_bypass = _plan("p", "active", ["/repo/wt-feat/src/a.py"], bypass=False)
+        self.assertTrue(ls.plan_specifically_claims(non_bypass, "/repo/wt-feat"))
 
     def test_path_under_a_different_worktree_does_not_claim(self):
         p = _plan("p", "active", ["/repo/wt-other/src/a.py"])
@@ -341,6 +479,46 @@ class TestRealGit(unittest.TestCase):
         # main is not ahead of itself
         main = next(w for w in wts if w["branch"] == "main")
         self.assertFalse(probe.ahead_of_base(main["head"], "main"))
+
+    def test_probe_branch_start_is_earliest_commit_not_on_base(self):
+        self._seed()
+        wt = self.tmp / "wt-feat"
+        self._git("worktree", "add", "-q", "-b", "feat", str(wt))
+        probe = ls.GitProbe(str(self.root))
+        feat_head = next(w for w in probe.worktrees() if w["branch"] == "feat")["head"]
+        # no commits beyond base yet -> unknown
+        self.assertIsNone(probe.branch_start_unixtime(feat_head, "main"))
+        env_early = {**os.environ, "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
+        env_late = {**os.environ, "GIT_COMMITTER_DATE": "2026-01-02T00:00:00Z"}
+        for name, env in (("one", env_early), ("two", env_late)):
+            (wt / f"{name}.txt").write_text(name + "\n")
+            self._git("add", "-A", cwd=wt)
+            subprocess.run(["git", "-C", str(wt), "-c", "commit.gpgsign=false", "-c", "user.name=T",
+                            "-c", "user.email=t@example.com", "commit", "-q", "-m", name],
+                           check=True, capture_output=True, env=env)
+        head = next(w for w in probe.worktrees() if w["branch"] == "feat")["head"]
+        self.assertEqual(probe.branch_start_unixtime(head, "main"), 1767225600)  # 2026-01-01Z
+        # unresolvable base -> unknown (fail toward no escalation, never a crash)
+        self.assertIsNone(probe.branch_start_unixtime(head, "origin/nonexistent"))
+
+    def test_probe_branch_start_inherits_from_stacked_unmerged_parent(self):
+        # Documented caveat (over-report): a branch stacked on older UNMERGED work inherits
+        # that work's start time, because `base..HEAD` includes the parent's commits.
+        self._seed()
+        def commit(name, date):
+            (self.root / f"{name}.txt").write_text(name + "\n")
+            self._git("add", "-A")
+            subprocess.run(["git", "-C", str(self.root), "-c", "commit.gpgsign=false", "-c",
+                            "user.name=T", "-c", "user.email=t@example.com", "commit", "-q",
+                            "-m", name], check=True, capture_output=True,
+                           env={**os.environ, "GIT_COMMITTER_DATE": date})
+        self._git("checkout", "-q", "-b", "old-feature")
+        commit("old", "2026-02-01T00:00:00Z")
+        self._git("checkout", "-q", "-b", "new-work")
+        commit("new", "2026-10-01T00:00:00Z")
+        probe = ls.GitProbe(str(self.root))
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(probe.branch_start_unixtime(head, "main"), 1769904000)  # 2026-02-01Z
 
     def test_cli_exits_zero(self):
         self._seed()

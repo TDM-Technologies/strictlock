@@ -437,6 +437,54 @@ class MachineBoundaryTests(unittest.TestCase):
             sl.acquire_lease(root=self.root, lock_id="local", owner="alice",
                              paths=["src/x.py"], deadline=future())
 
+    def _mint_foreign(self, path="src/x.py"):
+        foreign = {"lock_id": "elsewhere", "owner": "x", "token": 1, "deadline": future(),
+                   "host": "some-other-host", "git_dir": "/somewhere/else/.git"}
+        oid = subprocess.run(
+            ["git", "-C", str(self.root), "hash-object", "-w", "--stdin"],
+            input=json.dumps(foreign), capture_output=True, text=True,
+        ).stdout.strip()
+        ref = sl._lease_ref(sl._normalize_paths(self.root, [path])[0])
+        _git(self.root, "update-ref", ref, oid)
+        return ref, oid
+
+    def test_release_foreign_refstore_blob_fails_loud(self):
+        ref, oid = self._mint_foreign()
+        with self.assertRaises(sl.MachineBoundaryError):
+            sl.release_lease(root=self.root, lock_id="local", paths=["src/x.py"])
+        self.assertEqual(sl._ref_oid(self.root, ref), oid, "foreign lock must be left in place")
+
+    def test_release_foreign_refstore_changes_nothing_either_path_order(self):
+        # Regression: release raised mid-loop AFTER deleting earlier owned locks (unlogged), and
+        # path order decided what survived. Decide for every path first; fail loud = no change.
+        for order in (["src/a.py", "src/b.py"], ["src/b.py", "src/a.py"]):
+            sl.acquire_lease(root=self.root, lock_id="mine", owner="me",
+                             paths=["src/a.py"], deadline=future())
+            self._mint_foreign("src/b.py")
+            logs = Path(self._tmp.name) / "logs"
+            a_ref = sl._lease_ref(sl._normalize_paths(self.root, ["src/a.py"])[0])
+            with self.assertRaises(sl.MachineBoundaryError):
+                sl.release_lease(root=self.root, lock_id="mine", paths=order,
+                                 log_dir=logs, owner="me")
+            self.assertIsNotNone(sl._ref_oid(self.root, a_ref),
+                                 "owned lock must survive a fail-loud release (%s)" % order)
+            self.assertFalse((logs / "scope-lease.log").exists())
+            # reset for next order
+            b_ref = sl._lease_ref(sl._normalize_paths(self.root, ["src/b.py"])[0])
+            _git(self.root, "update-ref", "-d", b_ref)
+            _git(self.root, "update-ref", "-d", a_ref)
+
+    def test_release_cli_foreign_refstore_exits_6(self):
+        self._mint_foreign()
+        env = dict(os.environ)
+        env["SCOPE_LEASE"] = "on"
+        env["SCOPE_LEASE_OWNER"] = "cli-tester"
+        env.pop("SCOPE_LEASE_PLANS_DIR", None)
+        env.pop("PLAN_GATE_PLANS_DIR", None)
+        rc = _run_cli(["release", "--root", str(self.root), "--source", "paths",
+                       "--paths", "src/x.py", "--lock-id", "local"], env)
+        self.assertEqual(rc, 6)
+
     def test_local_blob_stamps_this_host_and_gitdir(self):
         sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
                          paths=["src/a.py"], deadline=future())
@@ -611,6 +659,47 @@ class CLITests(unittest.TestCase):
         plans = _write_plan(self.root, "old", ["src/a.py"], status="archived")
         env = _cli_env(self.root, plans)
         self.assertEqual(_run_cli(["acquire", "--root", str(self.root)], env), 1)
+
+    def test_release_log_row_carries_owner(self):
+        logdir = self.root / "logs"
+        env = dict(os.environ)
+        env["SCOPE_LEASE"] = "on"
+        env["SCOPE_LEASE_OWNER"] = "cli-owner"
+        env["SCOPE_LEASE_LOG_DIR"] = str(logdir)
+        env.pop("SCOPE_LEASE_PLANS_DIR", None)
+        env.pop("PLAN_GATE_PLANS_DIR", None)
+        args = ["--root", str(self.root), "--source", "paths",
+                "--paths", "src/a.py", "--lock-id", "own-lock"]
+        self.assertEqual(_run_cli(["acquire", *args, "--deadline", future()], env), 0)
+        self.assertEqual(_run_cli(["release", *args], env), 0)
+        rows = [json.loads(l) for l in
+                (logdir / "scope-lease.log").read_text(encoding="utf-8").splitlines()]
+        rel = [r for r in rows if r["event"] == "release"]
+        self.assertEqual(len(rel), 1)
+        self.assertEqual(rel[0]["owner"], "cli-owner")
+        self.assertEqual(rel[0]["lock_id"], "own-lock")
+
+    def test_release_row_owner_is_the_locks_owner_not_the_releaser(self):
+        logdir = self.root / "logs3"
+        sl.acquire_lease(root=self.root, lock_id="L", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+        sl.release_lease(root=self.root, lock_id="L", paths=["src/a.py"],
+                         log_dir=logdir, owner="bob")
+        row = json.loads((logdir / "scope-lease.log").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["event"], "release")
+        self.assertEqual(row["owner"], "alice")
+        self.assertEqual(row["released_by"], "bob")
+
+    def test_reclaim_row_carries_detail(self):
+        logdir = self.root / "logs2"
+        sl.acquire_lease(root=self.root, lock_id="old", owner="alice",
+                         paths=["src/a.py"], deadline=past())
+        sl.acquire_lease(root=self.root, lock_id="new", owner="bob",
+                         paths=["src/a.py"], deadline=future(), log_dir=logdir)
+        row = json.loads((logdir / "scope-lease.log").read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(row["reclaimed"], ["src/a.py"])
+        d = row["reclaimed_detail"][0]
+        self.assertEqual((d["was_lock_id"], d["was_owner"], d["token"]), ("old", "alice", 2))
 
     def test_paths_source_via_cli_full_cycle(self):
         env = dict(os.environ)

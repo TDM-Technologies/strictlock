@@ -316,3 +316,63 @@ search key. When restoring a claim, also delete the matching "(fix in progress)"
 phrases (search for those three strings in `plan-gate/`, `scope-lease/`, `sink-resolver/`,
 `liveness-scan/`, `test-protection-guard/`, `memory-cap/`, `commit-msg-gate/`, `generated-sink-prepush-gate/`,
 `COMPLIANCE.md`, and `README.md`).
+
+---
+
+## 8. PR 2 dispositions (2026-10-16)
+
+Branch `feat/claims-truth-code` (pushed; PR open, stacked on PR 1): `docs/claims-truth-reword` + four piece branches merged
+`--no-ff` (plan-gate, state-modules, hook-modules, ci; no conflicts), then the restore commit and the close-out
+commit. Each landed fix was checked against code and a test (not against the piece reports). Full suite
+green on macOS: 367 Python tests + 30 shell checks. **Windows and macOS CI legs are unproven until the PR's
+first CI run.**
+
+**Built** (code + test)
+- Fix B: per-segment Bash checking (`&&` `||` `;` `|` `&` newline, `$(...)`, backticks, `<(...)`), redirection-as-write,
+  read-only list audit, unparseable commands denied. Q5: deny-on-crash with bypass honored and logged. Q8c: no-claim
+  drift diagnostic. Empty `allowed_commands` entries match nothing.
+- memory-cap: hash-chained decision log + `verify-log`; `NotebookEdit` baselines on-disk content; opt-in
+  `MEMORY_CAP_MAX_ENTRIES` / `MEMORY_CAP_TOTAL_CHARS`.
+- scope-lease: `release` runs the refstore check (exit 6); release rows carry the lock's owner + `released_by`; reclaim detail on acquire rows.
+- sink-resolver: `check` outcomes and repo-root failure log rows; coverage guard restores all configured sinks.
+- test-protection-guard: `GIT_INDEX_FILE` preserved in precommit mode; `-C <dir>` retargets the analysis.
+- commit-msg-gate: `plan:` matched in the body only; opt-in `COMMIT_MSG_GATE_PLANS_DIR`; example CI job.
+- liveness-scan: `worktree_bypass` plans excluded from attribution; `<= 0` thresholds announced; `examples/plan.example.md`;
+  per-worktree `--explain`; true WP-age ceiling (committer-time proxy; rebase caveat documented).
+- generated-sink-prepush-gate: example CI job (`examples/ci-sink-check.yml`).
+- CI: 9-entry Python OS matrix (ubuntu 3.8-3.12, windows 3.8 + 3.12, macOS 3.8 + 3.12); shell job on ubuntu + macOS.
+
+**Already present:** Fix A for plan-gate (PR #11); plan-gate's chain/lock/verifier reused as the model for memory-cap;
+scope-lease acquire/fence already ran the refstore check; liveness `_env_int` already announced non-integers.
+
+**Not built** (interim wording kept where a claim depends on it; listed in BACKLOG "Open after Stage 2")
+- PowerShell compound parsing and redirect handling (docs name the gap).
+- scope-lease: a denied acquire still writes no row.
+- sink-resolver: a no-conflict `resolve` and a dry-run that would auto-resolve still write no row.
+- memory-cap total caps are not evaluated for `NotebookEdit`.
+- Edit/Write always-writable check: symlink escape unverified (a `..` escape did not reproduce); a dedicated wider
+  bypass-hunt pass not run (a ~70-payload hand probe found no smuggle);
+  shellcheck not run locally; commit-msg-gate subject-as-first-paragraph left as is.
+
+**Design calls recorded by the pieces** (re-arguable): pre-plan `cd x && <read-only>` is now allowed; a plan entry
+spelling out a whole compound no longer authorizes it; new decision classes `unparseable_command` and `gate_error`;
+liveness ceiling escalates on signal age OR WP age; commit-msg slug resolution does not inspect plan `status`
+(so the restored wording says "resolves to a plan file", not "approved plan").
+
+**Restored claims** (§7 INTERIM rows)
+- plan-gate "enumerated command prefixes, checked segment by segment", redirection-as-write, plain "Prevents", and
+  the deny-on-crash / "a bug in the gate fails toward safety" line: README Design principles, COMPLIANCE rows A and F
+  (module docs, paper, docstring were restored by the piece). PowerShell caveat kept.
+- memory-cap "caps the size of the index" (README module row, COMPLIANCE row H; per-entry default, totals opt-in);
+  decision log noted in row H. NotebookEdit self-wedge sentence restored in the module (piece).
+- commit-msg-gate: README row and COMPLIANCE row C name the body-only `plan:` line, the opt-in plans-dir check and
+  the example CI job; "approved" not restored (status is not inspected).
+- generated-sink-prepush-gate: "planned / not yet built" replaced with the example CI job, stated as a job adopters
+  add (README module row, COMPLIANCE row I twice).
+- scope-lease (COMPLIANCE row J): release rows carry owner, reclaim detail on the acquire row; "denied acquires are not
+  logged" kept. Release refstore qualifier dropped in module docs (piece).
+- sink-resolver (COMPLIANCE row K): `check` and repo-root rows logged; no-conflict/dry-run qualifier kept.
+  "Exactly as found" restored in SCHEMA (piece).
+- test-protection-guard, liveness-scan: module docs restored by the pieces (sees commits that run the hook,
+  `-C` retarget, excluded bypass plans, WP-age ceiling, sample plan, per-worktree `--explain`); BACKLOG liveness line fixed.
+- CI-job counts: 8 -> 13 recorded in STATE; README/COMPLIANCE carry no job count.

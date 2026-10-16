@@ -32,10 +32,23 @@ drop-in `pre-push` hook with nothing extra to wire.
 
 **Tree vs. pushed commit.** The hook checks your tree (fast, local); CI checks the pushed
 commit (authoritative). Because the hook reads the working tree, not the commit being pushed,
-a dirty tree or a push of a different ref can diverge from what it validated. The CI half is
-planned, not yet built: a CI job that regenerates the sink on the pushed head and diffs it, so
-every arrival path (`--no-verify`, no hook installed, tree/tip divergence) is validated at the
-merge boundary.
+a dirty tree or a push of a different ref can diverge from what it validated. The CI half is a
+copyable job, [`examples/ci-sink-check.yml`](examples/ci-sink-check.yml): it regenerates the sink
+on the pull request's head commit and fails if the checked-in sink is not byte-exact. In CI the
+checkout *is* the pushed commit, so running this gate's `--check` logic there validates what was
+actually pushed — every arrival path (`--no-verify`, no hook installed, tree/tip divergence) is
+covered at the merge boundary. It is an example to copy into your repo, not a job enabled in
+StrictLock's own CI.
+
+## CI check on the pushed commit
+
+Copy [`examples/ci-sink-check.yml`](examples/ci-sink-check.yml) to
+`.github/workflows/sink-check.yml`, set `GATE` to where you vendored
+`generated-sink-prepush-gate.py` and `GENERATED_SINK_PREPUSH_GATE_GENERATOR` to your generator's
+`--check` command. The job checks out the PR head (not the synthetic merge commit), runs the gate
+with the same environment variables as the hook, makes sure the bypass variable is unset, and
+confirms the check left the tree untouched. Use both: the hook gives fast local feedback; CI is
+the authoritative check.
 
 ## Install
 
@@ -89,8 +102,9 @@ export GENERATED_SINK_PREPUSH_GATE_LOG_DIR="$HOME/.agent/logs"
   installed, or a generator whose own `--check` lies. This is the **last local** line of
   defense, not a server-side one — it keeps a stale commit off the remote from *your* machine,
   but it can't refuse a merge or police a push from a machine without the hook. Pair it with a
-  server-side CI check that re-runs the same `--check` as the defense-in-depth peer (a CI job
-  for this is planned; it is not yet part of this repo's CI).
+  server-side CI check that re-runs the same `--check` as the defense-in-depth peer — see
+  [`examples/ci-sink-check.yml`](examples/ci-sink-check.yml) (a copyable example; it is not part
+  of this repo's own CI).
 
 ## Why a separate bypass per gate?
 

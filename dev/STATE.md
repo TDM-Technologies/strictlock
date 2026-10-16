@@ -1,14 +1,15 @@
 # StrictLock — state (the shared blackboard)
 
 ## Meta
-- last_session: 2026-10-16 (claims-truth reword pass, PR 1 of 2 — docs-only; see [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) §7 ledger)
+- last_session: 2026-10-16 (claims-truth PR 2 of 2 — Stage 2 code + restored claims; see [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) §7 ledger and §8 dispositions)
 - agent: Claude Code
-- git_ref: 81cad04 (**origin/main HEAD at branch time, CI 8/8 green**) — the tip after PR #11 (the
-  authorizations record: unified hash-chained plan-gate decision log), PR #12 (spec status header), and
-  the earlier PR #7 (`test-protection-guard`), PR #8/#9 (harvest source map). Full suite run on this
-  branch: **254 Python tests across 10 suites** (plan-gate 35 · memory-cap 15 · externalized-memory 7 + 38 ·
-  generated-sink-commit-gate 10 · generated-sink-prepush-gate 9 · scope-lease 37 · sink-resolver 29 ·
-  liveness-scan 31 · test-protection-guard 43) **+ 9 shell checks** (commit-msg-gate), all green.
+- git_ref: branch `feat/claims-truth-code` (local, **not pushed**), stacked on `docs/claims-truth-reword`
+  (PR 1) over origin/main 81cad04 (the tip after PR #11, the authorizations record, and PR #12). Full suite run
+  on this branch: **367 Python tests across 10 suites** (plan-gate 78 · memory-cap 35 · externalized-memory
+  7 + 38 · generated-sink-commit-gate 13 · generated-sink-prepush-gate 12 · scope-lease 43 · sink-resolver
+  39 · liveness-scan 46, 1 skipped (symlink test) · test-protection-guard 56) **+ 30 shell checks**
+  (commit-msg-gate), all green on macOS. **Windows and macOS CI legs have not run yet** — they run for the
+  first time on this PR's first CI run (CI is now 13 jobs: 9 Python matrix + node + 2 shell + secret-scan).
   Wave 3 (`scope-lease` + `sink-resolver` + `liveness-scan`) shipped via PR #6 (`d17e1a9`); README +
   COMPLIANCE (§K/§L) + CI + roadmap all registered.
 - touched (this session): README.md, roadmap.md, COMPLIANCE.md, plan-gate/*, memory-cap/*,
@@ -24,9 +25,11 @@ log-dir self-protection; spec [AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-REC
 the `paper-§6-reconcile` thread.
 
 **Current focus (2026-10-16):** the claims-truth pass ([CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md), decisions
-made 2026-07-07): **PR 1** (docs-only rewords + this housekeeping) is in review; **PR 2** (code that makes
-the interim-reworded claims true, then restores the strong wording) follows. Open-work inventory:
-[WORK-QUEUE.md](WORK-QUEUE.md). Merge to public main stays with Tim.
+made 2026-07-07): **PR 1** (docs-only rewords) is in review; **PR 2** (`feat/claims-truth-code`: the Stage 2
+code, then the strong wording restored where code and a test back it) is built locally and not pushed.
+Pending: its first CI run (Windows/macOS legs unproven until then) and Tim's merge call. What was
+and was not built is in CLAIMS-FIX-SPEC §8; leftovers are in BACKLOG "Open after Stage 2". Open-work
+inventory: [WORK-QUEUE.md](WORK-QUEUE.md). Merge to public main stays with Tim.
 
 1. **Wave 3 — DONE + LIVE** (PR #6, `d17e1a9`, 2026-06-25): scope-lease + sink-resolver + liveness-scan.
 2. **Wave 4 — 1 of 4 SHIPPED:** the **test-protection co-commit guard is DONE + MERGED** (PR #7, 43 tests,
@@ -92,16 +95,22 @@ HIPAAPath, exact paths, and whether each item is already safe. In brief:
   Still the highest-cred work; just sequenced last by choice.
 - paper-§6-reconcile — **DONE 2026-07-15 (PR #11)** — built, not reworded: the authorizations record
   (allow+deny, hash-chained, verifier, log self-protection) makes the paper's §6 claims code-backed. Still
-  open from that family: the memory-cap decision-log mirror and the scope-lease / sink-resolver log gap-fills
-  (CLAIMS-FIX-SPEC §1, Q3).
-- claims-truth-pass — **PR 1 in review (2026-10-16)**; PR 2 (code fixes + restoring strong wording) next —
-  [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) §6, ledger in §7.
-- ci-os-matrix — ready — add windows-latest + macos-latest to CI so OS-agnostic is proven, not just reviewed.
+  open from that family at the time: the memory-cap decision-log mirror and the scope-lease / sink-resolver log
+  gap-fills (CLAIMS-FIX-SPEC §1, Q3) — built in PR 2 2026-10-16, apart from the leftovers in BACKLOG.
+- claims-truth-pass — **PR 1 in review; PR 2 built locally 2026-10-16 (not pushed)** —
+  [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) §6, ledger in §7, dispositions in §8.
+- ci-os-matrix — built 2026-10-16 (9-entry Python matrix, shell on ubuntu + macOS); Windows/macOS legs run
+  for the first time on PR 2's first CI run.
 - plans-into-repo — pending — import the historical plan files as worked examples (off-machine).
 - false-positive-analysis — pending — quantify read-only compound denies from real deny-log data (off-machine).
 - reversibility-tiers / auto-commit — exploring (later) — need a shared 2–3 month evidence window.
 
 ## Decisions
+- 2026-10-16 — **Claims-truth PR 2 (Stage 2) integrated** on `feat/claims-truth-code` (four piece branches
+  merged `--no-ff`: plan-gate, state-modules, hook-modules, ci; no conflicts). Strong wording restored in
+  README, COMPLIANCE and module docs where code + a test back it; interim wording kept for what was not built
+  (PowerShell compound parsing, scope-lease denied-acquire row, sink-resolver no-conflict/dry-run rows,
+  NotebookEdit total caps). Not pushed; merge stays with Tim.
 - 2026-10-16 — **Claims-truth PR 1 (docs-only) built** on `docs/claims-truth-reword`: every public claim the
   code does not yet back is reworded to interim honest wording (each logged in CLAIMS-FIX-SPEC §7 so PR 2 can
   restore the strong form once code backs it); permanent rewords (Q6 coverage sentence, Q7 "single-use by

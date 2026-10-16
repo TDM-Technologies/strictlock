@@ -47,6 +47,14 @@ _spec.loader.exec_module(sr)
 
 PY = sys.executable  # don't depend on a `python3` on PATH
 
+
+def q(arg: str) -> str:
+    """Quote one argv element for the configured-command parser on this OS.
+
+    The resolver splits with shlex posix=False on Windows, where shlex.quote's
+    single quotes are not understood; use Windows quoting there."""
+    return subprocess.list2cmdline([arg]) if os.name == "nt" else shlex.quote(arg)
+
 # A pure, deterministic generator: dist/index.txt = "<name>=<content>" per sorted src/*.txt.
 GEN = r'''#!/usr/bin/env python3
 import sys, pathlib
@@ -109,8 +117,8 @@ class SinkResolverBase(unittest.TestCase):
         self._env_backup = dict(os.environ)
         # default config the tests share; individual tests override.
         os.environ["SINK_RESOLVER"] = "on"
-        os.environ["SINK_RESOLVER_GENERATOR_CMD"] = f"{shlex.quote(PY)} gen.py"
-        os.environ["SINK_RESOLVER_CHECK_CMD"] = f"{shlex.quote(PY)} gen.py --check"
+        os.environ["SINK_RESOLVER_GENERATOR_CMD"] = f"{q(PY)} gen.py"
+        os.environ["SINK_RESOLVER_CHECK_CMD"] = f"{q(PY)} gen.py --check"
         os.environ["SINK_RESOLVER_SINKS"] = "dist/index.txt"
         for k in ("SINK_RESOLVER_GENERATOR_CWD", "SINK_RESOLVER_TIMEOUT",
                   "SINK_RESOLVER_LOG_DIR"):
@@ -271,7 +279,7 @@ class TestCoverageGuard(SinkResolverBase):
         # SINKS includes dist/extra.txt but GEN never writes it -> finalizing would stage 'ours'
         # and lose the peer edit. The coverage guard must catch this and escalate.
         self._make_two_sink_conflict()
-        os.environ["SINK_RESOLVER_SINKS"] = "dist/index.txt:dist/extra.txt"
+        os.environ["SINK_RESOLVER_SINKS"] = os.pathsep.join(["dist/index.txt", "dist/extra.txt"])
         before_extra = (self.root / "dist" / "extra.txt").read_bytes()  # 'ours' = extra_main
         rc = self._run("resolve")
         self.assertEqual(rc, sr.EXIT_ESCALATE)
@@ -279,6 +287,26 @@ class TestCoverageGuard(SinkResolverBase):
         self.assertTrue(sr._merge_in_progress(self.root))
         self.assertEqual((self.root / "dist" / "extra.txt").read_bytes(), before_extra)
         self.assertIn("dist/extra.txt", sorted(self._unmerged()))
+
+    def test_escalation_restores_all_configured_sinks(self) -> None:
+        # dist/index.txt is a configured sink that is NOT in conflict (hand-resolved to a
+        # marker and staged) but the generator DOES rewrite it; dist/extra.txt is conflicted
+        # and blind to the generator -> the guard escalates. "Leaves the merge exactly as
+        # found" means the non-conflicted sink's marker bytes come back too.
+        self._make_two_sink_conflict()
+        marker = b"HAND-RESOLVED-MARKER\n"
+        (self.root / "dist" / "index.txt").write_bytes(marker)
+        _git(self.root, "add", "dist/index.txt")
+        self.assertEqual(self._unmerged(), ["dist/extra.txt"])
+        extra_before = (self.root / "dist" / "extra.txt").read_bytes()
+        os.environ["SINK_RESOLVER_SINKS"] = os.pathsep.join(["dist/index.txt", "dist/extra.txt"])
+        rc = self._run("resolve")
+        self.assertEqual(rc, sr.EXIT_ESCALATE)
+        self.assertEqual((self.root / "dist" / "index.txt").read_bytes(), marker,
+                         "non-conflicted configured sink must be restored on escalation")
+        self.assertEqual((self.root / "dist" / "extra.txt").read_bytes(), extra_before)
+        self.assertEqual(self._unmerged(), ["dist/extra.txt"])
+        self.assertTrue(sr._merge_in_progress(self.root))
 
     def test_message_names_the_uncovered_sink(self) -> None:
         self._make_two_sink_conflict()
@@ -336,7 +364,7 @@ class TestByteOracleFailClosed(SinkResolverBase):
     def test_check_cmd_drift_fails_closed(self) -> None:
         self._make_sink_only_conflict()
         # a deliberately-failing oracle (always reports drift) -> resolve must fail closed
-        os.environ["SINK_RESOLVER_CHECK_CMD"] = f"{shlex.quote(PY)} -c \"import sys; sys.exit(1)\""
+        os.environ["SINK_RESOLVER_CHECK_CMD"] = f"{q(PY)} -c \"import sys; sys.exit(1)\""
         rc = self._run("resolve")
         self.assertEqual(rc, sr.EXIT_ERROR)
         self.assertTrue(sr._merge_in_progress(self.root), "merge must NOT be finalized on a "
@@ -402,6 +430,53 @@ class TestCheck(SinkResolverBase):
         fresh, _ = sr.check_fresh(root=self.root, sinks=["dist/index.txt"])
         self.assertFalse(fresh)
         self.assertEqual(self._run("check"), sr.EXIT_ERROR)
+
+    def _log_rows(self) -> list:
+        import json
+        p = Path(os.environ["SINK_RESOLVER_LOG_DIR"]) / "sink-resolver.log"
+        return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines()]
+
+    def test_check_fresh_writes_log_row(self) -> None:
+        os.environ["SINK_RESOLVER_LOG_DIR"] = str(self.tmp / "logs")
+        self._init_repo()
+        self.assertEqual(self._run("check"), sr.EXIT_OK)
+        rows = self._log_rows()
+        self.assertEqual([r["decision"] for r in rows], ["check-fresh"])
+        self.assertEqual(rows[0]["verb"], "check")
+
+    def test_check_stale_writes_log_row(self) -> None:
+        os.environ["SINK_RESOLVER_LOG_DIR"] = str(self.tmp / "logs")
+        self._init_repo()
+        (self.root / "src" / "a.txt").write_text("A_DRIFT\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-q", "-m", "drift the sink")
+        self.assertEqual(self._run("check"), sr.EXIT_ERROR)
+        self.assertEqual([r["decision"] for r in self._log_rows()], ["check-stale"])
+
+    def test_check_error_writes_log_row(self) -> None:
+        os.environ["SINK_RESOLVER_LOG_DIR"] = str(self.tmp / "logs")
+        self._init_repo()
+        os.environ.pop("SINK_RESOLVER_SINKS", None)  # misconfig -> ResolveError
+        self.assertEqual(self._run("check"), sr.EXIT_ERROR)
+        rows = self._log_rows()
+        self.assertEqual([r["decision"] for r in rows], ["error"])
+        self.assertEqual(rows[0]["verb"], "check")
+
+    def test_repo_root_failure_writes_log_row(self) -> None:
+        os.environ["SINK_RESOLVER_LOG_DIR"] = str(self.tmp / "logs")
+        norepo = self.tmp / "norepo"
+        norepo.mkdir()
+        rc = sr.main(["resolve", "--root", str(norepo)])
+        self.assertEqual(rc, sr.EXIT_ERROR)
+        rows = self._log_rows()
+        self.assertEqual([r["decision"] for r in rows], ["error"])
+        self.assertEqual(rows[0]["stage"], "repo-root")
+        self.assertEqual(rows[0]["verb"], "resolve")
+
+    def test_no_log_dir_no_log(self) -> None:
+        self._init_repo()
+        self.assertEqual(self._run("check"), sr.EXIT_OK)
+        self.assertFalse((self.tmp / "logs").exists())
 
     def test_check_without_check_cmd_is_net_non_mutating(self) -> None:
         os.environ.pop("SINK_RESOLVER_CHECK_CMD", None)
@@ -493,7 +568,7 @@ class TestMisconfig(SinkResolverBase):
 
     def test_generator_nonzero_fails_closed(self) -> None:
         self._make_sink_only_conflict()
-        os.environ["SINK_RESOLVER_GENERATOR_CMD"] = f"{shlex.quote(PY)} -c \"import sys; sys.exit(3)\""
+        os.environ["SINK_RESOLVER_GENERATOR_CMD"] = f"{q(PY)} -c \"import sys; sys.exit(3)\""
         os.environ.pop("SINK_RESOLVER_CHECK_CMD", None)
         self.assertEqual(self._run("resolve"), sr.EXIT_ERROR)
         self.assertTrue(sr._merge_in_progress(self.root))
@@ -514,6 +589,26 @@ class TestNormalization(SinkResolverBase):
         self._init_repo()
         keys = sr.normalize_sinks(self.root, ["./dist/index.txt", "dist/index.txt"])
         self.assertEqual(keys, ["dist/index.txt"])
+
+
+class SplitCommandTests(unittest.TestCase):
+    """Windows-style (posix=False) splitting must strip one layer of outer quotes."""
+
+    def test_windows_quoted_path_with_spaces(self):
+        argv = sr._split_command(r'"C:\Program Files\Python\python.exe" gen.py --check', posix=False)
+        self.assertEqual(argv, [r"C:\Program Files\Python\python.exe", "gen.py", "--check"])
+
+    def test_windows_single_quotes_stripped(self):
+        self.assertEqual(sr._split_command("'a b' c", posix=False), ["a b", "c"])
+
+    def test_windows_unquoted_and_inner_quotes_untouched(self):
+        self.assertEqual(sr._split_command(r"python C:\x\gen.py", posix=False),
+                         ["python", r"C:\x\gen.py"])
+        self.assertEqual(sr._split_command('python -c "import sys"', posix=False),
+                         ["python", "-c", "import sys"])
+
+    def test_posix_unchanged(self):
+        self.assertEqual(sr._split_command("'a b' c", posix=True), ["a b", "c"])
 
 
 if __name__ == "__main__":

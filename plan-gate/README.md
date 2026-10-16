@@ -16,18 +16,42 @@ Read the full argument in [`paper.md`](paper.md).
 - Finds the single `status: active` plan in your plans directory (scoped per git worktree).
 - **Edit / Write / NotebookEdit:** the target path must *exactly* match an `allowed_paths`
   entry. A directory entry authorizes nothing inside it — enumerate each file.
-- **Bash / PowerShell:** the command must *start with* an `allowed_commands` prefix, or be a
-  known read-only command (`git status`, `ls`, `cat`, …) which is always permitted. Only
-  `cd`-led compounds are split and checked segment by segment today; any other chained
-  command is matched on its start (see [`AUTHORING.md`](AUTHORING.md) §2). Per-segment checking
-  of every chained command is in progress.
+- **Bash:** every command is split into segments (`&&`, `||`, `;`, `|`, a lone `&`, newlines,
+  plus the bodies of `$(...)`, backticks and `<(...)`), and **each segment** must independently
+  *start with* an `allowed_commands` prefix, be a bare `cd`, or be a known read-only command
+  (`git status`, `ls`, `cat`, … — narrowed to their non-mutating forms). A compound command is
+  only as authorized as its least-authorized segment. A redirection that writes (`>`, `>>`,
+  `>|`, `&>`, `2>`) is a file write, gated like Edit/Write (`/dev/null` is always fine). A
+  command the gate cannot confidently parse is denied. See [`AUTHORING.md`](AUTHORING.md) §2.
+- **PowerShell:** the command must *start with* an `allowed_commands` prefix or be a known
+  read-only cmdlet; there is no compound parsing yet (list each shape explicitly).
 - Emits `{"hookSpecificOutput": {"permissionDecision": "allow"|"deny", ...}}` on **stdout**.
 - Appends every decision, allow and deny, to a hash-chained decision log (when
   `PLAN_GATE_LOG_DIR` is set) — your audit trail. `plan-gate.py verify-log` proves the
   chain, and the gate never authorizes a gated write to the log itself.
 
-It **fails closed** for governance and **fails open for its own bugs**: an unhandled
-exception in the gate exits non-zero with a warning rather than wedging your agent.
+It **fails closed** for governance *and for its own bugs*: a payload it cannot parse, or an
+unhandled exception inside the gate, produces a **deny** (JSON, exit 0) with a loud message
+saying what failed and how to bypass — never a non-zero exit, which a harness treats as
+"proceed". The escape hatch is `PLAN_GATE_BYPASS=on` set inline; it is honored even on that
+crash path, and every use is logged (`emergency_bypass`). The trade-off is accepted: if the
+harness changes its payload protocol, the gate denies until it is updated or bypassed.
+
+## Migration note (plans written before segment checking)
+
+Plans that relied on a prefix riding along with what followed it — `pytest -q && git push`
+matching `pytest`, `cat x; rm y` matching the read-only `cat`, `echo x > f` matching `echo` —
+**now deny. That is intended.** To migrate:
+
+1. Run the work and read each deny: it names the offending segment.
+2. Add an `allowed_commands` entry for each *distinct command* in the chain (one entry per
+   command, as narrow as [`AUTHORING.md`](AUTHORING.md) §2 advises). An entry that spells out a
+   whole compound (`git add -A && git commit`) no longer authorizes the compound.
+3. Add every file a command redirects into (`> out.txt`) to `allowed_paths`; a relative target
+   resolves against the working directory, and after a `cd` in the same command an absolute path
+   is required.
+4. `git fetch` and mutating `git branch` / `git remote` / `find -delete` forms are no longer
+   treated as read-only; grant the ones the work needs explicitly.
 
 ## Quickstart (60 seconds)
 

@@ -24,7 +24,10 @@ to the login page.
 - `allowed_paths` — the agent may write **only** these exact files. Listing a directory
   authorizes nothing inside it; enumerate each file. Entries may be absolute or
   repo-root-relative.
-- `allowed_commands` — a Bash/PowerShell command is allowed only if it **starts with** one
-  of these prefixes (read-only commands like `git status`, `ls`, `cat` are always allowed).
+- `allowed_commands` — a Bash command is allowed only if **every segment** of it (split on
+  `&&`, `||`, `;`, `|`, `&`, newlines, and including `$(...)` bodies) **starts with** one of
+  these prefixes; a PowerShell command must start with one. Read-only commands like
+  `git status`, `ls`, `cat` are always allowed. A `>` redirection into a file is a file write
+  and needs that file in `allowed_paths`.
 
 Everything below the frontmatter is for humans; the gate ignores it.
