@@ -28,6 +28,9 @@ def run_gate(payload: dict, gate_on: bool = True, **env_overrides):
     env["MEMORY_CAP"] = "on" if gate_on else "off"
     env["MEMORY_CAP_BYPASS"] = ""
     env["MEMORY_CAP_CHARS"] = ""
+    for k in ("MEMORY_CAP_MAX_ENTRIES", "MEMORY_CAP_TOTAL_CHARS",
+              "MEMORY_CAP_DECISION_LOG", "MEMORY_CAP_LOG_DIR"):
+        env[k] = ""
     # Match any path ending in memory.md so tests can use a temp file.
     env["MEMORY_CAP_PATH_RE"] = r"memory\.md$"
     for k, v in env_overrides.items():
@@ -232,6 +235,181 @@ class MemoryCapTests(unittest.TestCase):
             decision(p), "allow",
             msg="CRLF-authored pre-existing line must normalize equal to its LF form",
         )
+
+    # --- C2: NotebookEdit baselines against on-disk content --------------------
+
+    def _nb(self, source: str) -> dict:
+        return {"tool_name": "NotebookEdit",
+                "tool_input": {"notebook_path": str(self.index), "new_source": source}}
+
+    def test_notebookedit_retaining_preexisting_over_cap_allowed(self):
+        self.index.write_text(f"# H\n{OVER_CAP_LINE}\n- keeper\n", encoding="utf-8")
+        p = run_gate(self._nb(f"{OVER_CAP_LINE}\n{SHORT_LINE}\n"))
+        self.assertEqual(decision(p), "allow", msg=p.stdout)
+
+    def test_notebookedit_introducing_over_cap_denied(self):
+        self.index.write_text("# H\n- keeper\n", encoding="utf-8")
+        p = run_gate(self._nb(OVER_CAP_LINE))
+        self.assertEqual(decision(p), "deny")
+
+    # --- C3: opt-in total caps --------------------------------------------------
+
+    def _edit(self, old: str, new: str) -> dict:
+        return {"tool_name": "Edit", "tool_input": {
+            "file_path": str(self.index), "old_string": old, "new_string": new}}
+
+    def test_total_caps_off_by_default(self):
+        many = "".join(f"- e{i}\n" for i in range(500))
+        p = run_gate(self._write(self.index, many))
+        self.assertEqual(decision(p), "allow")
+
+    def test_max_entries_denies_new_write_over_cap(self):
+        content = "".join(f"- e{i}\n" for i in range(6))
+        p = run_gate(self._write(self.index, content), MEMORY_CAP_MAX_ENTRIES="5")
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("entries", p.stdout)
+
+    def test_max_entries_at_cap_allowed(self):
+        content = "".join(f"- e{i}\n" for i in range(5))
+        p = run_gate(self._write(self.index, content), MEMORY_CAP_MAX_ENTRIES="5")
+        self.assertEqual(decision(p), "allow")
+
+    def test_max_entries_edit_growing_past_cap_denied(self):
+        self.index.write_text("".join(f"- e{i}\n" for i in range(5)), encoding="utf-8")
+        p = run_gate(self._edit("- e4\n", "- e4\n- extra\n"), MEMORY_CAP_MAX_ENTRIES="5")
+        self.assertEqual(decision(p), "deny")
+
+    def test_max_entries_already_over_not_wedged(self):
+        # Index already holds 8 entries (> cap 5): a level or shrinking edit passes,
+        # growing it further is refused.
+        self.index.write_text("".join(f"- e{i}\n" for i in range(8)), encoding="utf-8")
+        level = run_gate(self._edit("- e0\n", "- renamed\n"), MEMORY_CAP_MAX_ENTRIES="5")
+        self.assertEqual(decision(level), "allow", msg=level.stdout)
+        shrink = run_gate(self._edit("- e0\n", ""), MEMORY_CAP_MAX_ENTRIES="5")
+        self.assertEqual(decision(shrink), "allow", msg=shrink.stdout)
+        grow = run_gate(self._edit("- e0\n", "- e0\n- more\n"), MEMORY_CAP_MAX_ENTRIES="5")
+        self.assertEqual(decision(grow), "deny")
+
+    def test_total_chars_denies_growth_past_cap(self):
+        self.index.write_text("- aaaa\n- bbbb\n", encoding="utf-8")  # 12 chars
+        p = run_gate(self._edit("- bbbb", "- bbbb\n- cccccccc"), MEMORY_CAP_TOTAL_CHARS="20")
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("total", p.stdout)
+
+    def test_total_chars_already_over_shrinking_allowed(self):
+        self.index.write_text("- " + "a" * 100 + "\n- " + "b" * 100 + "\n", encoding="utf-8")
+        p = run_gate(self._edit("- " + "b" * 100, "- b"), MEMORY_CAP_TOTAL_CHARS="50")
+        self.assertEqual(decision(p), "allow", msg=p.stdout)
+
+    def test_total_chars_invalid_value_ignored(self):
+        p = run_gate(self._write(self.index, "- x\n" * 50), MEMORY_CAP_TOTAL_CHARS="abc")
+        self.assertEqual(decision(p), "allow")
+
+
+class DecisionLogTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.index = self.root / "memory.md"
+        self.logdir = self.root / "logs"
+        self.log = self.logdir / "memory-cap-decisions.log"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _w(self, content: str) -> dict:
+        return {"tool_name": "Write",
+                "tool_input": {"file_path": str(self.index), "content": content}}
+
+    def _run(self, payload, **env):
+        base = {"MEMORY_CAP_DECISION_LOG": "1", "MEMORY_CAP_LOG_DIR": str(self.logdir)}
+        base.update(env)
+        return run_gate(payload, **base)
+
+    def _rows(self):
+        return [json.loads(l) for l in self.log.read_text(encoding="utf-8").splitlines()]
+
+    def _verify(self, path=None):
+        argv = [sys.executable, str(GATE), "verify-log"]
+        if path is not None:
+            argv.append(str(path))
+        return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env=dict(os.environ, MEMORY_CAP_LOG_DIR=str(self.logdir)))
+
+    def test_allow_and_deny_rows_chain_verifies(self):
+        self.assertEqual(decision(self._run(self._w(SHORT_LINE))), "allow")
+        self.assertEqual(decision(self._run(self._w(OVER_CAP_LINE))), "deny")
+        rows = self._rows()
+        self.assertEqual([r["decision"] for r in rows], ["allow", "deny"])
+        self.assertEqual(rows[0]["prev"], "0" * 64)
+        self.assertEqual(rows[1]["prev"], rows[0]["h"])
+        for r in rows:
+            self.assertEqual(r["tool"], "Write")
+            self.assertEqual(r["target"], str(self.index))
+            self.assertTrue(r["reason"])
+        self.assertEqual(rows[1]["class"], "over_cap")
+        # privacy: no payload contents anywhere in the log
+        self.assertNotIn("xxxxxxxx", self.log.read_text(encoding="utf-8"))
+        v = self._verify()
+        self.assertEqual(v.returncode, 0, msg=v.stdout + v.stderr)
+        self.assertIn("chain intact", v.stdout)
+
+    def test_flag_off_no_log(self):
+        p = run_gate(self._w(SHORT_LINE), MEMORY_CAP_LOG_DIR=str(self.logdir))
+        self.assertEqual(decision(p), "allow")
+        self.assertFalse(self.logdir.exists())
+
+    def test_non_index_and_inert_gate_not_logged(self):
+        other = {"tool_name": "Write", "tool_input": {
+            "file_path": str(self.root / "notes.md"), "content": "x"}}
+        self._run(other)
+        run_gate(self._w(SHORT_LINE), gate_on=False,
+                 MEMORY_CAP_DECISION_LOG="1", MEMORY_CAP_LOG_DIR=str(self.logdir))
+        self.assertFalse(self.log.exists())
+
+    def test_bypass_is_logged(self):
+        p = self._run(self._w(OVER_CAP_LINE), MEMORY_CAP_BYPASS="1")
+        self.assertEqual(decision(p), "allow")
+        rows = self._rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["class"], "emergency_bypass")
+        self.assertEqual(rows[0]["decision"], "allow")
+        self.assertEqual(rows[0]["tool"], "Write")
+
+    def test_logging_failure_never_blocks(self):
+        blocker = self.root / "iamafile"
+        blocker.write_text("x", encoding="utf-8")
+        bad = {"MEMORY_CAP_LOG_DIR": str(blocker / "sub")}  # cannot mkdir under a file
+        self.assertEqual(decision(self._run(self._w(SHORT_LINE), **bad)), "allow")
+        self.assertEqual(decision(self._run(self._w(OVER_CAP_LINE), **bad)), "deny")
+
+    def test_tamper_detected(self):
+        for _ in range(3):
+            self._run(self._w(SHORT_LINE))
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        row = json.loads(lines[1])
+        row["decision"] = "deny"
+        lines[1] = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        self.log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        v = self._verify(self.log)
+        self.assertEqual(v.returncode, 2)
+        self.assertIn("line 2", v.stdout)
+
+    def test_deleted_row_detected(self):
+        for _ in range(3):
+            self._run(self._w(SHORT_LINE))
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        del lines[1]
+        self.log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertEqual(self._verify(self.log).returncode, 2)
+
+    def test_verify_missing_log_exit_2(self):
+        self.assertEqual(self._verify(self.root / "nope.log").returncode, 2)
+
+    def test_total_cap_deny_is_logged(self):
+        p = self._run(self._w("- a\n- b\n- c\n"), MEMORY_CAP_MAX_ENTRIES="2")
+        self.assertEqual(decision(p), "deny")
+        self.assertEqual(self._rows()[0]["class"], "total_cap")
 
 
 if __name__ == "__main__":

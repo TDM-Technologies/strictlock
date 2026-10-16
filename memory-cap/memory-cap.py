@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""memory-cap: a fail-closed PreToolUse hook that caps the length of an agent's memory index entries.
+"""memory-cap: a fail-closed PreToolUse hook that caps the size of an agent's memory index.
 
 WHY THIS EXISTS
   Many agent harnesses auto-load a memory "index" file into the context of every
@@ -9,7 +9,10 @@ WHY THIS EXISTS
   files") — but conventions are advisory and quietly rot. This hook makes the
   convention STRUCTURAL: any Write/Edit to the index file whose new content
   contains an index entry (a `- ` line) longer than a configurable cap is REFUSED
-  at the tool boundary, before it lands.
+  at the tool boundary, before it lands. Optional total caps (entry count, summed
+  entry characters) bound the index as a whole. Only the lines a write introduces
+  or modifies are judged (a pre-existing over-cap line is never re-flagged), so
+  the index cannot self-wedge through Write, Edit or NotebookEdit.
 
   Part of StrictLock (https://github.com/TDM-Technologies/strictlock). Standalone —
   no other module required.
@@ -41,14 +44,29 @@ CONFIGURATION (all via environment)
                         target path. Default matches a Claude Code per-project
                         memory index:
                             /.claude/projects/<project>/memory/memory.md
+  MEMORY_CAP_MAX_ENTRIES  opt-in cap on the number of `- ` entries in the index.
+  MEMORY_CAP_TOTAL_CHARS  opt-in cap on the summed length of the `- ` entries.
+                        Both are judged in the same changed-region pass: a write is
+                        refused only if the result is over the cap AND larger than
+                        the pre-existing file, so an index already over a cap is
+                        never wedged (shrinking / level edits pass). Not evaluated
+                        for NotebookEdit (one cell's source is not the whole file).
+  MEMORY_CAP_DECISION_LOG "1" to record every decision (allow, deny, bypass) on the
+                        capped index to a hash-chained JSONL log (best-effort,
+                        never blocks; paths/sizes/reasons only). Requires:
+  MEMORY_CAP_LOG_DIR    directory for memory-cap-decisions.log.
+  `memory-cap.py verify-log [path]` verifies the chain (exit 0 intact, 2 damaged);
+  the chain format mirrors plan-gate's.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import sys
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Master gate + own uniquely-named bypass.
@@ -68,6 +86,24 @@ def _cap_chars() -> int:
 
 
 CAP_CHARS = _cap_chars()
+
+
+def _opt_in_limit(name: str):
+    """Optional positive-integer limit from the environment; None (feature off)
+    when unset, non-numeric, or <= 0."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        val = int(raw)
+    except ValueError:
+        return None
+    return val if val > 0 else None
+
+
+# Opt-in total-size caps over the index's `- ` entries (both off by default).
+MAX_ENTRIES = _opt_in_limit("MEMORY_CAP_MAX_ENTRIES")
+TOTAL_CHARS = _opt_in_limit("MEMORY_CAP_TOTAL_CHARS")
 
 # Predicate matching the index file to cap. Configurable; the default targets a
 # Claude Code per-project memory index. Falls back to the default on an invalid
@@ -98,12 +134,232 @@ def _emit(decision: str, reason: str) -> None:
     sys.exit(0)
 
 
-def allow(reason: str) -> None:
+# --- Opt-in decision log -----------------------------------------------------
+# Hash-chained JSONL decision log. The row shape, chain algorithm, append lock,
+# tail recovery and verifier below MIRROR plan-gate's chain (plan-gate/plan-gate.py
+# `_log_decision` / `_Flock` / `_read_prev_hash` / `verify_log`) so every gate in
+# the suite has the same tamper-evident trail. COPIED, not imported: modules stay
+# standalone. Keep the two in step by hand if the chain format ever changes.
+#
+# Opt-in: MEMORY_CAP_DECISION_LOG=1 AND MEMORY_CAP_LOG_DIR set. Best-effort — a
+# logging failure NEVER changes a decision. Privacy: paths, sizes and reasons
+# only; file contents / payloads are never logged. Bypass uses are logged too.
+# Not logged: gate disabled (MEMORY_CAP != on) and calls that are not Write/Edit/
+# NotebookEdit or do not target the capped index file (not decisions of this gate).
+
+DECISION_LOG_FLAG_ENV = "MEMORY_CAP_DECISION_LOG"
+LOG_DIR_ENV = "MEMORY_CAP_LOG_DIR"
+DECISION_LOG_NAME = "memory-cap-decisions.log"
+_GENESIS = "0" * 64
+
+# Context for the row about to be written; filled in as main() learns more.
+_CTX = {"tool": "", "target": "", "surface": "file"}
+
+
+def _decision_log_path():
+    """Path of the decision log, or None when logging is not enabled."""
+    if os.environ.get(DECISION_LOG_FLAG_ENV, "").strip() != "1":
+        return None
+    d = os.environ.get(LOG_DIR_ENV, "").strip()
+    if not d:
+        return None
+    return Path(d) / DECISION_LOG_NAME
+
+
+def _canonical_row_hash(prev: str, row_without_h: dict) -> str:
+    """sha256 over prev + newline + canonical JSON of the row (minus `h`)."""
+    canon = json.dumps(
+        row_without_h, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256((prev + "\n" + canon).encode("utf-8")).hexdigest()
+
+
+class _Flock:
+    """Best-effort exclusive advisory lock (POSIX fcntl.flock, Windows
+    msvcrt.locking, silent no-op elsewhere). Lock failure never blocks."""
+
+    def __init__(self, fh):
+        self._fh = fh
+        self._impl = None
+
+    def __enter__(self):
+        try:
+            import fcntl
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+            self._impl = "fcntl"
+        except Exception:
+            try:
+                import msvcrt
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+                self._impl = "msvcrt"
+            except Exception:
+                self._impl = None
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self._impl == "fcntl":
+                import fcntl
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            elif self._impl == "msvcrt":
+                import msvcrt
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
+        return False
+
+
+def _read_prev_hash(fh) -> str:
+    """prev for the next row: `h` of the last row, or sha256 of the raw last line
+    if it is unparseable (chain continues verifiably past damage). Split on
+    b"\\n" only, exactly like the verifier."""
+    try:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        if size == 0:
+            return _GENESIS
+        back = min(size, 262144)
+        fh.seek(size - back)
+        chunk = fh.read(back)
+        lines = [ln for ln in chunk.split(b"\n") if ln.strip()]
+        if not lines:
+            return _GENESIS
+        last = lines[-1]
+        try:
+            row = json.loads(last.decode("utf-8"))
+            h = row.get("h") if isinstance(row, dict) else None
+            if isinstance(h, str) and len(h) == 64:
+                return h
+        except Exception:
+            pass
+        return hashlib.sha256(last).hexdigest()
+    except Exception:
+        return _GENESIS
+
+
+def _safe_str(v, cap: int) -> str:
+    """Length-cap and strip un-encodable code points so a row always serializes."""
+    s = str(v)[:cap]
+    try:
+        return s.encode("utf-8", "replace").decode("utf-8")
+    except Exception:
+        return s.encode("ascii", "replace").decode("ascii")
+
+
+def _log_decision(decision: str, class_: str, reason: str) -> None:
+    """Append one hash-chained row. Best-effort; never raises."""
+    try:
+        path = _decision_log_path()
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            cwd_str = str(Path(os.getcwd()))
+        except OSError:
+            cwd_str = ""
+        row = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "decision": decision,
+            "surface": _safe_str(_CTX.get("surface", "file"), 20),
+            "tool": _safe_str(_CTX.get("tool", ""), 200),
+            "target": _safe_str(_CTX.get("target", ""), 2048),
+            "command": "",
+            "class": _safe_str(class_, 100),
+            "reason": _safe_str(reason, 300),
+            "plan": "",
+            "cwd": _safe_str(cwd_str, 1024),
+        }
+        with open(str(path), "a+b") as fh:
+            with _Flock(fh):
+                row["prev"] = _read_prev_hash(fh)
+                row["h"] = _canonical_row_hash(row["prev"], row)
+                fh.seek(0, os.SEEK_END)
+                fh.write(
+                    (
+                        json.dumps(
+                            row, sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=False,
+                        ) + "\n"
+                    ).encode("utf-8")
+                )
+                fh.flush()
+    except Exception:
+        pass  # Never let logging failure change a decision.
+
+
+def verify_log(path_arg) -> int:
+    """Verify the hash chain. Exit 0 = intact; 2 = damage/tampering/no log."""
+    p = Path(path_arg) if path_arg else _default_log_path()
+    if p is None:
+        print(f"verify-log: no path given and {LOG_DIR_ENV} is unset.", file=sys.stderr)
+        return 2
+    if not p.exists():
+        print(f"verify-log: {p} does not exist.", file=sys.stderr)
+        return 2
+    raw_lines = p.read_bytes().split(b"\n")
+    if raw_lines and raw_lines[-1] == b"":
+        raw_lines.pop()
+    expected = _GENESIS
+    problems = []
+    rows = 0
+    for i, raw in enumerate(raw_lines, start=1):
+        if not raw.strip():
+            problems.append(f"line {i}: blank line (never written by the gate)")
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8"))
+            if not isinstance(row, dict):
+                raise ValueError("not an object")
+        except Exception:
+            problems.append(
+                f"line {i}: unparseable — damage detected; chain re-anchors after it"
+            )
+            expected = hashlib.sha256(raw).hexdigest()
+            continue
+        rows += 1
+        prev = row.get("prev")
+        h = row.get("h")
+        if prev != expected:
+            problems.append(
+                f"line {i}: prev-hash mismatch (expected {expected[:12]}…, "
+                f"found {str(prev)[:12]}…) — a row was altered, inserted, or removed"
+            )
+        row_without_h = {k: v for k, v in row.items() if k != "h"}
+        if _canonical_row_hash(str(prev), row_without_h) != h:
+            problems.append(f"line {i}: row hash invalid — row content was altered")
+        if isinstance(h, str) and len(h) == 64:
+            expected = h
+        else:
+            expected = hashlib.sha256(raw).hexdigest()
+    if problems:
+        print(f"verify-log: {p}: {len(problems)} problem(s) across {rows} row(s):")
+        for msg in problems[:50]:
+            print("  " + msg)
+        return 2
+    print(f"verify-log: {p}: chain intact — {rows} row(s) verified.")
+    return 0
+
+
+def _default_log_path():
+    d = os.environ.get(LOG_DIR_ENV, "").strip()
+    return (Path(d) / DECISION_LOG_NAME) if d else None
+
+
+def allow(reason: str, class_=None) -> None:
+    """Allow. A row is logged only when *class_* is given (decisions of this
+    gate on the capped index); pass-throughs and the inert gate pass none."""
+    if class_:
+        _log_decision("allow", class_, reason)
     _emit("allow", reason)
 
 
-def deny(reason: str) -> None:
-    """Fail-closed dominant — every blocking path routes here."""
+def deny(reason: str, class_: str = "denied", log_reason=None) -> None:
+    """Fail-closed dominant — every blocking path routes here. *log_reason*, when
+    given, replaces the user-facing text in the log row (the deny message can
+    quote an excerpt of the offending line; the log must not)."""
+    _log_decision("deny", class_, log_reason or reason)
     _emit("deny", reason)
 
 
@@ -180,6 +436,43 @@ def introduced_violating_lines(existing_content: str, new_content: str) -> list:
         if n > CAP_CHARS:
             violations.append((i, stripped, n))
     return violations
+
+
+def _index_totals(content: str) -> tuple:
+    """(entry_count, total_chars) over the `- ` lines of *content*; each entry's
+    length is the rstripped line, the same measure as the per-line cap."""
+    n = 0
+    chars = 0
+    for line in content.splitlines():
+        if line.startswith(INDEX_LINE_PREFIX):
+            n += 1
+            chars += len(line.rstrip())
+    return n, chars
+
+
+def total_cap_violations(existing_content: str, new_content: str) -> list:
+    """Opt-in total-size caps, judged on the same delta as the per-line cap.
+
+    A cap is violated only when the result is over it AND larger than the
+    pre-existing file on that measure: an index already over a cap is never
+    wedged — edits that keep it level or shrink it pass, so the way out
+    (compressing / removing entries) always stays open. A write that newly
+    exceeds the cap, or grows an already-over index, is refused. Returns a list
+    of human-readable violation strings (empty when both caps are off or met).
+    """
+    out = []
+    old_n, old_c = _index_totals(existing_content)
+    new_n, new_c = _index_totals(new_content)
+    if MAX_ENTRIES is not None and new_n > MAX_ENTRIES and new_n > old_n:
+        out.append(
+            f"{new_n} `- ` entries (cap {MAX_ENTRIES}; index had {old_n} before this write)"
+        )
+    if TOTAL_CHARS is not None and new_c > TOTAL_CHARS and new_c > old_c:
+        out.append(
+            f"{new_c} total chars across `- ` entries (cap {TOTAL_CHARS}; "
+            f"index had {old_c} before this write)"
+        )
+    return out
 
 
 def read_existing_or_empty(file_path: str | None) -> str:
@@ -272,15 +565,30 @@ def main() -> None:
             f"tool call (every use is logged on stderr; single-use by convention).",
             file=sys.stderr,
         )
+        # Best-effort payload parse (only when the decision log is on) to enrich
+        # the bypass row with tool/target; a parse failure never blocks a bypass.
+        if _decision_log_path() is not None:
+            try:
+                bp = json.load(sys.stdin)
+                _CTX["surface"] = "gate"
+                _CTX["tool"] = str(bp.get("tool_name") or "")
+                bti = bp.get("tool_input") or {}
+                _CTX["target"] = str(bti.get("file_path") or bti.get("notebook_path") or "")
+            except Exception:
+                _CTX["surface"] = "gate"
         allow(
             f"memory-cap: {OWN_BYPASS_ENV}=1 — explicit bypass (single-use by "
-            f"convention: set inline per command; every use is logged)."
+            f"convention: set inline per command; every use is logged).",
+            "emergency_bypass",
         )
 
     try:
         payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            raise ValueError("payload is not a JSON object")
     except Exception as e:
-        deny(f"memory-cap: could not parse stdin JSON ({e}) — fail-closed.")
+        _CTX["surface"] = "gate"
+        deny(f"memory-cap: could not parse stdin JSON ({e}) — fail-closed.", "parse_error")
         return
 
     tool_name = payload.get("tool_name")
@@ -298,6 +606,9 @@ def main() -> None:
     if not is_index_target(target_path):
         allow(f"memory-cap: target path {target_path!r} is not the capped index file.")
 
+    _CTX["tool"] = str(tool_name)
+    _CTX["target"] = str(target_path)
+
     # Reconstruct the intended new content AND establish the pre-existing baseline
     # per-tool. The cap is then applied only to the `- ` lines the write
     # introduces or modifies (the multiset delta), never to pre-existing untouched
@@ -312,7 +623,8 @@ def main() -> None:
         new_s = tool_input.get("new_string")
         replace_all = bool(tool_input.get("replace_all", False))
         if old_s is None or new_s is None:
-            allow("memory-cap: Edit payload missing old_string/new_string — letting Edit validate.")
+            allow("memory-cap: Edit payload missing old_string/new_string — letting Edit validate.",
+                  "edit_deferred")
         reconstructed = reconstruct_edit_content(target_path, old_s, new_s, replace_all)
         if reconstructed is None:
             # Cannot faithfully reconstruct the post-edit content (file
@@ -323,27 +635,45 @@ def main() -> None:
             allow(
                 f"memory-cap: cannot faithfully reconstruct the Edit result for "
                 f"{target_path!r} (file unreadable, or old_string empty / absent "
-                f"/ non-unique) — deferring to the Edit tool's own validation."
+                f"/ non-unique) — deferring to the Edit tool's own validation.",
+                "edit_deferred",
             )
         # Reuse the content the reconstruction already read as the delta baseline
         # (no second disk read).
         existing_content, new_content = reconstructed
     else:
         # NotebookEdit on a .md index is structurally unlikely; check defensively.
-        # No reliable pre-edit baseline, so treat the source as fully introduced —
-        # the strict (whole-content) behavior, which can only flag more, never wedge.
+        # Baseline against the on-disk content (like Write) so a source that merely
+        # retains a pre-existing over-cap line is never re-flagged — it cannot
+        # self-wedge. new_source is one cell's text, not the whole file, so the
+        # opt-in TOTAL caps (which need the whole result) are not evaluated here.
         new_content = tool_input.get("new_source") or ""
-        existing_content = ""
+        existing_content = read_existing_or_empty(target_path)
 
     if not new_content:
-        allow("memory-cap: empty payload — nothing to check.")
+        allow("memory-cap: empty payload — nothing to check.", "empty_payload")
 
     # Scan only the changed region: lines this write introduces or modifies.
     violations = introduced_violating_lines(existing_content, new_content)
+    total_violations = (
+        total_cap_violations(existing_content, new_content)
+        if tool_name != "NotebookEdit" else []
+    )
+    if total_violations and not violations:
+        deny(
+            f"memory-cap: write refused — the index would exceed a total-size cap: "
+            f"{'; '.join(total_violations)}.\n"
+            f"Remove or merge entries (a write that keeps the index level or shrinks it "
+            f"is allowed), and move detail into topic files. To bypass, set "
+            f"{OWN_BYPASS_ENV}=1 — single-use by convention: set inline per command; "
+            f"every use is logged, so a lingering bypass is visible in the trail.",
+            "total_cap",
+        )
     if not violations:
         allow(
             f"memory-cap: no INTRODUCED/MODIFIED `- ` line exceeds {CAP_CHARS} chars "
-            f"(pre-existing lines are not re-checked)."
+            f"(pre-existing lines are not re-checked).",
+            "within_cap",
         )
 
     # Build a clear, actionable deny message naming the violators. Cap the detail
@@ -357,6 +687,8 @@ def main() -> None:
         f"\n  ...and {len(violations) - 3} more `- ` line(s) over the cap."
         if len(violations) > 3 else ""
     )
+    if total_violations:
+        overflow_note += f"\n  Also over a total cap: {'; '.join(total_violations)}."
     deny(
         f"memory-cap: write refused — {len(violations)} INTRODUCED/MODIFIED `- ` "
         f"line(s) exceed the {CAP_CHARS}-char cap (whole line excluding trailing "
@@ -365,11 +697,20 @@ def main() -> None:
         f"Compress each violating entry to <= {CAP_CHARS} chars and move detail into a "
         f"topic file (the index should stay a one-line-per-entry table of contents). "
         f"To bypass, set {OWN_BYPASS_ENV}=1 — single-use by convention: set inline "
-        f"per command; every use is logged, so a lingering bypass is visible in the trail."
+        f"per command; every use is logged, so a lingering bypass is visible in the trail.",
+        "over_cap",
+        log_reason=(
+            f"memory-cap: {len(violations)} introduced/modified `- ` line(s) exceed the "
+            f"{CAP_CHARS}-char cap (longest {max(n for _, _, n in violations)} chars)."
+        ),
     )
 
 
 if __name__ == "__main__":
+    # Argv mode: `memory-cap.py verify-log [path]` checks the decision-log hash
+    # chain (exit 0 intact / 2 damage). Hook mode (no args) reads stdin as usual.
+    if len(sys.argv) >= 2 and sys.argv[1] == "verify-log":
+        sys.exit(verify_log(sys.argv[2] if len(sys.argv) > 2 else None))
     try:
         main()
     except SystemExit:
@@ -377,6 +718,6 @@ if __name__ == "__main__":
     except Exception:
         traceback.print_exc(file=sys.stderr)
         try:
-            deny("memory-cap: unhandled exception — fail-closed.")
+            deny("memory-cap: unhandled exception — fail-closed.", "crash")
         except SystemExit:
             raise
