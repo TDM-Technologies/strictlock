@@ -13,7 +13,7 @@ governance one: you cannot audit a vibe.
 `externalized-memory` moves that state **out of the model and onto disk** — a single
 state file per project that any session reads first and writes last, updated with an
 atomic write so a crash can never corrupt it. Same posture as the rest of StrictLock:
-plain files, fail closed, the audit trail falls out as a byproduct.
+plain files, fail closed, and a state record you can audit.
 
 This module ships the **pattern**, not a hook: templates you copy into your project,
 one small reference script, and the design write-up behind every rule. Adopt the
@@ -76,10 +76,20 @@ session-opening staleness tripwire.
 
 ### With the gate
 
-List your state files in a [`plan-gate`](../plan-gate/) plan's `allowed_paths` so
-only an approved session may write them, and let the gate log every write. Now each
-change to the blackboard is an authorized, audited event — state becomes evidence,
-not testimony. [`DESIGN.md`](DESIGN.md) makes that argument in full.
+List your state files in a [`plan-gate`](../plan-gate/) plan's `allowed_paths`, and the
+gate then decides each direct edit (Edit / Write tool call) to them against that plan and
+can log it, when `PLAN_GATE_LOG_DIR` is set. [`DESIGN.md`](DESIGN.md) makes the argument for
+state as evidence in full.
+
+**What this does not cover today.** Writes made with `atomic-write.py` go through Bash.
+plan-gate matches `python3 atomic-write.py STATE.md` as a command, by its prefix in
+`allowed_commands`, and does not check the file the script writes against `allowed_paths`.
+So listing a state file in `allowed_paths` does not stop a session that is allowed to run
+the script from writing another path with it, and the gate's log records the command rather
+than a file-write decision. Checking the script's target against the plan is planned (see
+[`../dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](../dev/CLAIMS-TRUE-ROUND-2-SPEC.md)). Also note that
+whether only an *approved* session can write is only as strong as plan approval itself, which
+is currently a convention (see the plan-gate README, "Known limits today").
 
 ## The atomic write
 
