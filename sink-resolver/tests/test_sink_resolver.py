@@ -279,7 +279,7 @@ class TestCoverageGuard(SinkResolverBase):
         # SINKS includes dist/extra.txt but GEN never writes it -> finalizing would stage 'ours'
         # and lose the peer edit. The coverage guard must catch this and escalate.
         self._make_two_sink_conflict()
-        os.environ["SINK_RESOLVER_SINKS"] = "dist/index.txt:dist/extra.txt"
+        os.environ["SINK_RESOLVER_SINKS"] = os.pathsep.join(["dist/index.txt", "dist/extra.txt"])
         before_extra = (self.root / "dist" / "extra.txt").read_bytes()  # 'ours' = extra_main
         rc = self._run("resolve")
         self.assertEqual(rc, sr.EXIT_ESCALATE)
@@ -299,7 +299,7 @@ class TestCoverageGuard(SinkResolverBase):
         _git(self.root, "add", "dist/index.txt")
         self.assertEqual(self._unmerged(), ["dist/extra.txt"])
         extra_before = (self.root / "dist" / "extra.txt").read_bytes()
-        os.environ["SINK_RESOLVER_SINKS"] = "dist/index.txt:dist/extra.txt"
+        os.environ["SINK_RESOLVER_SINKS"] = os.pathsep.join(["dist/index.txt", "dist/extra.txt"])
         rc = self._run("resolve")
         self.assertEqual(rc, sr.EXIT_ESCALATE)
         self.assertEqual((self.root / "dist" / "index.txt").read_bytes(), marker,
