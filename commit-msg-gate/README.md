@@ -7,8 +7,9 @@ enforces the version-control half of the governance loop: a commit must either n
 or be an explicitly-labelled "ceremony" commit. The result is a git history
 where every functional change names the plan it was made under — the change-management
 evidence [`plan-gate`](../plan-gate/) describes in its paper (§6), applied at the commit.
-The hook checks that a `plan: <slug>` line is present; it does not check the slug against your
-plans directory, so whether the named plan was actually approved is for review to confirm.
+The hook checks that a `plan: <slug>` line is present in the message body. By default it does not
+check the slug against your plans directory (whether the named plan was approved is for review to
+confirm); set `COMMIT_MSG_GATE_PLANS_DIR` to make the slug resolve to a real plan file.
 
 ## What it does
 
@@ -17,8 +18,9 @@ A commit message passes if **either**:
 - **(a)** its first line starts with an approved *ceremony* prefix — by default
   `chore:`, `docs:`, `ci:`, `build:` (with optional `(scope)`) — for changes that don't need
   a plan link; **or**
-- **(b)** its message contains a line matching `plan: <slug>` (at the start of a line),
-  naming the plan the change was made under.
+- **(b)** its message **body** (the lines after the subject line) contains a line matching
+  `plan: <slug>` (at the start of a line), naming the plan the change was made under. A
+  `plan:` on the subject line itself does not count.
 
 Otherwise the commit is rejected with a message explaining both options.
 
@@ -37,6 +39,7 @@ agent (`--no-verify` skips it).
 | Variable | Meaning |
 |---|---|
 | `COMMIT_MSG_GATE_BYPASS` | `on` skips the gate. Single-use by convention: set it inline per commit (`COMMIT_MSG_GATE_BYPASS=on git commit ...`). Each use is announced on stderr; the hook writes no durable record of it. |
+| `COMMIT_MSG_GATE_PLANS_DIR` | Opt in to slug validation. When set, at least one `plan: <slug>` line in the body must resolve to `<slug>.md` in this directory (the same `<name>.md` layout [`plan-gate`](../plan-gate/SCHEMA.md) uses for `PLAN_GATE_PLANS_DIR`; the file must be a regular, readable file — its `status` is not inspected, so an archived plan still resolves). If the directory is set but missing or unreadable the gate **fails closed** (rejects). Ceremony-prefix commits need no plan and are unaffected. Unset (default): the slug is not validated. |
 | `COMMIT_MSG_GATE_PREFIXES` | Override the approved first-line prefix regex (`grep -E` syntax). Default: `chore`/`docs`/`ci`/`build` with optional `(scope)`. |
 
 ### Examples
@@ -54,6 +57,16 @@ git commit -m "feat: quietly change auth behavior"
 # Custom convention (allow a `wip:` prefix too):
 COMMIT_MSG_GATE_PREFIXES='^(wip:|chore:|docs:)' git commit -m "wip: scratch"
 ```
+
+## Catching `--no-verify` at the merge boundary (CI)
+
+A local hook can be skipped (`git commit --no-verify`) or never installed. To check the messages
+of every commit a PR adds, copy [`examples/ci-commit-msg-check.yml`](examples/ci-commit-msg-check.yml)
+into your repo's `.github/workflows/`. It checks out the PR head with full history and runs the
+same `commit-msg-gate.sh` over each commit message in `origin/<base>..HEAD` (merge commits skipped,
+`COMMIT_MSG_GATE_BYPASS` ignored). Pair it with `COMMIT_MSG_GATE_PLANS_DIR` (the plans must then be
+checked in to the repo CI sees). This is a copyable example — it is not enabled in StrictLock's
+own CI, whose commits don't follow the gate's defaults.
 
 ## Requirements
 
