@@ -106,5 +106,8 @@ worktree list --porcelain` (the first/bare entry) instead of the branch-name heu
 }
 ```
 
+Note: the field `wp_age_min` (and `wp_age=` in `--explain` output) is the **branch age**
+described above. The `wp` prefix is historical and the field names are unchanged.
+
 The JSONL log line (`liveness-scan.log`) is the same shape, condensed to the timestamp, base,
 counts, active-plan count, and the escalation list — one line per scan, append-only.

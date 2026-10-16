@@ -5,7 +5,7 @@
 `plan-gate` is the flagship [StrictLock](../README.md) module. It's a single Python script
 wired as a **`PreToolUse` hook**: before an agent edits a file or runs a command, the gate
 reads the active *plan* and decides allow/deny. An agent may modify only the exact files and
-run only commands matching the command prefixes an approved plan enumerates. Everything else
+run only commands matching the command prefixes the active plan enumerates. Everything else
 is denied **before it runs**. When in doubt, the gate denies.
 
 Read the full argument in [`paper.md`](paper.md).
@@ -69,8 +69,8 @@ matching `pytest`, `cat x; rm y` matching the read-only `cat`, `echo x > f` matc
 ## Install plan-gate in a project (first install)
 
 This takes you from a fresh clone to a gate you have seen deny something. Use absolute paths
-throughout: the harness does not expand `~` or `$HOME` inside a settings file, and a plan that
-lists only relative paths cannot claim a git worktree (step 4).
+throughout and do not rely on `~` or `$HOME` expanding (it does not in a settings `env` value),
+and note that a plan that lists only relative paths cannot claim a git worktree (step 4).
 
 **1. Get the code, outside the project the agent will work in.**
 
@@ -106,8 +106,9 @@ directory and edit it. Three things matter for a first run:
 - **Use absolute paths.** In an ordinary checkout a repo-relative entry works. Inside a git
   worktree (including the ones many agent tools create for each session), a plan claims that
   worktree only if at least one `allowed_paths` entry is an absolute path under it. A plan with
-  only relative paths does not claim the worktree, so the gate denies every write and every
-  non-read-only command there, whatever else the plan says. The sample plan's relative paths
+  only relative paths does not claim the worktree, so the gate denies every file write and every
+  command outside the read-only set there (read-only commands such as `git status` and `ls`
+  still work), whatever else the plan says. The sample plan's relative paths
   are for readability; replace them with absolute ones for your project. Details:
   [`CONFIG.md`](CONFIG.md#path-resolution-notes) and [`AUTHORING.md`](AUTHORING.md) section 3.
 - Set `status: active`. Today this is how a plan becomes live; nothing records who set it (see
@@ -120,7 +121,8 @@ step 1. Restart the session so the settings load. For any other harness, adapt t
 stdin/stdout JSON contract.
 
 **6. Check that the gate is live.** Do not assume the hook is running. First by hand, with the
-same environment the settings give it:
+same environment the settings give it. This proves the script runs and decides; it does not
+prove the harness is calling it:
 
 ```bash
 echo '{"tool_name":"Edit","tool_input":{"file_path":"/absolute/path/not/in/plan.txt"}}' \
@@ -129,24 +131,37 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"/absolute/path/not/in/plan.
 # -> {"hookSpecificOutput": {... "permissionDecision": "deny" ...}}
 ```
 
-Then inside the real session: ask the agent to edit a file that is **not** in the plan. You
-should see a deny that starts `plan-gate:`, and a new row should appear in
-`/home/you/.agent/logs/plan-gate-decisions.log`. Run
-`python3 /absolute/path/to/strictlock/plan-gate/plan-gate.py verify-log` to confirm the chain is
-intact. If the out-of-plan edit goes through, or the log gets no new row, the hook is not
-running (see the next section).
+Then the check that matters, inside the real session: ask the agent to edit a file that is
+**not** in the plan. You should see a deny that starts `plan-gate:`, and a new row should
+appear in `/home/you/.agent/logs/plan-gate-decisions.log`. Then confirm the chain is intact,
+passing the log path as an argument (the log directory is set in the harness settings, not in
+your shell):
+
+```bash
+python3 /absolute/path/to/strictlock/plan-gate/plan-gate.py verify-log /home/you/.agent/logs/plan-gate-decisions.log
+```
+
+If the out-of-plan edit goes through, or the log gets no new row, the hook is not running (see
+the next section).
 
 A full allowed-vs-denied walkthrough is in [`examples/README.md`](examples/README.md).
 
 ### The gate fails closed once it runs, but it cannot protect you if it never starts
 
 Everything above about failing closed describes a gate that is running. A hook command that
-cannot launch (for example `python` on a system that only has `python3`, a mistyped script
-path, or a relative path that does not resolve from where the harness runs it) produces a
-launch error, not a deny. The harness treats a hook that fails to start as non-blocking, so the
-agent's action proceeds. The symptoms: an out-of-plan action is not blocked, and the decision
-log gets no rows. This is why step 6 is part of the install, and why it is worth repeating
-whenever you change the hook command, the interpreter, or the location of the code.
+cannot launch fails in one of two ways, depending on what is wrong:
+
+- **The interpreter is missing** (for example `python` on a system that only has `python3`).
+  The shell reports "command not found" (exit 127), which Claude Code treats as a non-blocking
+  error, so the agent's action proceeds. The symptoms: an out-of-plan action is not blocked,
+  and the decision log gets no rows. This is a silent fail-open.
+- **The script path is wrong** (a mistyped or relative path that does not resolve). Python
+  reports "can't open file" and exits 2, which Claude Code treats as a blocking error for a
+  `PreToolUse` hook, so **every** tool call is blocked with a "can't open file" message. This
+  is loud, not silent, but it is not the gate deciding anything.
+
+This is why step 6 is part of the install, and why it is worth repeating whenever you change the
+hook command, the interpreter, or the location of the code.
 
 ## Known limits today
 

@@ -53,6 +53,8 @@ package is older than that escalates **even on a fresh signal**, because a unit 
 long deserves a human glance however busy it looks. A signal that is itself older than the ceiling
 escalates too.
 
+> (Output fields named `wp_age` / `wp_age_min` hold this branch age; the `wp` prefix is historical.)
+>
 > **Caveat — the branch age is a proxy that can err in both directions.** The branch start is a
 > *committer* date. A rebase, amend, or squash rewrites it, so the branch-age clock restarts and a
 > long-running branch can read younger than it is (under-report: a missed escalation). In the

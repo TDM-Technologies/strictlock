@@ -25,6 +25,15 @@ decision, which is the kind of evidence SOC 2 and ISO audits ask for.
 > gate (see [what is and isn't enforced today](#what-is-and-isnt-enforced-today)), and
 > approval of a plan is currently a convention, not a recorded step.
 
+**Terms used below.** The *harness* is the agent tool you run, such as Claude Code. A *hook* is
+a small program the harness runs at a set point; a `PreToolUse` hook runs just before each tool
+call (an edit, a shell command) and can allow or refuse it. The hook's *matcher* is the setting
+that names which tools trigger it. A *hash-chained* log stores in each row a fingerprint of the
+row before it, so changing or deleting an earlier row can be detected. A *worktree* is a separate
+checked-out copy of a repository that shares its history, which many agent tools create per
+session. A *generated file* is one built from other files, such as an index or manifest (module
+names call it a "sink").
+
 ## Modules
 
 Each module is **standalone** — adopt one without the others. They are plain files with no
@@ -48,22 +57,19 @@ The modules fall into four families:
 | [**test-protection-guard**](test-protection-guard/) | Gates | Flags, but never blocks, a change to an existing test assertion made in the same commit as source code, unless the commit says why. | v1 |
 | [**eslint-plugin-strictlock**](eslint-plugin-strictlock/) | Gates | An ESLint rule ([on npm](https://www.npmjs.com/package/eslint-plugin-strictlock)) that fails the lint when a whole test asserts almost nothing. | v0.1.1 |
 | [**memory-cap**](memory-cap/) | Hygiene | A hook that refuses edits that would make an agent's auto-loaded memory index too long. | v1 |
-| [**externalized-memory**](externalized-memory/) | Hygiene | Templates and small scripts for keeping project state in one file on disk that every session reads first and writes atomically. | v1 |
-| [**scope-lease**](scope-lease/) | Concurrency | A git-based lock that agents which ask for it use to claim a set of files; plan-gate does not read these locks yet. | v1 |
+| [**externalized-memory**](externalized-memory/) | Hygiene | Templates and a small script for keeping project state in one file on disk that every session reads first; the script writes to a temporary file and then renames it, so a reader never sees a half-written file. | v1 |
+| [**scope-lease**](scope-lease/) | Concurrency | A git-based lock that agents call to claim a set of files, so a second agent that also asks is refused. | v1 |
 | [**sink-resolver**](sink-resolver/) | Concurrency | Resolves merge conflicts in generated files by regenerating them from the merged sources. | v1 |
 | [**liveness-scan**](liveness-scan/) | Concurrency | A read-only report on which agent worktrees are still running, stalled, or finished but not merged. | v1 |
-| [**rituals**](rituals/) | Rituals | Prose checklists for starting and closing a session and for planning checks; it enforces nothing. | v1 |
-
-"Sink" in two module names means a generated file that other files are built into, such as an
-index or manifest; those module READMEs define it fully. A *worktree* is a separate checked-out
-copy of a repository that shares its history, which many agent tools create per session.
+| [**rituals**](rituals/) | Rituals | Written checklists for starting a session, closing one out, and checking before you plan a piece of work whether it is still worth doing; it enforces nothing. | v1 |
 
 See [**roadmap.md**](roadmap.md) for planned modules and what has shipped since launch.
 
 ## What is and isn't enforced today
 
-The sections below describe what the code does now. Each item has a planned change in
-[`dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](dev/CLAIMS-TRUE-ROUND-2-SPEC.md).
+The list below describes what the code does now. The first four items have planned changes
+written up in [`dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](dev/CLAIMS-TRUE-ROUND-2-SPEC.md); the last is
+a property of how hooks work, with no code change planned.
 
 - **Plan approval is a convention.** A plan is live when its frontmatter says
   `status: active`. Nothing records who approved it or when, and with the example settings a
@@ -77,8 +83,10 @@ The sections below describe what the code does now. Each item has a planned chan
 - **Leases are voluntary.** scope-lease excludes only agents that call `acquire` themselves.
   plan-gate does not read lock refs, and any merge-time check on a lease is something you
   build.
-- **A hook that cannot start does not gate.** A wrong interpreter name or script path makes the
-  harness proceed without the check. Verify the gate after wiring it (below).
+- **A hook that cannot start does not gate.** A missing interpreter (for example `python` where
+  only `python3` exists) makes the harness proceed without the check. A wrong script path makes
+  every tool call fail with a "can't open file" error instead. Verify the gate after wiring it
+  (below).
 
 ## The thesis, in four moves
 
@@ -109,15 +117,17 @@ In short:
 2. Name the interpreter `python3` in the hook command, and check `python3 --version` is 3.8+.
 3. Set `PLAN_GATE=on`, `PLAN_GATE_PLANS_DIR` and `PLAN_GATE_LOG_DIR` (all absolute paths).
 4. Write a plan with **absolute** `allowed_paths`; a plan with only relative paths cannot claim
-   a git worktree, and the gate then denies everything there.
+   a git worktree, and the gate then denies every file write and every command outside the
+   read-only set there.
 5. Wire the hook (see [`plan-gate/examples/settings.json`](plan-gate/examples/settings.json)).
 6. **Check the gate is live:** ask the agent to edit a file that is not in the plan. You should
    see a `plan-gate:` deny and a new row in the decision log.
 
-**Why step 6 is not optional.** A hook command that cannot start (for example `python` on a
-system that only has `python3`, or a path that does not resolve) is treated by the harness as
-a non-blocking error, so the agent's action proceeds with no deny and no log row. The gate
-fails closed only once it is running.
+**Why step 6 is not optional.** If the interpreter named in the hook command does not exist
+(for example `python` on a system that only has `python3`), Claude Code treats the "command not
+found" as a non-blocking error, so the agent's action proceeds with no deny and no log row. If
+the script path is wrong, the interpreter exits with "can't open file", which blocks every tool
+call. Either way the gate is not deciding anything. It fails closed only once it is running.
 
 Full configuration (all `PLAN_GATE_*` variables, on Windows, Linux and macOS) is in
 [`plan-gate/CONFIG.md`](plan-gate/CONFIG.md).

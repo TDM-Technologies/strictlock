@@ -68,5 +68,5 @@ python liveness-scan.py --json
 
 When `LIVENESS_SCAN_LOG_DIR` is set, each run (re)writes `liveness-escalations.md` (the current
 human report) and appends one JSON line to `liveness-scan.log` (a timestamped digest: counts,
-active-plan count, and the escalations). These are **exhaust** — keep them gitignored (`*.log`,
-the report dir). They are the fleet-supervision audit trail, produced as a byproduct of the scan.
+active-plan count, and the escalations). These are runtime output — keep them gitignored (`*.log`,
+the report dir). They are the fleet-supervision audit trail, written by the scan when you set the log directory.

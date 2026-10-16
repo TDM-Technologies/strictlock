@@ -6,7 +6,8 @@ implementation accompanying this paper is in this directory: [`plan-gate.py`](pl
 **Thesis.** Prose-governed agents fail open; structurally-governed agents fail closed.
 A gate that physically blocks unapproved actions at the tool boundary — combined with
 externalized memory — makes agentic AI safe for regulated work, and the same gates emit
-compliance evidence as a byproduct.
+compliance evidence as a byproduct. [As of v0.x: the decision log is opt-in
+(`PLAN_GATE_LOG_DIR`), so this evidence exists only where logging is switched on.]
 
 ---
 
@@ -43,7 +44,9 @@ mechanism at the tool boundary — between the agent's intent and its effect —
 blocks any action falling outside an explicitly approved envelope, *before* the action runs. The
 agent cannot talk its way past it, because the check executes in code the agent does not control.
 When something is unapproved, ambiguous, or unexpected, the default is *deny*. The floor holds
-even when the instructions are forgotten.
+even when the instructions are forgotten. [As of v0.x: the "approved envelope" is the active plan.
+Who approved a plan is a convention, not a recorded step; recorded approval is planned, not built.
+And a gate whose hook never starts does not gate.]
 
 This is not a hypothesis. The patterns described here were extracted from a working system built
 to run agents against a HIPAA-regulated product — and that origin is the one piece of local color
@@ -59,7 +62,7 @@ The rest of this paper makes the case concretely. §2 describes the architecture
 itself and pays off the fail-open/fail-closed distinction. §4 traces how the gate matured, each
 step forced by a real failure. §5 — the heart of the paper — is the honest catalog of how agents
 actually break and which failures the gate *prevents* versus merely *detects*. §6 shows that the
-audit trail you need for SOC 2 and ISO falls out of the gate as a byproduct. §7 is the short
+audit trail you need for SOC 2 and ISO falls out of the gate as a byproduct (when the opt-in decision log is on). §7 is the short
 version for anyone who wants to build one.
 
 ## 2. Architecture
@@ -123,7 +126,8 @@ argument of this paper rests on *how* that protocol is enforced.
   approved plan — not a vague intention.
 - **CONFIRM.** A human reads the plan and responds: yes, no, or modify. Approval is positive and
   specific. Nothing is approved by default, and approval names an envelope — *these* files,
-  *these* commands — not a blanket "go ahead."
+  *these* commands — not a blanket "go ahead." [As of v0.x the gate does not record this
+  approval: a plan is live when it says `status: active`. Recorded approval is planned, not built.]
 - **EXECUTE.** The agent may act on confirmed items and *only* confirmed items. An action that is
   not in the approved plan does not run.
 
@@ -139,7 +143,9 @@ not do the asking, and when it doesn't, the action still happens.
 
 The structural approach moves the rule out of the prompt and into a **pre-action hook at the
 tool boundary**. Every file edit, shell command, and recognized external-write tool call is
-intercepted *before it executes* and checked against the approved plan. If the action is in the
+intercepted *before it executes* and checked against the approved plan. [As of v0.x, MCP tools are seen only if the hook's matcher
+routes them to the gate, and are denied outright only if named in `PLAN_GATE_MCP_WRITE_TOOLS`;
+their arguments are not read.] If the action is in the
 plan, it proceeds. If it is not, it is denied, and the agent is told why. The check runs in
 ordinary code, outside the model's control. The agent cannot reason its way past it, cannot
 "decide" the rule doesn't apply this time, cannot forget it under momentum. The rule is no longer
@@ -169,7 +175,7 @@ unapproved, or surprised, the action does not happen.
 Two systems can describe their governance with the identical sentence — "the agent asks before
 it acts" — and be worlds apart. In one, that sentence is a hope pinned on the agent's behavior;
 it fails open the first time the agent is busy. In the other, it is a property of the
-infrastructure; it fails closed by construction. Everything in §5 — the catalog of how these
+infrastructure; it fails closed by construction (while the hook is running; a hook that never starts does not gate). Everything in §5 — the catalog of how these
 agents actually break — is evidence for a single claim: when the enforcement is structural, the
 failures that would have shipped under prose governance get *stopped at the gate* instead.
 
@@ -192,7 +198,7 @@ for whatever reason, was outside the control entirely.
 timestamp, the action taken, and a human-approval flag. This did not block anything new; what it
 added was *durability of the record*. Decisions stopped being ephemeral. This is the seed of
 "compliance as byproduct" (§6): once every action leaves a durable, structured trace, the audit
-trail is no longer a separate feature you have to build.
+trail is no longer a separate feature you have to build (in the shipped gate, logging is opt-in).
 
 **Stage 3 — structural consent everywhere.** PLAN → CONFIRM → EXECUTE was promoted from a
 per-task convention — something each skill was *supposed* to do — into a shared protocol baseline
@@ -291,8 +297,8 @@ over the broad, convenient one is the discipline the whole system is about.
 Note what the mitigations produce as a side effect: every decision the gate makes on a gated
 surface — allow and deny alike — is appended to a hash-chained, append-only log with timestamp,
 target, command, decision class, and the governing plan; a bundled verifier re-proves the chain,
-and the gate refuses to authorize gated writes to its own log. Nobody wrote an "audit logging
-feature" — the audit trail is the *exhaust* of the gate doing its job. That exhaust is exactly what SOC 2 system-monitoring and change-management
+and the gate refuses to authorize gated writes to its own log. Nobody wrote a separate "audit logging
+feature" — the audit trail is the *exhaust* of the gate doing its job, where logging is switched on (it is opt-in). That exhaust is exactly what SOC 2 system-monitoring and change-management
 criteria ask you to evidence (see §6). The failure-handling machinery and the compliance
 machinery are the same machinery.
 
@@ -305,18 +311,18 @@ evidence is what they emit while doing that job.** Below is the one-page mapping
 mechanism to the recognized control it satisfies. (This work is measured against a broader
 internal compliance-framework backlog, maintained separately.)
 
-| Gate mechanism | Evidence it emits (as a byproduct) | Maps to |
+| Gate mechanism | Evidence it emits (as a byproduct, where logging is on) | Maps to |
 |---|---|---|
 | **Allowlist-scoped, exact-path authorization** — an agent may touch only the specific files, and run only the commands matching the specific prefixes, an approved plan enumerates; least privilege by construction. | Per-plan record of exactly what each agent was permitted to access, scoped per unit of work and then retired. | **SOC 2 CC6** (logical access / least privilege); **ISO/IEC 42001** (controlled operation of the AI system) |
 | **Append-only, hash-chained decision log** — every decision the gate makes on a gated surface, *allow and deny*, recorded with timestamp, target, command, decision class, and the governing plan; the gate never authorizes a gated write to its own log. | A continuous monitoring trail of authorized activity and policy-violation attempts whose integrity is *verifiable*: rows are hash-chained, so edits and deletions within the record are detectable by re-running the bundled verifier. (Scope honesty: integrity-without-secret — a host-level adversary can still truncate the tail or re-forge the file wholesale; anchor the latest row hash externally where that threat matters.) | **SOC 2 CC7** (system monitoring / security logging); **ISO/IEC 42001** (AI system logging & monitoring) |
-| **PLAN → CONFIRM → EXECUTE + staging review** — no change reaches the working system without an explicit, recorded human approval of a specific plan. | Documented approve→act→record cycle for every change; an auditor can trace any modification back to the approval that authorized it. | **SOC 2 CC8** (change management); **ISO 9001 §8.5** (controlled production / service provision) |
+| **PLAN → CONFIRM → EXECUTE + staging review** — no gated change runs unless the active plan lists it; human approval of the plan is the intended workflow. [As of v0.x approval is a convention and is not recorded by the gate; recorded approval is planned, not built.] | A record (when logging is on) of each action allowed or denied under which plan; an auditor can trace a modification back to the plan that scoped it, but not yet to who approved the plan. | **SOC 2 CC8** (change management); **ISO 9001 §8.5** (controlled production / service provision) |
 | **The approved plan as a documented artifact** — each unit of work is a versioned, inspectable plan stating scope, paths, and commands. | Versioned, retained documentation of intended work and its authorization. | **ISO 9001 §7.5** (documented information) |
 | **Hard-stop protocol + human-in-the-loop reviewer** — unexpected behavior halts for review; a human is the sole authorizing authority. | Demonstrated human oversight and a defined escalation path for anomalous AI behavior. | **ISO/IEC 42001** (human oversight of AI); **ISO 9001 §10.2** (nonconformity & corrective action) |
 | **Per-failure-mode register** (the §5 table) — known failure modes tracked with mitigation and an honest prevents-vs-detects status. | A live risk register tied to observed incidents and their controls. | **ISO 9001 §6.1** (risk-based thinking); **SOC 2 CC9** (risk assessment) |
 
-Two things to notice. First, every row's middle column is *exhaust* — nobody wrote an "audit
+Two things to notice. First, every row's middle column is *exhaust* — nobody wrote a separate "audit
 logging feature" or a "least-privilege module"; the evidence is what the gate produces while
-simply doing its job of keeping the agent inside an approved envelope. Second, the same handful of
+doing its job, wherever logging is switched on (it is opt-in) of keeping the agent inside an approved envelope. Second, the same handful of
 mechanisms satisfies criteria across three different frameworks at once — a security framework
 (SOC 2), a quality framework (ISO 9001), and an AI-management framework (ISO/IEC 42001) — because
 all three are, at bottom, asking the same question: *can you show that this system only did what

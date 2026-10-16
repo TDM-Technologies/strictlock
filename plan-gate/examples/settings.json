@@ -1,5 +1,5 @@
 {
-  "_comment": "Example Claude Code settings.json wiring plan-gate as a PreToolUse hook. Replace the absolute paths with your own (no ~ or $HOME here). The env block turns the gate on, points it at your plans directory and sets the audit log directory; the hooks block runs the gate before every gated tool call. Use python3 (a bare python is missing on many systems) and an absolute script path: a hook command that cannot start does not block anything. Verify the gate is live after wiring it (see plan-gate/README.md). PLAN_GATE_ALWAYS_WRITABLE below makes the plans directory writable by the agent, so an agent can write an active plan itself; remove it if a human should write plans. The matcher does not include MCP tools; add mcp__.* to route them to the gate.",
+  "_comment": "Example Claude Code settings.json wiring plan-gate as a PreToolUse hook. Replace the absolute paths with your own (use absolute paths; do not rely on ~ or $HOME expanding in env values). The env block turns the gate on, points it at your plans directory and sets the audit log directory; the hooks block runs the gate before every gated tool call. Use python3 (a bare python is missing on many systems: a missing interpreter makes the harness proceed with no gating) and a correct absolute script path (a wrong path makes every tool call fail with a can't-open-file error). Verify the gate is live after wiring it (see plan-gate/README.md). PLAN_GATE_ALWAYS_WRITABLE below makes the plans directory writable by the agent, so an agent can write an active plan itself; remove it if a human should write plans. The matcher does not include MCP tools; add mcp__.* to route them to the gate.",
 
   "env": {
     "PLAN_GATE": "on",
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /home/you/strictlock/plan-gate/plan-gate.py"
+            "command": "python3 /absolute/path/to/strictlock/plan-gate/plan-gate.py"
           }
         ]
       }

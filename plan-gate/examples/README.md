@@ -37,8 +37,10 @@ absolute paths everywhere avoids that trap and costs nothing elsewhere.
 The edited plan lists `/absolute/path/to/project/src/components/Header.tsx` in `allowed_paths`
 and `npm test` in `allowed_commands`.
 
-Run the examples below from any directory; the gate reads the plan, not your working directory.
-Use `python3` (a bare `python` is not installed on many systems).
+The gate does use your working directory: it looks there for the git repository or worktree you
+are in. Run the examples from a directory that is not inside an unrelated git worktree (a plain
+shell directory is fine, or the project itself). Run from inside a different worktree, the plan
+does not claim that tree and every example is denied as likely drift. Use `python3` (a bare `python` is not installed on many systems).
 
 ## Allowed: editing a file the plan names
 

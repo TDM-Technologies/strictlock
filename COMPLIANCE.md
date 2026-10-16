@@ -80,9 +80,9 @@ while a plan is active, and the hook only sees MCP tools if its matcher routes t
 compound parsing or redirection handling yet, and that includes the read-only cmdlet set, so
 `Get-Content x; Remove-Item y` passes with or without a plan; route agent shell work through Bash
 where that matters.) The envelope is
-approved per unit of work, then retired. This is least privilege by construction: the agent can
-touch only what an approved plan names, scoped to the session, bounded by enumerated paths and
-command prefixes.
+scoped per unit of work, then retired. This is least privilege by construction: the agent can
+touch only what the active plan names, scoped to the session, bounded by enumerated paths and
+command prefixes (who approved that plan is a convention today; see row C).
 
 **Evidence it emits.** A per-plan record of exactly which files and commands each agent
 was permitted to use, for one specific unit of work, with explicit start and retirement.
@@ -273,8 +273,10 @@ denying at the boundary before the bad write lands — the same fail-closed post
 suite, applied to a different resource (bounded per-session context cost). Its bypass variable is
 *distinct* (`MEMORY_CAP_BYPASS`), deliberately **not** shared with `plan-gate` or `commit-msg-gate`, so
 a narrow, deliberate escape from one cap can never silently disable the others. The bypass is
-single-use by convention (set inline per command; every use is logged, on stderr, so a lingering bypass
-is visible in the trail). An *invalid* path-matching regex falls back to the default rather than
+single-use by convention (every use is logged, on stderr, so a lingering bypass is visible in the
+trail). The hook is started by the harness, so the variable must be in the environment the harness
+was launched with (or its settings `env` block); an `export` in the agent's own Bash tool does not
+reach it, and only the value `1` is accepted today. An *invalid* path-matching regex falls back to the default rather than
 disabling the cap; a valid-but-wrong pattern still matches the wrong file, which the code cannot detect.
 An opt-in, hash-chained decision log (`MEMORY_CAP_DECISION_LOG=1` + `MEMORY_CAP_LOG_DIR`, verified with
 `memory-cap.py verify-log`) records allow, deny and bypass decisions on the capped index.
@@ -315,7 +317,7 @@ one never weakens the other.
 **Evidence it emits.** Proof that a derived artifact of record matches its source by
 construction at the moment it enters version control, plus — when a decision-log directory is
 configured — a per-decision append-only trail of each freshness check and every refusal (the
-same exhaust pattern as row B).
+same opt-in logging as row B).
 
 **What an auditor can trace.** *That a committed/pushed generated artifact that passed through
 the hooks corresponds to the sources it claims to derive from*, and, from the log, *when a stale
@@ -436,9 +438,9 @@ detective control, by design advisory so a false positive never wedges legitimat
 
 ## Two things to notice
 
-**First, every "evidence" column is exhaust.** Nobody wrote an "audit logging feature" or a
-"least-privilege module." The evidence is what the gates produce while simply doing their job of
-keeping the agent inside an approved envelope. The failure-handling machinery and the compliance
+**First, the evidence comes from the gates themselves.** There is no separate "audit logging
+feature" or "least-privilege module": the gates write the records as they decide, wherever you
+have switched logging on (it is opt-in). The failure-handling machinery and the compliance
 machinery are the same machinery.
 
 **Second, the same handful of mechanisms satisfies criteria across three different frameworks at
@@ -447,7 +449,9 @@ once** — a security framework (SOC 2), a quality framework (ISO 9001), and an 
 
 > *Can you show that this system only did what it was authorized to do, and prove it after the fact?*
 
-A fail-closed gate answers **yes by construction**. This document is a mapping, not a full closure log;
+A fail-closed gate that is running, with its logging switched on, answers **yes for the actions it
+sees**, within the limits listed in each row (for example, plan approval is not recorded today).
+This document is a mapping, not a full closure log;
 its only job is to show **where the evidence already lives** so that, when a real compliance program
 needs it, it is already being produced.
 
