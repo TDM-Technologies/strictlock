@@ -1,7 +1,7 @@
-# Claims-true round 2 — spec (DRAFT for maintainer review, 2026-10-16)
+# Claims-true round 2 — spec (decided 2026-10-16)
 
-**Status: DRAFT.** Nothing here is built. Each § ends with the calls the maintainer makes;
-recommendations are marked, and every one can be overruled.
+**Status: DECIDED, not built.** The maintainer took the recommendation on all seven calls
+(Q1–Q7) on 2026-10-16. That is dated direction and can be re-argued. See the decision log at the end.
 
 **Where this comes from:** a newcomer-eye review of the public docs (2026-10-16, main @ `1cd53ca`)
 found 18 problems. The maintainer ruled (2026-10-16) that all 18 go in, and that the overclaims
@@ -172,3 +172,15 @@ step.**
 
 **Calls summary:** Q1 default for approval · Q2 hash scope · Q3 TTY check · Q4 MCP matcher ·
 Q5 lease-held behavior · Q6 strict-lease default · Q7 writer list.
+
+## Decision log
+
+**2026-10-16 (maintainer):** every call took the recommended option.
+- Q1: approval is required whenever `PLAN_GATE_LOG_DIR` is set, and the example sets it.
+  `PLAN_GATE_REQUIRE_APPROVAL=off` is the explicit opt-out.
+- Q2: the approval hash covers the whole plan file.
+- Q3: `approve` requires a TTY. `--no-tty-check` exists and is logged on the row.
+- Q4: the example matcher adds `mcp__.*`.
+- Q5: an edit to a path leased by another agent is denied.
+- Q6: strict lease mode (`PLAN_GATE_REQUIRE_LEASE=on`) is opt-in.
+- Q7: `atomic-write.py` is built in, extendable with `PLAN_GATE_WRITER_SCRIPTS`.
