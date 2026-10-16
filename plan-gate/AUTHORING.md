@@ -139,7 +139,9 @@ then `make install` must itself match an `allowed_commands` prefix; the `cd` buy
 start alone: with `pytest` allowed, `pytest -q && <other command>` matches the `pytest` prefix.
 Likewise a top-level `>` redirection is not treated as a file write. Until per-segment checking of
 every chained command lands, author `allowed_commands` as though a prefix authorizes whatever is
-chained after it, and prefer one command per step.
+chained after it, and prefer one command per step. The same applies to the always-allowed read-only
+prefixes (`cat`, `echo`, `find`, `git branch`, ...), with or without an active plan: `cat x; rm y`
+and `echo x > f` start with a read-only prefix and are allowed today.
 
 (PowerShell is checked by prefix against `allowed_commands` too, but with **no compound parsing at
 all** — `Get-Foo; Set-Bar` is not split. If you need a multi-segment PowerShell command, list each
@@ -165,7 +167,7 @@ is a *file* pointing at the main repo, not a directory), the gate resolves every
 `allowed_paths` entry against the **worktree root**. A plan then counts as active for that
 worktree only if it claims it — `worktree_bypass: true`, or at least one **absolute**
 `allowed_paths` entry resolving *under that worktree* (§4). If a plan's paths land elsewhere, it
-is not active for this session, and the gate denies gated file writes and non-read-only commands
+is not active for this session, and the gate denies gated file writes and commands outside the (prefix-matched) read-only set
 with a "no active plan" message; read-only inspection and `PLAN_GATE_ALWAYS_WRITABLE` directories
 stay available. The reasoning: a plan whose paths don't point where the session is running is
 misaligned, and continuing would write somewhere you didn't mean. It fails closed, loudly, on the

@@ -11,10 +11,10 @@
 # A commit passes if EITHER:
 #   (a) its first line starts with an approved prefix, e.g.
 #         chore: ...   chore(scope): ...   docs: ...   ci: ...   build: ...
-#   (b) its body contains a line matching:  plan: <slug>
+#   (b) its message contains a line (at line start) matching:  plan: <slug>
 #
 # Configuration (environment):
-#   COMMIT_MSG_GATE_BYPASS=on        skip the gate for one commit (deliberate).
+#   COMMIT_MSG_GATE_BYPASS=on        skip the gate (single-use by convention: set inline per commit).
 #   COMMIT_MSG_GATE_PREFIXES=<regex> override the approved first-line prefix
 #                                    regex (grep -E syntax). See DEFAULT below.
 
@@ -66,9 +66,9 @@ Your commit message must do ONE of:
         docs: ...         docs(scope): ...
         ci: ...           build: ...
 
-  (b) Include a line referencing the approved plan:
+  (b) Include a line naming the plan:
         plan: add-logout-button
-      (plan files live in your plan-gate plans directory)
+      (the slug is not checked against your plans directory)
 
 Emergency bypass: COMMIT_MSG_GATE_BYPASS=on git commit ...
 ---------------------------------------------------------------------

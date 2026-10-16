@@ -74,7 +74,8 @@ must *start with* an `allowed_commands` prefix (or be a known read-only command)
 begins with an allowed prefix is matched on that start (per-segment checking of every chained
 command is in progress). The envelope is approved per unit of work, then retired. This is least privilege by
 construction: the agent can touch only what an approved plan names, scoped to the session,
-and nothing broader.
+and nothing broader through the file-edit tools; shell commands are bounded by prefix, per the
+caveat above.
 
 **Evidence it emits.** A per-plan record of exactly which files and commands each agent
 was permitted to use, for one specific unit of work, with explicit start and retirement.
@@ -203,8 +204,8 @@ unapproved, or surprised, the action does not happen — fail closed. (One excep
 `plan-gate`'s own code crashes or receives an unparseable payload, it exits non-zero with a
 warning, which the harness treats as non-blocking; deny-on-crash is planned.) A worktree-anchored
 guard treats a plan as active for a worktree session only if an absolute authorized path resolves
-under that worktree; otherwise gated writes and non-read-only commands are denied (read-only
-inspection stays available), so a plan misaligned with where the session is actually running
+under that worktree; otherwise gated writes and commands outside the read-only set are denied (read-only
+inspection stays available (the read-only set is itself prefix-matched, so a chained or `>`-redirected command that starts with a read-only prefix, e.g. `cat x; rm y` or `echo x > f`, is still allowed today; per-segment checking and redirection-as-write are in progress)), so a plan misaligned with where the session is actually running
 fails closed loudly on the first gated action.
 
 **Evidence it emits.** Demonstrated human oversight of the AI system and a defined escalation path
@@ -284,10 +285,10 @@ construction at the moment it enters version control, plus — when a decision-l
 configured — a per-decision append-only trail of each freshness check and every refusal (the
 same exhaust pattern as row B).
 
-**What an auditor can trace.** *That every committed/pushed generated artifact provably
-corresponds to the sources it claims to derive from* — a drifted or hand-edited artifact cannot
-enter the history unobserved — and, from the log, *when a stale artifact was caught and
-blocked.* The bypass isolation and fail-closed-on-misconfiguration posture are observable in
+**What an auditor can trace.** *That a committed/pushed generated artifact that passed through
+the hooks corresponds to the sources it claims to derive from*, and, from the log, *when a stale
+artifact was caught and blocked* or a gate was bypassed by its env var. (`--no-verify` skips both
+hooks without a log row; the CI check that closes that path is planned.) The bypass isolation and fail-closed-on-misconfiguration posture are observable in
 the configuration.
 
 **Maps to:** **SOC 2 CC8** (change management — a generated artifact cannot drift from its

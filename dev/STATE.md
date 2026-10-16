@@ -32,7 +32,7 @@ the interim-reworded claims true, then restores the strong wording) follows. Ope
 2. **Wave 4 — 1 of 4 SHIPPED:** the **test-protection co-commit guard is DONE + MERGED** (PR #7, 43 tests,
    2026-06-30; this file previously still called it "next build" — stale, corrected 2026-07-05). The
    **harvest source map** also landed (PR #8, `dev/HARVEST-SOURCE-MAP.md`).
-3. **Wave 4 remainder (when unpaused) — the 3 prose items:** session-ritual checklists · WP-interaction
+3. **Wave 4 remainder — the 3 prose items:** session-ritual checklists · WP-interaction
    analysis · pre-WP currency check. **Faithful ports, not reconstruction:** sources are STAGED in the
    maintainer's local staging import (all four `*-hipaapath` skills + ~58KB learnings, imported
    2026-06-26 — see the corrected HARVEST-SOURCE-MAP §OFF-MACHINE/STAGED). Then Wave 2 (marquee IP, last).

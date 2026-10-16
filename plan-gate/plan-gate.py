@@ -69,8 +69,10 @@ PATH RESOLUTION
   - Worktree guard: if CWD is under a worktree, a plan is active for that
     session only if at least one ABSOLUTE allowed_paths entry resolves under the
     worktree (or it declares `worktree_bypass: true`). A misaligned plan is not
-    active there, so gated writes and non-read-only commands are denied ("no
-    active plan"); read-only inspection and always-writable dirs stay available.
+    active there, so gated writes and commands outside the read-only set are denied
+    ("no active plan"); read-only inspection and always-writable dirs stay
+    available. NOTE: the read-only set is prefix-matched today, so a chained or
+    redirected command starting with a read-only prefix passes (Fix B pending).
     Fix the plan first.
   - Opt-out: a plan can declare `worktree_bypass: true` in frontmatter to skip
     the guard. Use when the work is deliberately cross-tree and the

@@ -34,7 +34,8 @@ DUAL-MODE — one script, one analysis core, two interchangeable I/O shells:
   * PreToolUse mode (agentic-harness, e.g. Claude Code): reads a tool-call JSON
     payload on stdin, acts only on a `git commit` Bash/PowerShell command, and
     emits an `allow` decision on stdout (plus a loud stderr warning when
-    flagged). The advisory lands IN the agent's context so it can self-correct.
+    flagged). The advisory goes out as the hook's decision reason (plus stderr);
+    whether it reaches the agent's context, the transcript, or only a log depends on the harness.
 
   * git pre-commit mode (any repo / any harness / humans too): git runs the hook
     in-tree with no stdin; the guard analyses the staged diff directly and warns

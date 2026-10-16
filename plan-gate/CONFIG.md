@@ -63,8 +63,10 @@ Set the variables in the `env` block and register the hook in `hooks.PreToolUse`
 - **Worktree guard:** a plan counts as active for a worktree session only if at least one of
   its *absolute* `allowed_paths` resolves under that worktree (or it declares
   `worktree_bypass: true`). If none does, the plan is not active there, so gated file writes
-  and non-read-only commands are denied ("no active plan"); read-only inspection
-  (`git status`, `ls`, ...) and always-writable directories stay available. This catches the
+  and commands outside the read-only set are denied ("no active plan"); read-only
+  inspection (`git status`, `ls`, ...) and always-writable directories stay available. The
+  read-only set is prefix-matched today, so a chained or `>`-redirected command that starts
+  with a read-only prefix is still allowed (per-segment checking is in progress). This catches the
   "wrote to the wrong tree" failure. Opt out for deliberately cross-tree work with
   `worktree_bypass: true` in the plan (see [SCHEMA.md](SCHEMA.md)).
 

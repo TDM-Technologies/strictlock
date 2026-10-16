@@ -81,7 +81,7 @@ jobs:
           uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
           if git grep -nIE "$secrets" -- . ':(exclude).github/workflows/ci.yml'; then fail=1; fi
           if git grep -nIE "$uuid" -- . ':(exclude).github/workflows/ci.yml'; then fail=1; fi
-          machine='(/Users/[a-z]|[A-Z]:(\\|\\\\)Users)'
+          machine='(/Users/[A-Za-z]|[A-Z]:(\\|\\\\)Users)'
           if git grep -nIE "$machine" -- . ':(exclude).github/workflows/ci.yml'; then fail=1; fi
           if [ "$fail" -ne 0 ]; then
             echo "::error::Possible secret, stray UUID, or machine path found in tracked files."
