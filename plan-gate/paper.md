@@ -212,13 +212,27 @@ incident:
 - **Worktree-anchored path resolution.** An agent working in an isolated copy of a repository
   once wrote to the *main* repository instead, because its plan listed main-repo paths and the
   write "succeeded" — at the wrong target. The fix anchors all path resolution at the session's
-  actual working root, with a **worktree guard**: a plan counts as active for a worktree session
-  only if an authorized absolute path resolves under that worktree, so gated writes and
+  actual working root, with **claim-by-absolute-path**: a plan counts as active for a worktree
+  session only if an authorized absolute path resolves under that worktree, so gated writes and
   commands outside the read-only set are denied when it does not (read-only inspection stays
-  available; that set is prefix-matched today, so a chained or redirected command starting with a
-  read-only prefix still passes — per-segment checking is in progress). A
+  available). When active plans exist elsewhere, the denial says so — "none claims this
+  worktree — likely drift" — rather than a generic "no active plan". A
   plan that is misaligned with where the session is actually running fails closed, loudly, on
   the first gated action — instead of silently writing to the wrong place. (This failure is §5's "silent drift / wrong-target writes.")
+- **Segment-wise command checking.** An enumerated prefix is only as strong as the way the
+  command is matched. A prefix match on the whole string lets `pytest -q && rm -rf build` ride
+  on `pytest`, and `echo x > app.py` write a file through a "read-only" `echo`. The gate
+  therefore splits every shell command on `&&`, `||`, `;`, `|`, a lone `&` and unquoted newlines,
+  checks the bodies of `$(...)`, backticks and `<(...)` as commands too (they execute), and
+  requires **each** segment to be read-only, a bare `cd`, or an enumerated prefix. Redirections
+  that write are file writes, gated like Edit/Write. What the splitter cannot confidently parse
+  is denied. The read-only set itself is narrowed to its non-mutating forms (`git branch` lists,
+  `find` has no `-delete`/`-exec`).
+- **Fail closed on its own faults.** A gate that crashes or cannot parse its input must not
+  become an allow. A malformed payload or an unhandled exception yields an explicit deny with a
+  loud, actionable message (and a `gate_error` row); the logged emergency bypass remains the
+  escape hatch even on that path. The accepted cost: if the harness changes its protocol, the gate
+  denies until it is updated or bypassed.
 - **Exact-match authorization.** Listing a *directory* as authorized was, at first, assumed to
   authorize everything inside it. It does not: authorization matches files by *exact* path, and a
   directory entry expands to nothing. The gate emits a warning when a plan lists a directory, to
@@ -239,9 +253,9 @@ mitigation each forced, and — honestly — whether the mitigation *prevents* t
 
 | Failure mode | What happened | Mitigation | Prevents or detects? |
 |---|---|---|---|
-| **Momentum Bias** | The agent barrels from intent to action without a stop, producing changes the human never approved ("invisible agent" anxiety). | PLAN → CONFIRM → EXECUTE made *structural*: a pre-action gate blocks any recognized file edit, shell command, or configured external-write tool call outside an approved plan. | **Prevents** for Edit/Write/NotebookEdit calls and for single commands. Caveat: command matching is by prefix and only `cd`-led compounds are split today, so a chained or `>`-redirected command that starts with an allowed or read-only prefix is matched on its start (per-segment checking and redirection-as-write are in progress). |
+| **Momentum Bias** | The agent barrels from intent to action without a stop, producing changes the human never approved ("invisible agent" anxiety). | PLAN → CONFIRM → EXECUTE made *structural*: a pre-action gate blocks any recognized file edit, shell command, or configured external-write tool call outside an approved plan. | **Prevents** for Edit/Write/NotebookEdit calls and for Bash commands: every command is checked segment by segment (chains, pipes, background, newlines, `$(...)` and backtick bodies) against enumerated prefixes, and write redirections are gated like file writes; unparseable commands are denied. Caveat: PowerShell is still matched by prefix without compound parsing, and an enumerated prefix is still a wildcard over its own arguments. |
 | **Prose governance ignored** | Instructions like "ask before deleting" are skipped under context pressure. | Move the rule out of the prompt and into a hook the model cannot talk its way past. | **Prevents.** |
-| **Silent drift / wrong-target writes** | An agent working in a git *worktree* wrote to the *main* repo because its plan listed main-repo paths. The write "succeeded" — at the wrong target. | Anchor path resolution at the session's worktree root; a plan counts as active only if an absolute authorized path resolves under the current worktree, otherwise gated writes and commands outside the read-only set are denied. | **Prevents** for gated writes (shell commands: see the prefix caveat in the Momentum Bias row). |
+| **Silent drift / wrong-target writes** | An agent working in a git *worktree* wrote to the *main* repo because its plan listed main-repo paths. The write "succeeded" — at the wrong target. | Anchor path resolution at the session's worktree root; a plan counts as active only if an absolute authorized path resolves under the current worktree, otherwise gated writes and commands outside the read-only set are denied. | **Prevents** for gated writes and Bash commands (PowerShell: see the caveat in the Momentum Bias row). |
 | **Over-broad authorization** | Listing a *directory* as authorized was assumed to authorize everything inside it. | Authorization matches files by *exact* path; directory entries do not expand. The gate warns when a directory is listed. | **Prevents** (forces explicit enumeration). |
 | **Write truncation** | A file write was silently truncated mid-content; the agent believed it had written the whole file. | A post-write checksum/verify step warns when output length looks wrong. Root cause unresolved. | **Detects only** — honest gap. |
 | **Cache / sync lag** | A cross-filesystem cache (virtiofs over a synced folder) served stale file contents after an edit, so the agent read pre-edit state — and signaled nothing, proceeding on the stale read with full confidence. The root cause (host-side writes not invalidating the guest cache) took five debugging sessions to isolate, *because* the failure is silent. | Fresh session/mount per handoff; longer term, route all file I/O through a single executor. | **Mitigates operationally**, not a true fix. |

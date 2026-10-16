@@ -14,7 +14,7 @@ everything.
 | `PLAN_GATE_LOG_DIR` | no | Directory for the append-only, hash-chained decision log (`plan-gate-decisions.log`). This log is your audit trail; if unset, no log is written. |
 | `PLAN_GATE_LOG_DECISIONS` | no | `all` (default) records every decision on a gated surface, allow and deny; `deny` records denials plus emergency-bypass rows only. |
 | `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated list of MCP tool names that modify external state (e.g. a cloud-drive create/copy tool). When set, those tools are **default-denied** so they can't evade the gate. |
-| `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` disables the gate for the session. Use deliberately. |
+| `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` disables the gate for the call (set it inline per command; every use is logged). Also honored when the gate itself faults. Use deliberately. |
 | `_PLAN_GATE_TEST_PLANS_DIR` | no | Test-only override that redirects the plans scan to a temp dir. Not a security boundary — used by the test suite. |
 
 `os.pathsep` is `;` on Windows and `:` on Linux/macOS — it applies to
@@ -60,23 +60,49 @@ Set the variables in the `env` block and register the hook in `hooks.PreToolUse`
 - Relative entries resolve against the nearest repo root, walking up from the session's
   working directory. If the session runs inside a **git worktree** (where `.git` is a file,
   not a directory), the **worktree root** is the anchor — not the main repo.
-- **Worktree guard:** a plan counts as active for a worktree session only if at least one of
-  its *absolute* `allowed_paths` resolves under that worktree (or it declares
-  `worktree_bypass: true`). If none does, the plan is not active there, so gated file writes
-  and commands outside the read-only set are denied ("no active plan"); read-only
-  inspection (`git status`, `ls`, ...) and always-writable directories stay available. The
-  read-only set is prefix-matched today, so a chained or `>`-redirected command that starts
-  with a read-only prefix is still allowed (per-segment checking is in progress). This catches the
-  "wrote to the wrong tree" failure. Opt out for deliberately cross-tree work with
-  `worktree_bypass: true` in the plan (see [SCHEMA.md](SCHEMA.md)).
+- **Worktree claim (claim-by-absolute):** a plan counts as active for a worktree session only
+  if at least one of its *absolute* `allowed_paths` resolves under that worktree (or it
+  declares `worktree_bypass: true`). If none does, the plan is not active there, so gated file
+  writes and commands outside the read-only set are denied; read-only inspection
+  (`git status`, `ls`, ...) and always-writable directories stay available. When active plans
+  exist elsewhere the deny says "N active plan(s) exist, none claims this worktree — likely
+  drift" (decision class `silent_drift`); with no active plan anywhere it is the generic "no
+  active plan" text. This catches the "wrote to the wrong tree" failure. Opt out for
+  deliberately cross-tree work with `worktree_bypass: true` in the plan (see
+  [SCHEMA.md](SCHEMA.md)).
+
+## Bash commands: segments and redirections
+
+Every Bash command is parsed before it is decided. It is split on `&&`, `||`, `;`, `|`, `|&`,
+a lone `&` and unquoted newlines; the bodies of `$(...)`, backticks, `<(...)` / `>(...)` and
+`( ... )` are checked as segments too. **Each** segment must be a read-only command, a bare
+`cd`, or start with an `allowed_commands` entry. Redirections `>`, `>>`, `>|`, `&>`, `N>` are
+file writes gated like Edit/Write (exact `allowed_paths` match or an always-writable
+directory; never the log directory; `/dev/null` and, on Windows, `NUL` always fine; `>&N` fd
+dups and `<` input are not writes). Anything the parser cannot confidently place is denied.
+PowerShell is unchanged (prefix match, no compound parsing). Details and the migration note:
+[`AUTHORING.md`](AUTHORING.md) §2 and [`README.md`](README.md).
+
+## Fault posture
+
+A stdin payload that does not parse, or an unhandled exception in the gate, **denies** (JSON on
+stdout, exit 0) with a message naming the failure and the bypass. Set `PLAN_GATE_BYPASS=on`
+inline to proceed anyway — that is honored on the fault path too and logged as
+`emergency_bypass`. `PLAN_GATE` unset or not `on` still allows. A best-effort `gate_error` row
+is written to the decision log; a logging failure never changes the decision. (A test-only
+`_PLAN_GATE_TEST_CRASH=early|late` variable injects a fault for the test suite; it can only
+make the gate deny.)
 
 ## Decision log
 
 When `PLAN_GATE_LOG_DIR` is set, every decision on a gated surface appends a JSON line to
 `plan-gate-decisions.log`: a UTC timestamp, the decision (`allow`/`deny`), the surface
 (`file`/`bash`/`ps`/`mcp`/`gate`), the tool, the command/target, a decision class (e.g.
-`allowed_paths`, `read_only_bypass`, `emergency_bypass`, `log_self_protect`), the reason, the
+`allowed_paths`, `allowed_command`, `read_only_bypass`, `navigation`, `emergency_bypass`,
+`log_self_protect`, `silent_drift`, `unparseable_command`, `gate_error`), the reason, the
 governing plan, and the working directory. File contents and full payloads are never logged.
+`unparseable_command` is a Bash command the parser could not confidently place (denied);
+`gate_error` is a fault inside the gate itself (denied, see Fault posture).
 
 Rows are hash-chained — each carries `prev` (the previous row's hash) and `h` (its own) — so
 edits or deletions within the record are detectable:

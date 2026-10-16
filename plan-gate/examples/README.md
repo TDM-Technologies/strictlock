@@ -69,6 +69,14 @@ echo '{"tool_name":"Bash","tool_input":{"command":"npm test -- --watch=false"}}'
 # -> allow (starts with the "npm test" prefix)
 ```
 
+## Denied: an allowed prefix with something chained after it
+
+```bash
+echo '{"tool_name":"Bash","tool_input":{"command":"npm test && rm -rf build"}}' \
+  | python ../plan-gate.py
+# -> deny (segment "rm -rf build" has no grant; each segment is checked on its own)
+```
+
 ## What happens with no active plan
 
 If no plan in `PLAN_GATE_PLANS_DIR` has `status: active`, every gated tool call is **denied**

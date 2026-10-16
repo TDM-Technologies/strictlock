@@ -66,9 +66,9 @@ when you use them, read §3 and §4 first.
 
 ## 2. `allowed_commands` — prefix match, so narrow the prefix
 
-The gate authorizes a Bash or PowerShell command if it **starts with** one of the
-`allowed_commands` entries (a plain `str.startswith`). That is more permissive than path matching,
-and it is where over-granting hides.
+The gate authorizes a Bash command **segment** (see "Compound commands" below) or a PowerShell
+command if it **starts with** one of the `allowed_commands` entries (a plain `str.startswith`).
+That is more permissive than path matching, and it is where over-granting hides.
 
 A prefix authorizes *its entire subtree of invocations*. `allowed_commands: [npm test]` correctly
 authorizes `npm test -- --watch=false` — convenient and intended. But the same mechanism means a
@@ -125,27 +125,55 @@ Read-only and navigational commands are always allowed, regardless of plan, so d
   `git -C ../other-tree status` — so inspecting another tree needs no grant.
 - Bare `cd <path>` navigation.
 
-A compound like `cd <path> && <something>` is **not** waved through on the strength of the `cd`:
-the gate splits the line on top-level `&&`, `||`, and `;` (quote-, subshell-, and heredoc-aware)
-and checks **each segment independently** against the read-only set and your `allowed_commands`.
-This is deliberate — it closes the `cd anywhere && <arbitrary command>` hole that a naive prefix
-match would open. The practical authoring consequence, **for `cd`-led compounds**: such a compound
-is only as authorized as its least-authorized segment. If a step needs `cd build && make install`,
-then `make install` must itself match an `allowed_commands` prefix; the `cd` buys it nothing.
+### Compound commands are checked segment by segment
 
-**Current limit — read this.** That per-segment check applies **only to compounds that begin with
-`cd`**. Any other command is matched as one string against the read-only prefixes and your
-`allowed_commands`, so a chained command whose *start* matches an allowed prefix is matched on that
-start alone: with `pytest` allowed, `pytest -q && <other command>` matches the `pytest` prefix.
-Likewise a top-level `>` redirection is not treated as a file write. Until per-segment checking of
-every chained command lands, author `allowed_commands` as though a prefix authorizes whatever is
-chained after it, and prefer one command per step. The same applies to the always-allowed read-only
-prefixes (`cat`, `echo`, `find`, `git branch`, ...), with or without an active plan: `cat x; rm y`
-and `echo x > f` start with a read-only prefix and are allowed today.
+A Bash command is never matched as one string. The gate splits it on `&&`, `||`, `;`, `|`, `|&`,
+a lone `&` (background) and unquoted newlines (quote-, escape-, comment-, and heredoc-aware), and
+checks **each segment independently**: it must be a read-only command, a bare `cd`, or start with
+an `allowed_commands` entry. The bodies of `$(...)`, backticks, `<(...)`, `>(...)` and `( ... )`
+**execute**, so they are checked as segments too (recursively). A compound command is only as
+authorized as its least-authorized segment:
 
-(PowerShell is checked by prefix against `allowed_commands` too, but with **no compound parsing at
-all** — `Get-Foo; Set-Bar` is not split. If you need a multi-segment PowerShell command, list each
-shape you intend explicitly, or run it through Bash.)
+- With `pytest` allowed, `pytest -q && rm -rf build`, `pytest | tee x`, `pytest $(rm -rf x)` and
+  `pytest -q\nrm -rf build` are all **denied** — the second segment has no grant. `cd` buys nothing
+  either: `cd build && make install` needs `make install` to match a prefix.
+- A heredoc commit message is fine: `git commit -m "$(cat <<'EOF' ... EOF)"` passes when
+  `git commit` is allowed, because the inner `cat` is read-only. Metacharacters inside quotes
+  (`git commit -m "fix && polish"`) are just text.
+- Enumerate **each command separately** (`git add`, `git commit`). An entry that spells out a whole
+  compound (`git add -A && git commit`) does not authorize that compound; it would only match a
+  segment that happens to start with that whole string.
+
+**Redirections that write are file writes.** `>`, `>>`, `>|`, `&>` and `N>` (`2>`, `1>>`, ...)
+targets are gated exactly like Edit/Write: the target must be an `allowed_paths` entry (exact
+match) or sit under an always-writable directory, and the decision log directory is never
+authorizable. `> /dev/null` (and `NUL` on Windows) is always fine; `2>&1` / `>&2` fd duplications
+and `<` input redirection are not writes. A relative target resolves against the session's working
+directory; if the same command also runs `cd`, `pushd` or `popd`, use an absolute path (the gate
+cannot know where the `cd` lands). A target built from an expansion (`> "$OUT"`) cannot be resolved
+statically and is denied.
+
+**Fail closed on what it cannot parse.** An unterminated quote or substitution, a redirection
+target made of an expansion, or an ambiguous `$((` construct is denied with a "cannot safely parse"
+message (decision class `unparseable_command`). Split the command into simple steps.
+
+**The read-only set has argument checks.** Prefix matching is at a word boundary (`ls` does not
+admit `lsof`), and commands with mutating forms are narrowed: `git branch` is listing forms only
+(no create/delete/rename/force flags), `git remote` is bare / `-v` / `show` / `get-url`, `git
+config` is `--get*` only, `git diff|log|show` refuse `--output`, `find` refuses `-delete -exec
+-execdir -ok -fprint* -fls`, `rg` refuses `--pre`. `git fetch` is not read-only (it writes refs) —
+grant it with an `allowed_commands` entry if the work needs it. Validated commands also refuse
+shell expansions in their arguments (`$`, backticks, `{`).
+
+**Migration note.** Plans written before segment checking may have relied on a prefix riding along
+with whatever followed it (`pytest -q && git push` matching `pytest`). Those commands now deny, and
+that is intended. To migrate: run the work, read each "segment ... matches neither" deny, and add an
+`allowed_commands` entry for every distinct command that appears (one entry per command, kept as
+narrow as §2 says), and `allowed_paths` entries for any file a command redirects into.
+
+(PowerShell is still checked by prefix against `allowed_commands`, with **no compound parsing and no
+redirection handling** — `Get-Foo; Set-Bar` is not split. This is a known gap, not a design choice:
+list each shape you intend explicitly, or run the work through Bash.)
 
 ### Rule of thumb
 
@@ -167,11 +195,14 @@ is a *file* pointing at the main repo, not a directory), the gate resolves every
 `allowed_paths` entry against the **worktree root**. A plan then counts as active for that
 worktree only if it claims it — `worktree_bypass: true`, or at least one **absolute**
 `allowed_paths` entry resolving *under that worktree* (§4). If a plan's paths land elsewhere, it
-is not active for this session, and the gate denies gated file writes and commands outside the (prefix-matched) read-only set
-with a "no active plan" message; read-only inspection and `PLAN_GATE_ALWAYS_WRITABLE` directories
-stay available. The reasoning: a plan whose paths don't point where the session is running is
-misaligned, and continuing would write somewhere you didn't mean. It fails closed, loudly, on the
-first gated action.
+is not active for this session, and the gate denies gated file writes and commands outside the
+read-only set; read-only inspection and `PLAN_GATE_ALWAYS_WRITABLE` directories stay available.
+When active plans exist elsewhere, the deny names them: "N active plan(s) exist, none claims this
+worktree — likely drift" (decision class `silent_drift`); with no active plan at all it is the
+generic "no active plan" text. The reasoning: a plan whose paths don't point where the session is
+running is misaligned, and continuing would write somewhere you didn't mean. It fails closed,
+loudly, on the first gated action. (Claim-by-absolute is the mechanism — there is no separate
+guard after a plan is selected.)
 
 **The authoring takeaway.** For normal in-tree work, do nothing special — name at least one file
 by its **absolute path** inside your worktree (that is what claims the worktree) and use
@@ -281,9 +312,9 @@ Before you set `status: active`, read the plan back as a grant of authority and 
 - [ ] Each `allowed_commands` prefix is as narrow as the work needs. For every prefix, the worst
       command that also starts with it is **not** destructive (no `git checkout`-style trap, no
       bare `git`, no bare `npm`/`python`).
-- [ ] Any `cd`-led multi-step Bash you rely on survives segment-wise checking (the `cd` buys
-      nothing; each segment is authorized on its own). Other chained commands are matched by
-      their start only (§2), so keep one command per step.
+- [ ] Any multi-step Bash you rely on (`&&`, `;`, `|`, `$(...)`, ...) survives segment-wise
+      checking: each segment is authorized on its own (the `cd` buys nothing), and every file a
+      `>` / `>>` / `&>` redirects into is an exact `allowed_paths` entry (§2).
 - [ ] `worktree_bypass: true` is present **only** if the work is deliberately cross-tree, and then
       `allowed_paths` are absolute.
 - [ ] Exactly **one** plan is `status: active`; the previous unit's plan is archived.

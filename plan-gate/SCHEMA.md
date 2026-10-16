@@ -30,7 +30,7 @@ Free-form description for humans goes here.
 | `name` | string | Human label for the plan. Not load-bearing for authorization. |
 | `status` | string | `active` arms the plan. Any other value (e.g. `draft`, `archived`) makes it inert. **Exactly one** active plan per worktree. |
 | `allowed_paths` | list of strings | The exact files the agent may write. **Exact match only** — a directory entry authorizes *nothing* inside it. Absolute or repo-root-relative. |
-| `allowed_commands` | list of strings | Command **prefixes** the agent may run. A command is allowed if it *starts with* one of these (plus the always-allowed read-only commands). |
+| `allowed_commands` | list of strings | Command **prefixes** the agent may run. For Bash, every *segment* of a command (see below) must *start with* one of these, or be an always-allowed read-only command or a bare `cd`. |
 | `worktree_bypass` | bool | `true` opts out of the worktree guard for deliberately cross-tree work (absolute `allowed_paths`). Omit otherwise. |
 
 ## Authorization semantics (read these — they bite)
@@ -38,16 +38,20 @@ Free-form description for humans goes here.
 - **Exact-path matching.** `allowed_paths` matches the target file by exact (normalized)
   path. Listing `src/` does **not** authorize `src/foo.ts`. Enumerate every file. The gate
   prints a warning to stderr if it sees a directory in `allowed_paths`.
-- **Prefix matching for commands.** `allowed_commands: [git add]` authorizes
-  `git add -A .`. Keep prefixes specific — a loose prefix is a loose grant. The match is on the
-  start of the whole command string: only a `cd <path> && ...`-led compound is split and checked
-  segment by segment today, so a chained command that begins with an allowed prefix (`<allowed>
-  && <other>`) is matched as one string. Per-segment checking of every chained command is in
-  progress.
+- **Prefix matching for commands, per segment.** `allowed_commands: [git add]` authorizes
+  `git add -A .`. Keep prefixes specific — a loose prefix is a loose grant. A Bash command is
+  split into segments (on `&&`, `||`, `;`, `|`, `&`, newlines, and the bodies of `$(...)`,
+  backticks and `<(...)`), and **each** segment must start with an allowed prefix (or be
+  read-only / a bare `cd`): `<allowed> && <other>` needs `<other>` granted too. One entry per
+  command; an entry spelling out a whole compound does not authorize it.
+- **Redirections that write are file writes.** `>`, `>>`, `>|`, `&>`, `N>` targets must be
+  `allowed_paths` entries (exact match), like Edit/Write. `/dev/null` is always fine.
 - **Read-only commands are always allowed**, regardless of plan: `git status`, `git diff`,
-  `git log`, `ls`, `pwd`, `cat`, `rg`, `grep`, `head`, `tail`, `which`, and friends, plus
-  the `git -C <path> <read-only-subcommand>` shape. Bare `cd <path>` navigation is allowed;
-  a `cd <path> && <something>` compound is checked segment-by-segment.
+  `git log`, `ls`, `pwd`, `cat`, `rg`, `grep`, `head`, `tail`, `which`, and friends (in their
+  non-mutating forms: `git branch` lists, `find` has no `-delete`/`-exec`, `git fetch` is not
+  included), plus the `git -C <path> <read-only-subcommand>` shape. Bare `cd <path>`
+  navigation is allowed. A compound of read-only segments is read-only; one non-read-only
+  segment makes the whole command need a grant.
 - **Path anchoring.** Relative entries anchor at the session's worktree root (or repo root).
   Absolute entries are used as-is. See [CONFIG.md](CONFIG.md) for the worktree guard.
 
