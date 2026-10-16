@@ -101,6 +101,10 @@ class MemoryCapTests(unittest.TestCase):
             p = run_gate(self._write(self.index, OVER_CAP_LINE), MEMORY_CAP_BYPASS=v)
             self.assertEqual(decision(p), "allow", msg=f"MEMORY_CAP_BYPASS={v!r}")
 
+    def test_bypass_message_prints_the_actual_value(self):
+        p = run_gate(self._write(self.index, OVER_CAP_LINE), MEMORY_CAP_BYPASS="Yes")
+        self.assertIn("MEMORY_CAP_BYPASS=Yes", p.stderr)
+
     def test_non_truthy_bypass_does_not_bypass(self):
         for v in ("0", "off", "false", "garbage"):
             p = run_gate(self._write(self.index, OVER_CAP_LINE), MEMORY_CAP_BYPASS=v)

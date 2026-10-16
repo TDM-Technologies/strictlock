@@ -64,7 +64,7 @@ CONFIGURATION (all via environment; no machine-specific defaults are baked in)
                             missing/empty/non-string argument denies.
 
 RULES
-  - If PLAN_GATE != "on" (case-insensitive), allow everything.
+  - If PLAN_GATE is not on/1/true/yes (case-insensitive), allow everything.
   - Exactly one plan file must have `status: active` in its YAML frontmatter
     (scoped per worktree — see find_active_plans).
   - Edit / Write / NotebookEdit:
@@ -1964,9 +1964,10 @@ def _handle_crash(exc: BaseException) -> None:
     except Exception:
         pass
     if not _env_truthy("PLAN_GATE"):
-        allow("plan-gate: PLAN_GATE != 'on' — gate disabled.")
+        allow("plan-gate: PLAN_GATE is not on/1/true/yes — gate disabled.")
     if _env_truthy("PLAN_GATE_BYPASS"):
-        reason = "plan-gate: PLAN_GATE_BYPASS=on — emergency bypass (gate fault path)."
+        reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
+                  f"— emergency bypass (gate fault path).")
         _log_decision(
             "allow", "gate", "emergency_bypass", _CALL_CTX["tool"],
             _CALL_CTX["tool_input"], reason, None,
@@ -1987,7 +1988,7 @@ def main() -> None:
 
     # Master gate switch. If off or unset, this hook is inert.
     if not _env_truthy("PLAN_GATE"):
-        allow("plan-gate: PLAN_GATE != 'on' — gate disabled.")
+        allow("plan-gate: PLAN_GATE is not on/1/true/yes — gate disabled.")
 
     # Emergency bypass. Logged (class=emergency_bypass) even in the deny-only
     # log mode — bypass usage is exception-class audit evidence. The payload
@@ -2002,11 +2003,10 @@ def main() -> None:
                 b_input = b_payload.get("tool_input") or {}
         except Exception:
             pass
-        _log_decision(
-            "allow", "gate", "emergency_bypass", b_tool, b_input,
-            "plan-gate: PLAN_GATE_BYPASS=on — emergency bypass.", None,
-        )
-        allow("plan-gate: PLAN_GATE_BYPASS=on — emergency bypass.")
+        b_reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
+                    f"— emergency bypass.")
+        _log_decision("allow", "gate", "emergency_bypass", b_tool, b_input, b_reason, None)
+        allow(b_reason)
 
     try:
         payload = json.load(sys.stdin)

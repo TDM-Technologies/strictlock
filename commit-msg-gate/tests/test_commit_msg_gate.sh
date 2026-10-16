@@ -34,7 +34,7 @@ check "bypass passes"             0 "$(printf 'feat: sneaky change\n')" COMMIT_M
 for v in 1 true yes ON On TRUE Yes " yes " " on"; do
   check "bypass truthy value '$v' passes" 0 "$(printf 'feat: sneaky change\n')" "COMMIT_MSG_GATE_BYPASS=$v"
 done
-for v in 0 off false no "" garbage "onn" "yes please" 2; do
+for v in 0 off false no "" garbage "onn" "yes please" 2 "o n" "y e s" "t rue"; do
   check "bypass non-truthy value '$v' does not bypass" 1 "$(printf 'feat: sneaky change\n')" "COMMIT_MSG_GATE_BYPASS=$v"
 done
 check "custom prefix override"    0 "$(printf 'wip: scratch\n')" COMMIT_MSG_GATE_PREFIXES='^wip:'

@@ -571,13 +571,13 @@ def reconstruct_edit_content(
 def main() -> None:
     # Master gate — inert unless explicitly turned on.
     if not _env_truthy(MASTER_GATE_ENV):
-        allow(f"memory-cap: {MASTER_GATE_ENV} != 'on' — gate disabled.")
+        allow(f"memory-cap: {MASTER_GATE_ENV} is not on/1/true/yes — gate disabled.")
 
     # Uniquely-named bypass; single-use by convention (set inline per command),
     # announced on stderr on every use.
     if _env_truthy(OWN_BYPASS_ENV):
         print(
-            f"memory-cap: {OWN_BYPASS_ENV}=1 — cap DELIBERATELY bypassed for this "
+            f"memory-cap: {OWN_BYPASS_ENV}={os.environ.get(OWN_BYPASS_ENV, '').strip()} — cap DELIBERATELY bypassed for this "
             f"tool call (every use is logged on stderr; single-use by convention).",
             file=sys.stderr,
         )
@@ -593,7 +593,7 @@ def main() -> None:
             except Exception:
                 _CTX["surface"] = "gate"
         allow(
-            f"memory-cap: {OWN_BYPASS_ENV}=1 — explicit bypass (single-use by "
+            f"memory-cap: {OWN_BYPASS_ENV}={os.environ.get(OWN_BYPASS_ENV, '').strip()} — explicit bypass (single-use by "
             f"convention: set inline per command; every use is logged).",
             "emergency_bypass",
         )

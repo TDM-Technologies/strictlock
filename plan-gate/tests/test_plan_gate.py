@@ -1455,6 +1455,11 @@ class SwitchValueTests(unittest.TestCase):
                          extra_env={"PLAN_GATE": v})
             self.assertEqual(decision(p), "allow", msg=f"PLAN_GATE={v!r}")
 
+    def test_bypass_reason_prints_the_actual_value(self):
+        p = run_gate(self.denied_payload, self.plans, cwd=self.work,
+                     extra_env={"PLAN_GATE_BYPASS": "Yes"})
+        self.assertIn("PLAN_GATE_BYPASS=Yes", p.stdout)
+
     def test_crash_path_honors_truthy_bypass(self):
         for v in ("yes", "1", "TRUE"):
             p = run_gate(self.denied_payload, self.plans, cwd=self.work,

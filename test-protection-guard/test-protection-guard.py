@@ -550,7 +550,7 @@ def main():
 
     if not _enabled():
         if _CURRENT_MODE == "pretooluse":
-            _emit_allow(f"test-protection-guard: {ENV_ENABLE} != 'on' — inert.")
+            _emit_allow(f"test-protection-guard: {ENV_ENABLE} is not on/1/true/yes — inert.")
         sys.exit(0)  # pre-commit: silent allow.
 
     if _CURRENT_MODE == "pretooluse":

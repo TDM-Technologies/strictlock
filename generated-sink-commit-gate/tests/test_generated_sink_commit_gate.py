@@ -225,6 +225,12 @@ class CommitGateTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, msg=f"expected ALLOW (bypass); stderr={p.stderr!r}")
         self.assertIn("bypass", p.stderr.lower())
 
+    def test_bypass_message_prints_the_actual_value(self):
+        self.source.write_text("changed source\n", encoding="utf-8")
+        self.stage("SOURCE.txt")
+        p = self.run_gate(self.gate_env(GENERATED_SINK_COMMIT_GATE_BYPASS="TRUE"))
+        self.assertIn("GENERATED_SINK_COMMIT_GATE_BYPASS=TRUE", p.stderr)
+
     def test_bypass_accepts_on_true_yes_but_not_garbage(self):
         self.source.write_text("changed source\n", encoding="utf-8")
         self.stage("SOURCE.txt")
