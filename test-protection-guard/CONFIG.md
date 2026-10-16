@@ -112,7 +112,10 @@ in the review. Configure one.
 
 ## A note on git internals
 
-The guard strips `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` before its own git calls and
-resolves the worktree via `git rev-parse --show-toplevel`, so it behaves correctly inside linked
-worktrees and from a `cd <worktree> && git commit …` command (PreToolUse mode parses that prefix).
+The guard strips `GIT_DIR` / `GIT_WORK_TREE` before its own git calls, and `GIT_INDEX_FILE` too in
+PreToolUse mode; in pre-commit mode it **keeps** `GIT_INDEX_FILE` (made absolute) because git points it
+at the temporary index for `git commit -a` / `git commit <paths>`. It resolves the worktree via
+`git rev-parse --show-toplevel`, so it behaves correctly inside linked worktrees, from a
+`cd <worktree> && git commit …` command, and from `git -C <dir> commit …` (PreToolUse mode parses
+the `cd` prefix and the `-C` option and analyses that repo).
 Every git failure is treated as fail-open (allow) — this is an advisory guard, not a gate.

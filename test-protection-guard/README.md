@@ -116,13 +116,16 @@ log review and a CI diff can backstop:
   globs. A CI diff of those artifacts is the complement.
 - **The PreToolUse door only sees commands it can parse.** It recognises `git commit`,
   `git -C <dir> commit`, `git -c k=v commit`, and a single `cd <dir> && …` prefix, but not a
-  nested `cd`. For `git -C <dir> commit` it recognises the command but does not yet retarget
-  the analysis to `<dir>` — the staged diff it reads is the session's own repo, so a `-C`
-  commit into a different repo is analysed against the wrong one. (Fix in progress.)
-- **The git `pre-commit` door can miss `git commit -a` and `git commit <paths>`.** Those forms
-  stage through a temporary index that the door does not currently follow, so it may not see
-  their changes as staged. A plain `git add` + `git commit` is seen. (Fix in progress.) Adopting
-  both doors is still the more robust posture.
+  nested `cd`. For `git -C <dir> commit` the `-C` target is extracted while the command is
+  tokenised and the analysis runs against `<dir>`'s repo (repeated `-C` options compose the way
+  git applies them; a relative `<dir>` resolves against the session's cwd, or the `cd` target).
+  A `<dir>` that is not inside a git repo is allowed silently (advisory).
+- **The git `pre-commit` door follows git's temporary index.** `git commit -a` and
+  `git commit <paths>` stage through a temporary index whose path git passes to the hook in
+  `GIT_INDEX_FILE`; the door keeps that variable (made absolute) for its own git calls, so those
+  commits are seen as staged exactly like a plain `git add` + `git commit`. (The PreToolUse door
+  still strips `GIT_INDEX_FILE` — a stray value in an agent's environment is not the commit's
+  index.) Only commits that run the hook are seen: `git commit --no-verify` skips it.
 
 ### The justification token, in both doors
 
