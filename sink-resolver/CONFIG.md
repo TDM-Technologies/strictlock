@@ -20,7 +20,7 @@ call with `SINK_RESOLVER` unset still runs.
 | `SINK_RESOLVER_CHECK_CMD` | recommended | The **strong byte-oracle**: a generator `--check` that regenerates internally, mutates nothing, and exits non-zero on any drift. When set, it is the oracle for `resolve` and the verdict for `check`. When unset, `resolve` falls back to a weaker double-regenerate determinism check and `check` snapshots-regenerates-compares-and-restores-exact-bytes (net non-mutating; announced on stderr). |
 | `SINK_RESOLVER_GENERATOR_CWD` | no | Working directory for the generator / check command (absolute, or repo-root-relative). Default: the repo root. |
 | `SINK_RESOLVER_TIMEOUT` | no | Seconds before the generator / check command is treated as a fail-closed timeout. Default `120`. A non-integer or `<= 0` value falls back to the default (loudly). |
-| `SINK_RESOLVER_LOG_DIR` | no | Directory for the append-only decision log (`sink-resolver.log`). Each `resolve` that resolves, escalates, or errors appends a JSON line (UTC timestamp, decision, reason, sinks). The `check` verb, a repo-root failure, a no-conflict `resolve`, and a dry-run that would auto-resolve write no row (a dry-run that escalates or errors does log). If unset, no log is written. This is your merge-resolution audit trail. |
+| `SINK_RESOLVER_LOG_DIR` | no | Directory for the append-only decision log (`sink-resolver.log`). Each `resolve` that resolves, escalates, or errors appends a JSON line (UTC timestamp, decision, reason, sinks), as does every `check` outcome (`check-fresh`, `check-stale`, `error`) and a repo-root failure (`error`, with `stage: "repo-root"`). A no-conflict `resolve` and a dry-run that would auto-resolve write no row (a dry-run that escalates or errors does log). If unset, no log is written. This is your merge-resolution audit trail. |
 
 `os.pathsep` is `;` on Windows and `:` on Linux/macOS — it applies to `SINK_RESOLVER_SINKS`.
 
@@ -87,8 +87,9 @@ The contract a calling hook / CI step branches on:
 ## Decision log
 
 When `SINK_RESOLVER_LOG_DIR` is set, every `resolve` that resolves, escalates, or errors appends
-a JSON line (the `check` verb, a repo-root failure, a no-conflict `resolve`, and a dry-run that would
-auto-resolve write no row; a dry-run that escalates or errors does log) to
+a JSON line (every `check` outcome — `check-fresh`, `check-stale`, `error` — and a repo-root failure
+are logged too; a no-conflict `resolve` and a dry-run that would auto-resolve write no row, while a
+dry-run that escalates or errors does log) to
 `sink-resolver.log` with a UTC timestamp, the decision, the reason, the oracle mode, and the
 resolved sinks. That append-only trail is the merge-resolution audit exhaust — produced as a
 byproduct of the resolver doing its job, the same posture as the rest of the suite. Logging is

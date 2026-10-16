@@ -280,6 +280,26 @@ class TestCoverageGuard(SinkResolverBase):
         self.assertEqual((self.root / "dist" / "extra.txt").read_bytes(), before_extra)
         self.assertIn("dist/extra.txt", sorted(self._unmerged()))
 
+    def test_escalation_restores_all_configured_sinks(self) -> None:
+        # dist/index.txt is a configured sink that is NOT in conflict (hand-resolved to a
+        # marker and staged) but the generator DOES rewrite it; dist/extra.txt is conflicted
+        # and blind to the generator -> the guard escalates. "Leaves the merge exactly as
+        # found" means the non-conflicted sink's marker bytes come back too.
+        self._make_two_sink_conflict()
+        marker = b"HAND-RESOLVED-MARKER\n"
+        (self.root / "dist" / "index.txt").write_bytes(marker)
+        _git(self.root, "add", "dist/index.txt")
+        self.assertEqual(self._unmerged(), ["dist/extra.txt"])
+        extra_before = (self.root / "dist" / "extra.txt").read_bytes()
+        os.environ["SINK_RESOLVER_SINKS"] = "dist/index.txt:dist/extra.txt"
+        rc = self._run("resolve")
+        self.assertEqual(rc, sr.EXIT_ESCALATE)
+        self.assertEqual((self.root / "dist" / "index.txt").read_bytes(), marker,
+                         "non-conflicted configured sink must be restored on escalation")
+        self.assertEqual((self.root / "dist" / "extra.txt").read_bytes(), extra_before)
+        self.assertEqual(self._unmerged(), ["dist/extra.txt"])
+        self.assertTrue(sr._merge_in_progress(self.root))
+
     def test_message_names_the_uncovered_sink(self) -> None:
         self._make_two_sink_conflict()
         with self.assertRaises(sr.Escalation) as ctx:
@@ -402,6 +422,53 @@ class TestCheck(SinkResolverBase):
         fresh, _ = sr.check_fresh(root=self.root, sinks=["dist/index.txt"])
         self.assertFalse(fresh)
         self.assertEqual(self._run("check"), sr.EXIT_ERROR)
+
+    def _log_rows(self) -> list:
+        import json
+        p = Path(os.environ["SINK_RESOLVER_LOG_DIR"]) / "sink-resolver.log"
+        return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines()]
+
+    def test_check_fresh_writes_log_row(self) -> None:
+        os.environ["SINK_RESOLVER_LOG_DIR"] = str(self.tmp / "logs")
+        self._init_repo()
+        self.assertEqual(self._run("check"), sr.EXIT_OK)
+        rows = self._log_rows()
+        self.assertEqual([r["decision"] for r in rows], ["check-fresh"])
+        self.assertEqual(rows[0]["verb"], "check")
+
+    def test_check_stale_writes_log_row(self) -> None:
+        os.environ["SINK_RESOLVER_LOG_DIR"] = str(self.tmp / "logs")
+        self._init_repo()
+        (self.root / "src" / "a.txt").write_text("A_DRIFT\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-q", "-m", "drift the sink")
+        self.assertEqual(self._run("check"), sr.EXIT_ERROR)
+        self.assertEqual([r["decision"] for r in self._log_rows()], ["check-stale"])
+
+    def test_check_error_writes_log_row(self) -> None:
+        os.environ["SINK_RESOLVER_LOG_DIR"] = str(self.tmp / "logs")
+        self._init_repo()
+        os.environ.pop("SINK_RESOLVER_SINKS", None)  # misconfig -> ResolveError
+        self.assertEqual(self._run("check"), sr.EXIT_ERROR)
+        rows = self._log_rows()
+        self.assertEqual([r["decision"] for r in rows], ["error"])
+        self.assertEqual(rows[0]["verb"], "check")
+
+    def test_repo_root_failure_writes_log_row(self) -> None:
+        os.environ["SINK_RESOLVER_LOG_DIR"] = str(self.tmp / "logs")
+        norepo = self.tmp / "norepo"
+        norepo.mkdir()
+        rc = sr.main(["resolve", "--root", str(norepo)])
+        self.assertEqual(rc, sr.EXIT_ERROR)
+        rows = self._log_rows()
+        self.assertEqual([r["decision"] for r in rows], ["error"])
+        self.assertEqual(rows[0]["stage"], "repo-root")
+        self.assertEqual(rows[0]["verb"], "resolve")
+
+    def test_no_log_dir_no_log(self) -> None:
+        self._init_repo()
+        self.assertEqual(self._run("check"), sr.EXIT_OK)
+        self.assertFalse((self.tmp / "logs").exists())
 
     def test_check_without_check_cmd_is_net_non_mutating(self) -> None:
         os.environ.pop("SINK_RESOLVER_CHECK_CMD", None)
