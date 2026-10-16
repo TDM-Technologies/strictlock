@@ -155,9 +155,20 @@ def _resolve_mode(raw: str) -> str:
 # git helpers (advisory => every failure returns None, the caller fails OPEN)
 # ------------------------------------------------------------------------------
 def _clean_git_env() -> dict:
+    """Environment for the guard's own git calls. GIT_DIR / GIT_WORK_TREE are always
+    stripped (the repo is resolved by `rev-parse` from the cwd). GIT_INDEX_FILE is
+    stripped in PreToolUse mode (a stray value in the agent's environment is not the
+    commit's index) but PRESERVED in pre-commit mode: for `git commit -a` and
+    `git commit <paths>` git stages through a temporary index and hands the hook its
+    path in GIT_INDEX_FILE — dropping it made those commits look unstaged."""
     env = dict(os.environ)
-    for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+    for k in ("GIT_DIR", "GIT_WORK_TREE"):
         env.pop(k, None)
+    if _CURRENT_MODE == "precommit" and env.get("GIT_INDEX_FILE"):
+        # git may hand the hook a path relative to the worktree root (its cwd).
+        env["GIT_INDEX_FILE"] = os.path.abspath(env["GIT_INDEX_FILE"])
+    else:
+        env.pop("GIT_INDEX_FILE", None)
     return env
 
 
@@ -212,32 +223,69 @@ def _parse_cd_prefix(cmd):
 _GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 
 
-def _is_git_commit(core_cmd):
-    """True iff core_cmd invokes the `git commit` subcommand. Recognises env-assignment
-    prefixes (`FOO=1 git commit`) and git global options (`git -C <dir> commit`,
-    `git -c k=v commit`), and rejects same-prefix subcommands (`git commit-tree`,
-    `git commitmsg`). Tokenisation failure falls back to a conservative prefix check."""
+def _unquote(tok):
+    """Strip one pair of matching quotes (non-posix shlex on Windows leaves them in)."""
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ('"', "'"):
+        return tok[1:-1]
+    return tok
+
+
+def _parse_git_commit(core_cmd):
+    """If core_cmd invokes the `git commit` subcommand, return the list of `-C <dir>`
+    values given as git global options (in order; [] when none), else None. Recognises
+    env-assignment prefixes (`FOO=1 git commit`) and git global options (`git -C <dir>
+    commit`, `git -c k=v commit`), and rejects same-prefix subcommands (`git commit-tree`,
+    `git commitmsg`). Tokenisation failure falls back to a conservative prefix check
+    (which cannot recover a `-C` target, so it returns [])."""
     try:
         import shlex
         toks = shlex.split(core_cmd, posix=(os.name != "nt"))
     except ValueError:
-        return core_cmd == "git commit" or core_cmd.startswith("git commit ")
+        if core_cmd == "git commit" or core_cmd.startswith("git commit "):
+            return []
+        return None
     i = 0
     while i < len(toks) and "=" in toks[i] and not toks[i].startswith("-"):
         i += 1  # leading VAR=value environment assignments
     if i >= len(toks) or toks[i] != "git":
-        return False
+        return None
     i += 1
+    dirs = []
     while i < len(toks):
         t = toks[i]
         if t in _GIT_OPTS_WITH_VALUE:
+            if t == "-C" and i + 1 < len(toks):
+                dirs.append(_unquote(toks[i + 1]))
             i += 2  # option + its value
             continue
         if t.startswith("-"):
             i += 1  # `--opt=val`, `-c k=v` (joined), or a valueless flag
             continue
-        return t == "commit"  # the first non-option token is the subcommand
-    return False
+        return dirs if t == "commit" else None  # the first non-option token is the subcommand
+    return None
+
+
+def _is_git_commit(core_cmd):
+    """True iff core_cmd invokes the `git commit` subcommand (see _parse_git_commit)."""
+    return _parse_git_commit(core_cmd) is not None
+
+
+def _apply_dash_C(cwd, dirs):
+    """Apply git's `-C <dir>` global options to a starting directory. Like git, each
+    `-C` is interpreted relative to the previous one; an absolute path replaces it."""
+    for d in dirs:
+        if not d:
+            continue  # git treats `-C ""` as a no-op
+        p = Path(_expand_shell_path(d))
+        cwd = p if p.is_absolute() else Path(cwd) / p
+    return cwd
+
+
+def _expand_shell_path(d):
+    """Expand `~` and `$VAR` the way the shell would before git sees the path (shlex does
+    not). Approximation: a single-quoted '$VAR' (which the shell leaves literal) is expanded
+    too, since the quoting is gone by this point."""
+    return os.path.expanduser(os.path.expandvars(d))
 
 
 # ------------------------------------------------------------------------------
@@ -435,17 +483,20 @@ def run_pretooluse(raw):
     cmd = (raw_cmd if isinstance(raw_cmd, str) else "").strip()
     cd_target, rest = _parse_cd_prefix(cmd)
     core_cmd = rest if cd_target is not None else cmd
-    if not _is_git_commit(core_cmd):
+    dash_c = _parse_git_commit(core_cmd)
+    if dash_c is None:
         _emit_allow("test-protection-guard: not a `git commit`.")
 
     try:
         if cd_target is not None:
-            target = Path(cd_target)
+            target = Path(_expand_shell_path(cd_target))
             if not target.is_absolute():
                 target = Path(os.getcwd()) / target
             cwd = target.resolve()
         else:
             cwd = Path(os.getcwd()).resolve()
+        # `git -C <dir> commit` commits into <dir>'s repo: analyse THAT one.
+        cwd = _apply_dash_C(cwd, dash_c).resolve()
     except OSError:
         _emit_allow("test-protection-guard: CWD unresolved — advisory, allowing.")
         return

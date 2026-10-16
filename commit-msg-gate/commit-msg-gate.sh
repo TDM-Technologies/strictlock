@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # commit-msg-gate — require every commit to name a plan (`plan: <slug>`), unless it
 # carries an approved "ceremony" prefix (chore/docs/ci/build). The slug is not
-# validated against any plans directory.
+# validated unless COMMIT_MSG_GATE_PLANS_DIR is set (see below).
 #
 # Part of StrictLock (https://github.com/TDM-Technologies/strictlock).
 # Install as .git/hooks/commit-msg. Runs on every commit in the repo that goes
@@ -11,10 +11,17 @@
 # A commit passes if EITHER:
 #   (a) its first line starts with an approved prefix, e.g.
 #         chore: ...   chore(scope): ...   docs: ...   ci: ...   build: ...
-#   (b) its message contains a line (at line start) matching:  plan: <slug>
+#   (b) its message BODY (the lines after the subject) contains a line, at line
+#       start, matching:  plan: <slug>      (a `plan:` on the subject line does not count)
+#
+# By default the slug is not validated. With COMMIT_MSG_GATE_PLANS_DIR set, at
+# least one body slug must resolve to <slug>.md in that directory.
 #
 # Configuration (environment):
 #   COMMIT_MSG_GATE_BYPASS=on        skip the gate (single-use by convention: set inline per commit).
+#   COMMIT_MSG_GATE_PLANS_DIR=<dir>  opt in to slug validation: `plan: <slug>` must resolve to
+#                                    <dir>/<slug>.md (plan-gate's plan-file layout). If the
+#                                    directory is set but missing/unreadable the gate FAILS CLOSED.
 #   COMMIT_MSG_GATE_PREFIXES=<regex> override the approved first-line prefix
 #                                    regex (grep -E syntax). See DEFAULT below.
 
@@ -50,9 +57,29 @@ if printf '%s' "$FIRST_LINE" | grep -qE "$PREFIX_RE"; then
   exit 0
 fi
 
-# (b) a plan reference anywhere in the message body.
-if printf '%s' "$FULL_MSG" | grep -qE '^plan:[[:space:]]+[A-Za-z0-9._-]+'; then
-  exit 0
+# (b) a `plan: <slug>` line in the message BODY (the lines after the subject line;
+# a `plan:` on the subject line itself does not count).
+BODY="$(printf '%s\n' "$FULL_MSG" | sed -n '2,$p')"
+SLUGS="$(printf '%s\n' "$BODY" | sed -n -E 's/^plan:[[:space:]]+([A-Za-z0-9._-]+).*/\1/p')"
+
+PLANS_DIR="${COMMIT_MSG_GATE_PLANS_DIR:-}"
+if [[ -n "$SLUGS" ]]; then
+  if [[ -z "$PLANS_DIR" ]]; then
+    exit 0   # slug present; no plans dir configured, so it is not validated
+  fi
+  # Opt-in validation. Fail CLOSED if the directory is set but unusable.
+  if [[ ! -d "$PLANS_DIR" || ! -r "$PLANS_DIR" || ! -x "$PLANS_DIR" ]]; then
+    echo "commit-msg-gate: COMMIT_MSG_GATE_PLANS_DIR='$PLANS_DIR' is not a readable directory — rejecting (fail closed)." >&2
+    exit 1
+  fi
+  while IFS= read -r slug; do
+    [[ -z "$slug" || "$slug" == "." || "$slug" == ".." ]] && continue
+    # Resolution rule: <slug>.md in the plans directory (plan-gate's layout).
+    if [[ -f "$PLANS_DIR/$slug.md" && -r "$PLANS_DIR/$slug.md" ]]; then
+      exit 0
+    fi
+  done <<< "$SLUGS"
+  echo "commit-msg-gate: no plan file '<slug>.md' in '$PLANS_DIR' for: $(printf '%s' "$SLUGS" | tr '\n' ' ')" >&2
 fi
 
 cat >&2 <<'EOF'
@@ -66,9 +93,9 @@ Your commit message must do ONE of:
         docs: ...         docs(scope): ...
         ci: ...           build: ...
 
-  (b) Include a line naming the plan:
+  (b) Include a line in the message BODY (after the subject line) naming the plan:
         plan: add-logout-button
-      (the slug is not checked against your plans directory)
+      (with COMMIT_MSG_GATE_PLANS_DIR set, <slug>.md must exist in that directory)
 
 Emergency bypass: COMMIT_MSG_GATE_BYPASS=on git commit ...
 ---------------------------------------------------------------------

@@ -16,12 +16,11 @@ opt-in, and it only ever writes gitignored logs (and only when `LIVENESS_SCAN_LO
 | `LIVENESS_SCAN_HEARTBEAT_RELPATH` | (none) | A per-worktree file (relative to each worktree root) your harness touches to signal liveness. Read by **existence + mtime only**. Unset / absent → the scanner falls back to commit mtime. |
 | `LIVENESS_SCAN_HEARTBEAT_TIMEOUT_MIN` | `10` | A heartbeat older than this (assuming a ~30s touch cadence) reads as "quiet" → `stalled`. The lease-fresh window. |
 | `LIVENESS_SCAN_COMMIT_STALE_MIN` | `90` | The commit-mtime fallback window: no heartbeat + a commit older than this reads as `stalled`. Coarser than a heartbeat on purpose. |
-| `LIVENESS_SCAN_CEILING_MIN` | `480` | The outer quiet-time bound (8h). An owned worktree whose activity signal is older than this is `ambiguous` and **escalates**. Measured on the age of the signal, not on total time since the unit of work began. Distinct from the heartbeat window. |
+| `LIVENESS_SCAN_CEILING_MIN` | `480` | The whole-work-package ceiling (8h). Measured as the time since the **earliest commit on the branch that is not on `LIVENESS_SCAN_BASE`** (`git log <base>..HEAD --reverse`, first commit's time). An owned worktree past it is `ambiguous` and **escalates even on a fresh signal**; a signal older than the ceiling escalates too. Caveat: the start is a committer date, so a rebase/amend/squash rewrites it and restarts the clock (under-report), while a branch stacked on older unmerged work or cut from a stale base ref inherits that older start (over-report, noise only); if the base is unresolvable or the branch has no commits beyond base, only the signal-age bound applies. Distinct from the heartbeat window. |
 | `LIVENESS_SCAN_LOG_DIR` | (none) | Directory for the gitignored outputs: a human report (`liveness-escalations.md`, overwritten each run) and an append-only JSONL trail (`liveness-scan.log`). Unset → print to stdout only, write nothing. |
 
-A non-integer threshold value falls back to its default (announced on stderr); a `<= 0` value
-also falls back to the default, currently without a notice. Either way a misconfigured threshold
-never silently disables the scan.
+A non-integer or `<= 0` threshold value falls back to its default, and the fallback is announced on
+stderr. A misconfigured threshold never silently disables the scan.
 
 ## Modes
 
@@ -30,7 +29,7 @@ never silently disables the scan.
 | (none) | Print the human report to stdout; write the gitignored logs if `LIVENESS_SCAN_LOG_DIR` is set. |
 | `--dry-run` | Compute + print the report; **write nothing**. |
 | `--json` | Emit the structured digest as JSON (tooling / tests). |
-| `--explain` | Add a maintainer breakdown (thresholds + counts) to stderr. |
+| `--explain` | Add a maintainer breakdown to stderr: the thresholds and counts, plus one line per worktree with its status, signal and signal age, commit age, heartbeat age, WP age, owning active/executed plan, and ahead-of-base. (The same per-worktree `internals` object is in the `--json` digest.) |
 | `--root DIR` | A path inside the repo whose worktrees to scan (default: cwd). The repo top-level is resolved so the whole fleet is enumerated even from a subdir. |
 
 ## Exit code

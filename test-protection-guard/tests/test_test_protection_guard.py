@@ -507,5 +507,142 @@ class VerifyHardeningTests(GuardTestBase):
         self.assertTrue(any("__tests__" in f for f in rows[0]["test_files"]))
 
 
+# ============================================================================ #
+# Pre-commit door: GIT_INDEX_FILE preserved (git commit -a / git commit <paths>)
+# ============================================================================ #
+class RealHookIndexTests(GuardTestBase):
+    """Installs the guard as a REAL .git/hooks/pre-commit and drives real `git commit`
+    invocations. `-a` and `<paths>` stage through a temporary index that git hands the
+    hook in GIT_INDEX_FILE; the guard must follow it."""
+
+    def install_hook(self):
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text('#!/bin/sh\nexec "%s" "%s"\n' % (
+            sys.executable.replace("\\", "/"), str(GUARD).replace("\\", "/")), encoding="utf-8")
+        os.chmod(str(hook), 0o755)
+
+    def edit_unstaged(self, lang="js"):
+        tf, sf, _bt, ch_t, _at, _bs, ch_s = LANGS[lang]
+        (self.repo / tf).write_text(ch_t, encoding="utf-8")
+        (self.repo / sf).write_text(ch_s, encoding="utf-8")
+        return tf, sf
+
+    def commit(self, *args):
+        return subprocess.run(["git", "commit", "-q", "-m", "fix", *args], cwd=str(self.repo),
+                              capture_output=True, text=True, env=self.guard_env())
+
+    def test_commit_dash_a_is_seen_as_staged(self):
+        self.seed("js"); self.install_hook(); self.edit_unstaged("js")
+        p = self.commit("-a")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("test-protection-guard", p.stderr)
+        rows = self.log_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["decision"], "flagged")
+
+    def test_commit_with_paths_is_seen_as_staged(self):
+        tf, sf = self.seed("js"); self.install_hook(); self.edit_unstaged("js")
+        p = self.commit(tf, sf)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("test-protection-guard", p.stderr)
+        self.assertEqual(self.log_rows()[0]["decision"], "flagged")
+
+    def test_plain_add_then_commit_still_seen(self):
+        self.seed("js"); self.install_hook(); self.stage("js", "change")
+        p = self.commit()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.log_rows()[0]["decision"], "flagged")
+
+    def test_clean_env_helper_keeps_index_only_in_precommit(self):
+        m = load_guard()
+        os.environ["GIT_INDEX_FILE"] = "rel-index"
+        try:
+            m._CURRENT_MODE = "precommit"
+            self.assertEqual(m._clean_git_env()["GIT_INDEX_FILE"], os.path.abspath("rel-index"))
+            m._CURRENT_MODE = "pretooluse"
+            self.assertNotIn("GIT_INDEX_FILE", m._clean_git_env())
+        finally:
+            os.environ.pop("GIT_INDEX_FILE", None)
+
+
+# ============================================================================ #
+# PreToolUse door: `git -C <dir> commit` is analysed against <dir>'s repo
+# ============================================================================ #
+class DashCRetargetTests(GuardTestBase):
+    def test_parse_extracts_dash_C_targets(self):
+        m = load_guard()
+        self.assertEqual(m._parse_git_commit("git -C /a/b commit -m x"), ["/a/b"])
+        self.assertEqual(m._parse_git_commit('git -C "/a b" commit'), ["/a b"])
+        self.assertEqual(m._parse_git_commit("git -C a -C b commit"), ["a", "b"])
+        self.assertEqual(m._parse_git_commit("git commit -m x"), [])
+        self.assertIsNone(m._parse_git_commit("git -C /a status"))
+        self.assertIsNone(m._parse_git_commit("git -C /a commit-tree x"))
+
+    def test_apply_dash_C_is_cumulative(self):
+        m = load_guard()
+        base = Path(self.root)
+        self.assertEqual(m._apply_dash_C(base, ["a", "b"]), base / "a" / "b")
+        absolute = (self.root / "z").resolve()
+        self.assertEqual(m._apply_dash_C(base, ["a", str(absolute)]), absolute)
+        self.assertEqual(m._apply_dash_C(base, ["", "a"]), base / "a")
+
+    def test_dash_C_into_other_repo_flags_from_foreign_cwd(self):
+        self.seed("js"); self.stage("js", "change")
+        foreign = self.root / "foreign"; foreign.mkdir()
+        posix = str(self.repo).replace("\\", "/")
+        dec, reason, _e, _c = self.run_pretooluse(f'git -C "{posix}" commit -m fix', cwd=foreign)
+        self.assertEqual(dec, "allow")
+        self.assertIn("flagged", reason.lower())
+        self.assertEqual(self.log_rows()[0]["decision"], "flagged")
+
+    def test_dash_C_analyses_target_not_session_repo(self):
+        # Session cwd is a clean repo; the staged coupling is in the -C target.
+        self.seed("js"); self.stage("js", "change")
+        other = self.root / "other"; other.mkdir()
+        git(other, "init", "-q", env=self.git_env)
+        posix = str(self.repo).replace("\\", "/")
+        _d, reason, _e, _c = self.run_pretooluse(f'git -C "{posix}" commit -m fix', cwd=other)
+        self.assertIn("flagged", reason.lower())
+        # ...and the reverse: -C pointing at the clean repo is clean although cwd has coupling.
+        posix_other = str(other).replace("\\", "/")
+        _d, reason, _e, _c = self.run_pretooluse(f'git -C "{posix_other}" commit -m fix', cwd=self.repo)
+        self.assertNotIn("flagged", reason.lower())
+        self.assertEqual(len(self.log_rows()), 1)
+
+    def test_relative_dash_C_resolves_against_cwd(self):
+        self.seed("js"); self.stage("js", "change")
+        _d, reason, _e, _c = self.run_pretooluse("git -C repo commit -m fix", cwd=self.root)
+        self.assertIn("flagged", reason.lower())
+
+    def test_dash_C_expands_env_var_like_the_shell(self):
+        self.seed("js"); self.stage("js", "change")
+        foreign = self.root / "foreign"; foreign.mkdir()
+        env = self.guard_env(); env["SL_TARGET_REPO"] = str(self.repo)
+        _d, reason, _e, _c = self.run_pretooluse('git -C "$SL_TARGET_REPO" commit -m fix',
+                                                 env=env, cwd=foreign)
+        self.assertIn("flagged", reason.lower())
+
+    def test_dash_C_expands_tilde_like_the_shell(self):
+        self.seed("js"); self.stage("js", "change")
+        foreign = self.root / "foreign"; foreign.mkdir()
+        env = self.guard_env(); env["HOME"] = str(self.root); env["USERPROFILE"] = str(self.root)
+        _d, reason, _e, _c = self.run_pretooluse("git -C ~/repo commit -m fix", env=env, cwd=foreign)
+        self.assertIn("flagged", reason.lower())
+
+    def test_cd_target_expands_env_var(self):
+        self.seed("js"); self.stage("js", "change")
+        foreign = self.root / "foreign"; foreign.mkdir()
+        env = self.guard_env(); env["SL_TARGET_REPO"] = str(self.repo)
+        _d, reason, _e, _c = self.run_pretooluse('cd "$SL_TARGET_REPO" && git commit -m fix',
+                                                 env=env, cwd=foreign)
+        self.assertIn("flagged", reason.lower())
+
+    def test_dash_C_nonexistent_dir_allows(self):
+        dec, reason, _e, _c = self.run_pretooluse("git -C does-not-exist commit -m fix", cwd=self.root)
+        self.assertEqual(dec, "allow")
+        self.assertIn("not inside a git repo", reason.lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
