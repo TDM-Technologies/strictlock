@@ -21,10 +21,10 @@ jobs:
       # on Windows and macOS.
       #
       # macOS 3.8 runs on `macos-15-intel`, not `macos-latest`: macos-latest is
-      # Apple Silicon (arm64), and actions/setup-python publishes no arm64 build
-      # of Python 3.8, so a 3.8 job there fails at setup. The Intel runner keeps
-      # the 3.8 floor tested on macOS; 3.12 runs on the arm64 `macos-latest`, so
-      # both CPU architectures are covered. (If GitHub retires macos-15-intel,
+      # Apple Silicon (arm64), and in actions/python-versions only 3.8.10 has an
+      # arm64 build (3.8.11-3.8.18 are x64-only). The Intel runner tests the
+      # latest 3.8 patch release on x64; 3.12 runs on the arm64 `macos-latest`,
+      # so both CPU architectures are covered. (If GitHub retires macos-15-intel,
       # drop the macOS 3.8 entry rather than raising the floor silently.)
       matrix:
         include:
