@@ -23,8 +23,9 @@ WHERE THE SIGNAL COMES FROM (two-tier, degrades gracefully):
   * a per-worktree HEARTBEAT file (LIVENESS_SCAN_HEARTBEAT_RELPATH), read by EXISTENCE + mtime
     only — the sharp signal, if your harness touches one (e.g. alongside a scope-lease acquire).
   * else COMMIT mtime — coarser, flagged in the reason. Always available.
-  HEARTBEAT_TIMEOUT_MIN (the lease-fresh window) is distinct from CEILING_MIN (the whole-unit-of-
-  work ceiling beyond which even fresh activity is suspect → escalate).
+  HEARTBEAT_TIMEOUT_MIN (the lease-fresh window) is distinct from CEILING_MIN (the outer
+  quiet-time bound: a signal older than this → escalate; it measures signal age, not total
+  time since the unit of work began).
 
 WHO OWNS A WORKTREE (attribution): if you run plan-gate, the scanner maps a worktree to the
 session running in it via the active/executed plan whose **absolute** allowed_paths resolve under
@@ -34,7 +35,7 @@ without them, attribution falls back to "branch ahead of base ⇒ done-unmerged"
 CLASSIFICATION (deterministic; report-only):
   running        an owning active plan + a fresh activity signal.
   stalled        an owning active plan, quiet past the heartbeat/commit window — likely slow; watch.
-  ambiguous      an owning active plan idle past the whole-WP ceiling, or no activity signal at
+  ambiguous      an owning active plan quiet past the ceiling, or no activity signal at
                  all — crashed-or-slow unclear ⇒ ESCALATE (never reap).
   done-unmerged  work complete / branch ahead of base, not yet merged ⇒ pending merge.
   idle           no plan claims it; branch clean or merged.
@@ -49,7 +50,7 @@ Modes:
   (default)   human report to stdout (+ the gitignored logs if LIVENESS_SCAN_LOG_DIR is set)
   --dry-run   compute + print the report; write NOTHING
   --json      structured digest (tooling / tests)
-  --explain   maintainer breakdown to stderr (thresholds + per-worktree internals)
+  --explain   maintainer breakdown to stderr (thresholds + counts)
 
 Usage:
   python3 liveness-scan.py            # scan + print the report
@@ -242,9 +243,10 @@ def _is_abs(p: str) -> bool:
 
 def plan_specifically_claims(plan: Plan, worktree_root: str) -> bool:
     """Liveness ATTRIBUTION: a plan specifically OWNS a worktree iff >=1 ABSOLUTE allowed_paths
-    entry resolves under it. **Excludes worktree_bypass** on purpose — a cross-tree bypass plan
-    has authority in many worktrees but is the session of NONE, so attributing it per-worktree
-    would mis-mark EVERY worktree as that plan's session.
+    entry resolves under it. **Intended to exclude worktree_bypass** (NOT YET ENFORCED in this
+    function: a bypass plan with an absolute path under the worktree still attributes) — a
+    cross-tree bypass plan has authority in many worktrees but is the session of NONE, so
+    attributing it per-worktree would mis-mark EVERY worktree as that plan's session.
 
     KNOWN BLIND SPOT (fail-safe): a running session whose active plan is worktree_bypass:true with
     no absolute path under its own worktree is invisible here → classifies idle/done-unmerged. That

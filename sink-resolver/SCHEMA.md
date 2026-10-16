@@ -108,8 +108,9 @@ rather than failing CI. Both share the same core recipe; they differ only in *wh
 
 - **`resolve`**: regenerates the configured sink(s) and **stages only the sink set**; finalizes
   the merge commit unless `--no-commit`. On escalation or any fail-closed condition it stages and
-  commits **nothing** (and the coverage-guard escalation restores the conflicted sinks to 'ours'
-  first, leaving the merge exactly as found). NOTE: the *generator* is expected to write only the
+  commits **nothing** (and the coverage-guard escalation restores the *conflicted* sinks to 'ours'
+  first; any other configured sink the generator rewrote is not restored, so check `git status`
+  after an escalation). NOTE: the *generator* is expected to write only the
   sink set — `resolve` stages only the sinks, so a generator that also writes other tracked files
   leaves those **dirty** after finalize (out of contract; surfaced by `git status` and the commit
   gates, never committed by `resolve`).

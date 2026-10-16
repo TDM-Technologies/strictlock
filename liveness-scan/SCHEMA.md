@@ -32,8 +32,9 @@ is the worktree main / master / detached?
   decide." It carries a non-destructive recovery command. The scanner **never** turns ambiguous
   into a reap.
 - The **stale window** is the heartbeat timeout when a heartbeat exists, else the (coarser) commit
-  window — see signals below. The **ceiling** is a separate, larger bound on the whole unit of
-  work; crossing it escalates even if the signal looks fresh.
+  window — see signals below. The **ceiling** is a separate, larger bound on the age of that same
+  signal; crossing it escalates. (It does not yet track total elapsed time since the unit of
+  work began, so a fresh signal never crosses it.)
 
 ## The two activity signals
 
@@ -54,9 +55,11 @@ path that resolves under that worktree's root.
 
 - **Absolute paths only.** A relative `allowed_paths` entry (e.g. `src/app.py`) is not anchored to
   any particular worktree, so it claims none — attribution needs an absolute anchor.
-- **`worktree_bypass: true` is excluded.** A bypass plan has authority across many worktrees but
-  is the *session* of none. Attributing it per-worktree would mis-mark every worktree as that
-  plan's session, so attribution ignores it. (Its known cost: a genuinely-running bypass session
+- **`worktree_bypass: true` is meant to be excluded.** A bypass plan has authority across many
+  worktrees but is the *session* of none. Attributing it per-worktree would mis-mark every
+  worktree as that plan's session, so attribution is meant to ignore it. (Not yet enforced in
+  code: a bypass plan that carries an absolute path under a worktree is still attributed to that
+  worktree; fix in progress.) (The known cost of the intended exclusion: a genuinely-running bypass session
   with no absolute path under its own worktree is invisible and classifies idle/done-unmerged — a
   safe false negative for a report-only tool, which under-claims liveness but never over-claims
   death.)

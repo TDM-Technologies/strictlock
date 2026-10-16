@@ -10,9 +10,10 @@ published as the reference implementation for the `plan-gate` paper (see
 WHAT IT DOES
   Reads tool-use JSON from stdin, consults the single active "plan" file in a
   configured plans directory, and emits an allow/deny decision on stdout. An
-  agent may only modify the exact files and run the exact commands an approved
-  plan enumerates. Anything else is denied BEFORE it runs. The gate fails
-  closed: when in doubt, deny.
+  agent may only modify the exact files and run commands matching the command
+  prefixes an approved plan enumerates. Anything else is denied BEFORE it runs.
+  The gate fails closed on policy: when in doubt, deny. (Its own crash or an
+  unparseable payload is the exception — see the hook contract below.)
 
 HOOK CONTRACT (typical agentic-harness PreToolUse convention)
   - Exit 0 with JSON {"hookSpecificOutput": {"permissionDecision": "allow|deny", ...}}
@@ -65,11 +66,14 @@ PATH RESOLUTION
     dir), the WORKTREE ROOT is the anchor — not the main repo root. This is the
     fix for the silent-drift pattern where a worktree-CWD session wrote to the
     main repo because the plan listed main-repo absolute paths.
-  - Hard guard: if CWD is under a worktree AND the plan has a non-empty
-    allowed_paths AND zero of them resolve under that worktree, block every tool
-    call. The plan is misaligned with the session location; fix the plan first.
+  - Worktree guard: if CWD is under a worktree, a plan is active for that
+    session only if at least one ABSOLUTE allowed_paths entry resolves under the
+    worktree (or it declares `worktree_bypass: true`). A misaligned plan is not
+    active there, so gated writes and non-read-only commands are denied ("no
+    active plan"); read-only inspection and always-writable dirs stay available.
+    Fix the plan first.
   - Opt-out: a plan can declare `worktree_bypass: true` in frontmatter to skip
-    the hard guard. Use when the work is deliberately cross-tree and the
+    the guard. Use when the work is deliberately cross-tree and the
     allowed_paths are absolute.
 """
 from __future__ import annotations

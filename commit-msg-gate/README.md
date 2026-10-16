@@ -1,12 +1,14 @@
 # commit-msg-gate
 
-**Require every commit to link back to an approved plan.**
+**Require every commit to link back to a plan.**
 
 A [StrictLock](../README.md) module. `commit-msg-gate` is a tiny `commit-msg` git hook that
-enforces the version-control half of the governance loop: a commit must either reference an
-approved plan or be an explicitly-labelled "ceremony" commit. The result is a git history
-where every functional change traces back to an authorization — the change-management
+enforces the version-control half of the governance loop: a commit must either name a plan
+or be an explicitly-labelled "ceremony" commit. The result is a git history
+where every functional change names the plan it was made under — the change-management
 evidence [`plan-gate`](../plan-gate/) describes in its paper (§6), applied at the commit.
+The hook checks that a `plan: <slug>` line is present; it does not check the slug against your
+plans directory, so whether the named plan was actually approved is for review to confirm.
 
 ## What it does
 
@@ -15,8 +17,8 @@ A commit message passes if **either**:
 - **(a)** its first line starts with an approved *ceremony* prefix — by default
   `chore:`, `docs:`, `ci:`, `build:` (with optional `(scope)`) — for changes that don't need
   a plan link; **or**
-- **(b)** its body contains a line matching `plan: <slug>`, naming the approved plan the
-  change was made under.
+- **(b)** its message contains a line matching `plan: <slug>` (at the start of a line),
+  naming the plan the change was made under.
 
 Otherwise the commit is rejected with a message explaining both options.
 
@@ -27,13 +29,14 @@ cp commit-msg-gate.sh /path/to/your/repo/.git/hooks/commit-msg
 chmod +x /path/to/your/repo/.git/hooks/commit-msg
 ```
 
-It applies to **every** commit in that repo — human or agent.
+It runs on every commit in that repo that goes through git's hook machinery — human or
+agent (`--no-verify` skips it).
 
 ## Configuration (environment)
 
 | Variable | Meaning |
 |---|---|
-| `COMMIT_MSG_GATE_BYPASS` | `on` skips the gate for one commit. Use deliberately: `COMMIT_MSG_GATE_BYPASS=on git commit ...` |
+| `COMMIT_MSG_GATE_BYPASS` | `on` skips the gate. Single-use by convention: set it inline per commit (`COMMIT_MSG_GATE_BYPASS=on git commit ...`). Each use is announced on stderr; the hook writes no durable record of it. |
 | `COMMIT_MSG_GATE_PREFIXES` | Override the approved first-line prefix regex (`grep -E` syntax). Default: `chore`/`docs`/`ci`/`build` with optional `(scope)`. |
 
 ### Examples

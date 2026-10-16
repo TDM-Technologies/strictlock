@@ -10,7 +10,8 @@ the moment a source changes but the sink is not regenerated, every downstream
 reader silently desyncs — and nothing notices until a stale fact has already
 propagated.
 
-This gate makes "commit a stale sink" structurally impossible. Wired as a git
+This gate makes "commit a stale sink" fail closed at commit time (git honors
+`--no-verify`, so a client-side hook cannot make it impossible). Wired as a git
 `pre-commit` hook, on any commit whose staged changes touch the configured
 source paths it:
 

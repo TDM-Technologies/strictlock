@@ -42,7 +42,7 @@ ESLint rule options — `baseline` / `marker` / `extraSmokeMatchers`, default st
 **SHIPPED:** `scope-lease` (Option A git-ref CAS exclusive path-lock; 37 tests; 3 lenses clean) · `sink-resolver`
 (binary-sink auto-resolver; 29 tests; 3 lenses → 1 proven blocking + 1 structural gap fixed) · `liveness-scan`
 (read-only fleet reporter; 31 tests; 2 lenses clean). Full suite **185 tests / 9 modules** green. Registered in
-README + COMPLIANCE §K/§L + CI + roadmap, then **PUSHED + MERGED to origin/main via PR #6 (`d17e1a9`, all 9 CI
+README + COMPLIANCE §K/§L + CI + roadmap, then **PUSHED + MERGED to origin/main via PR #6 (`d17e1a9`, all 8 CI
 jobs green incl python 3.8–3.12).** Next harvest wave: Wave 4 (rituals/gates), then Wave 2 (marquee, last).
 
 ### Wave 2 — marquee IP — *DEFERRED to end of queue (Tim, 2026-06-25)*
@@ -52,9 +52,9 @@ inversion (zero-fire telemetry = the guard working, not dead) and the trip-test 
 + harvest ritual as one governance narrative (`GOVERNANCE.md`) · blast-radius review-depth trigger
 (after pattern-config genericization).
 
-### Wave 4 — rituals + remaining gates — *planned*
-session-ritual checklist templates · WP-interaction analysis · pre-WP currency check ·
-test-protection co-commit guard.
+### Wave 4 — rituals + remaining gates — *1 of 4 shipped (test-protection-guard, PR #7)*
+**SHIPPED:** the test-protection co-commit guard (`test-protection-guard`, PR #7). **Still planned:**
+session-ritual checklist templates · WP-interaction analysis · pre-WP currency check.
 
 ### Later / experimental
 reversibility-tiers + auto-commit (entries below; need a shared evidence window) · autohygiene ·
@@ -98,7 +98,7 @@ prefixes so a bare `git checkout` entry can't also authorize `git checkout -- .`
 close-out). A project-agnostic "plan-authoring" standard already exists privately and
 can be genericized into the repo (likely `plan-gate/AUTHORING.md`).
 
-### paper.md §6 ↔ shipped-log reconcile — *RESOLVED (built, 2026-07-15)*
+### paper.md §6 ↔ shipped-log reconcile — *DONE (built, 2026-07-15, PR #11)*
 Ruled BUILD by the maintainer: shipped the **authorizations record** — one unified, hash-chained
 `plan-gate-decisions.log` (allow *and* deny, all gated surfaces, full-by-default with
 `PLAN_GATE_LOG_DECISIONS=deny` opt-down), a `verify-log` mode, and log-dir self-protection —
@@ -106,6 +106,26 @@ replacing the three per-surface logs. §5/§6, `CONFIG.md`, `COMPLIANCE.md` §B,
 README were reworded to exactly the shipped behavior, with honest tamper-evidence scope
 (integrity-without-secret; host-level adversary caveats stated, not implied away). Spec:
 [AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-RECORD-SPEC.md).
+
+### default-deny unknown tool names, with a plan-level `allowed_tools:` escape hatch — *Exploring / Ready for design*
+Today plan-gate gates a fixed set (Edit / Write / NotebookEdit / Bash / PowerShell) plus the MCP
+tools named in `PLAN_GATE_MCP_WRITE_TOOLS`; any other tool name passes through as outside the gated
+set. The designed inversion: **deny unknown tool names by default**, with a plan-level
+`allowed_tools:` frontmatter field as the escape hatch (so a plan can enumerate the tools it
+needs, the same way it enumerates paths and command prefixes). It is a **schema change** — it goes
+through `plan-gate/SCHEMA.md` and `plan-gate/AUTHORING.md` — and unlike the crash-posture ruling
+the deny would fire when nothing is wrong (any MCP server's tools are unknown names), so the
+escape hatch needs design time. **Decided 2026-07-07 (CLAIMS-FIX-SPEC Q6): backlog it, don't rush
+it** — PR 1 rewords the README coverage sentence to "every file edit, shell command, and recognized
+external-write tool call"; this item is the designed follow-up.
+
+### future schema wave: `worktree:` frontmatter anchor — *Exploring* (parked with `allowed_tools:`)
+A `worktree:` frontmatter field that names the worktree a plan belongs to explicitly, instead of
+the current claim-by-absolute-path mechanism (a plan claims a worktree through an absolute
+`allowed_paths` entry under it). Parked in the same future schema wave as `allowed_tools:` above so
+both schema changes are designed and documented together. **Decided 2026-07-07 (CLAIMS-FIX-SPEC
+Q8c).** The near-term worktree-guard work (diagnostic deny from the real no-claim path, dead
+guard block removed, docs rewritten to claim-by-absolute) does not need it.
 
 ### reversibility-tiered authorization — *exploring* (harvest: later)
 Shift from pure prevention toward "prevent where reversibility runs out, account for
@@ -125,7 +145,9 @@ and sequence before building.
 ### changed-region scan — *shipped 2026-06-25* (Wave 0)
 Merged: introduced/modified `- `-line multiset delta, CRLF/LF-agnostic, +4 tests (wedge-removed ·
 good-property-kept · CRLF · Edit-introduces-deny). The optional env-gated JSONL decision log stays
-**deferred** (ties to the CC7 "allow and deny" log — see `paper.md §6 ↔ shipped-log reconcile`).
+**deferred and still open** (ties to the CC7 "allow and deny" log; the plan-gate half shipped as
+PR #11 — see `paper.md §6 ↔ shipped-log reconcile` — and the memory-cap mirror,
+`MEMORY_CAP_DECISION_LOG=1`, is decided but not built: CLAIMS-FIX-SPEC §5 Q3).
 Original scoping below.
 
 The shipped cap scans the whole file, which can **self-wedge**: once any over-cap `- `
@@ -167,7 +189,7 @@ Default = the vault's git-native shape; `conductor-resolve.py` documented as the
 ### liveness-scan — read-only fleet-liveness reporter — *SHIPPED 2026-06-25* (Wave 3)
 Ported from HIPAAPath `conductor-scan.py`, decoupled from its machine-specific defaults. Classifies each git
 worktree (running/stalled/done-unmerged/ambiguous/idle/clean) on a heartbeat-or-commit-mtime signal,
-attributing worktrees to plan-gate sessions (absolute `allowed_paths`, excludes `worktree_bypass`). Report-only:
+attributing worktrees to plan-gate sessions (absolute `allowed_paths`; `worktree_bypass` plans are meant to be excluded, not yet enforced in code — CLAIMS-FIX-SPEC §3 C2). Report-only:
 never reaps, exits 0 always; ambiguous stalls escalate with a non-destructive recovery command. env-configured
 (`LIVENESS_SCAN_*`), no machine paths. 31 tests; 2 adversarial lenses clean (zero blocking; 4 safe-direction
 polish items folded in). Closes the concurrency family (plan-gate enumerates → scope-lease makes exclusive →
@@ -186,9 +208,9 @@ CC6; append-only decision log → CC7; PLAN→CONFIRM→EXECUTE → CC8 / ISO 90
 plan as a documented artifact → ISO 9001 §7.5) and what an auditor can trace. Content largely
 exists in the paper; this is the genericized, reusable reference. Also on the public roadmap.
 
-### COMPLIANCE.md discoverability — *ready*
-`COMPLIANCE.md` (root, shipped 2026-06-25) is reachable only by knowing the filename — add a
-one-line cross-link from the root `README.md` and `roadmap.md` before public launch.
+### COMPLIANCE.md discoverability — *DONE* (see [Done](#done))
+`COMPLIANCE.md` (root, shipped 2026-06-25) was reachable only by knowing the filename; it is now
+cross-linked from the root `README.md` (Design principles) and `roadmap.md` (Shipped since launch).
 
 ## cross-cutting
 
@@ -239,11 +261,19 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 ---
 
 ## Done
+- **2026-10-16** — **COMPLIANCE.md discoverability** — closed: cross-linked from the root `README.md`
+  (Design principles) and `roadmap.md`; moved here from the docs section (it had been marked *ready* long
+  after it shipped).
+- **2026-07-15** — **paper.md §6 ↔ shipped-log reconcile — built (PR #11, `554a3ce`)**: the authorizations
+  record — one unified hash-chained `plan-gate-decisions.log`, allow + deny, all gated surfaces,
+  full-by-default, `verify-log`, log-dir self-protection; CI 8/8 green. Spec:
+  [AUTHORIZATIONS-RECORD-SPEC.md](AUTHORIZATIONS-RECORD-SPEC.md). (The memory-cap decision-log mirror stays
+  open under *memory-cap*.)
 - **2026-07-05** — **`eslint-plugin-strictlock` published to npm** — `0.1.0` (2026-06-25) then `0.1.1`
   (2026-07-05), acct `downsmullen`: <https://www.npmjs.com/package/eslint-plugin-strictlock>. Closes the
   `eslint-plugin-publish` item (the last open thread from Wave 1). The action refresh (`checkout@v7` /
   `setup-python@v6` / `setup-node@v6`) landed alongside; the OS matrix stays open above.
-- **2026-06-25** — **Wave 3 COMPLETE + MERGED to origin/main** (`d17e1a9`, PR #6, all 9 CI jobs green).
+- **2026-06-25** — **Wave 3 COMPLETE + MERGED to origin/main** (`d17e1a9`, PR #6, all 8 CI jobs green).
   `sink-resolver` (binary-sink auto-resolver; 29 tests; 3 lenses → a proven `check`-data-loss blocking + a
   silent-clobber coverage gap, both fixed pre-land; coverage guard added as a core-safety upgrade) and
   `liveness-scan` (read-only fleet reporter; 31 tests; 2 lenses clean + 4 safe-direction polish items). Built

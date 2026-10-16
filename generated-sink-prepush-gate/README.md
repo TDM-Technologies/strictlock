@@ -30,6 +30,13 @@ A git `pre-push` hook receives the remote name and URL as arguments and the refs
 on stdin. This gate validates the *working-tree* sink, so it ignores both — it is a plain
 drop-in `pre-push` hook with nothing extra to wire.
 
+**Tree vs. pushed commit.** The hook checks your tree (fast, local); CI checks the pushed
+commit (authoritative). Because the hook reads the working tree, not the commit being pushed,
+a dirty tree or a push of a different ref can diverge from what it validated. The CI half is
+planned, not yet built: a CI job that regenerates the sink on the pushed head and diffs it, so
+every arrival path (`--no-verify`, no hook installed, tree/tip divergence) is validated at the
+merge boundary.
+
 ## Install
 
 ```bash
@@ -53,7 +60,7 @@ defaults are baked in. If `GENERATED_SINK_PREPUSH_GATE` is not `on`, the hook is
 | `GENERATED_SINK_PREPUSH_GATE_GENERATOR_CWD` | no | Directory to run the generator from (absolute, or repo-root-relative). Default: the repo root. Useful when the generator lives in a subproject (e.g. `app`). |
 | `GENERATED_SINK_PREPUSH_GATE_TIMEOUT` | no | Seconds before the generator is treated as a fail-closed timeout. Default `120`. A non-integer or non-positive value falls back to the default **loudly** — a misconfiguration can't silently disable the gate. |
 | `GENERATED_SINK_PREPUSH_GATE_LOG_DIR` | no | Directory for the append-only decision log (`sink-prepush-gate.log`, one JSON line per decision). Your audit trail; if unset, no log is written. |
-| `GENERATED_SINK_PREPUSH_GATE_BYPASS` | no | `1` skips the gate for a single push (logged on use). A distinct bypass per gate is deliberate — see below. |
+| `GENERATED_SINK_PREPUSH_GATE_BYPASS` | no | `1` skips the gate. Single-use by convention: set it inline per push; every use is logged, so a lingering bypass is visible in the trail. A distinct bypass per gate is deliberate — see below. |
 
 Note there is **no** `SOURCE_PATHS` here: the backstop always validates the terminal state,
 so it needs no trigger.
@@ -69,10 +76,11 @@ export GENERATED_SINK_PREPUSH_GATE_LOG_DIR="$HOME/.agent/logs"
 
 ## What it prevents, detects, and can't address
 
-- **Prevents:** pushing a stale generated sink onto a remote — *including* one that got onto
-  the branch via a `--no-verify` commit or a one-off commit-time bypass. The check runs on the
-  terminal working-tree state regardless of how the sink got there, so it closes the holes the
-  commit-time gate structurally can't.
+- **Prevents:** pushing from a working tree whose generated sink is stale — *including* one
+  that got onto the branch via a `--no-verify` commit or a one-off commit-time bypass. The check
+  runs on the working-tree state regardless of how the sink got there, so it closes the holes
+  the commit-time gate can't. It validates your tree, not the pushed commit itself (see "Tree vs.
+  pushed commit" above).
 - **Detects (and reports):** a misconfigured or broken generator (missing command, uninstalled
   tool, error, or hang) — all surface as a loud, named, fail-closed refusal of the push rather
   than a green light.
@@ -81,7 +89,8 @@ export GENERATED_SINK_PREPUSH_GATE_LOG_DIR="$HOME/.agent/logs"
   installed, or a generator whose own `--check` lies. This is the **last local** line of
   defense, not a server-side one — it keeps a stale commit off the remote from *your* machine,
   but it can't refuse a merge or police a push from a machine without the hook. Pair it with a
-  server-side CI check that re-runs the same `--check` as the defense-in-depth peer.
+  server-side CI check that re-runs the same `--check` as the defense-in-depth peer (a CI job
+  for this is planned; it is not yet part of this repo's CI).
 
 ## Why a separate bypass per gate?
 

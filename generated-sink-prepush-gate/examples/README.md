@@ -22,6 +22,9 @@ trigger — the backstop always validates the terminal state on a push.
 ```bash
 export GENERATED_SINK_PREPUSH_GATE=on
 export GENERATED_SINK_PREPUSH_GATE_GENERATOR="python3 sample-generator.py --check"
+# The generator runs from the repo root by default; pin it to this directory so
+# `sample-generator.py` resolves (run these from inside examples/).
+export GENERATED_SINK_PREPUSH_GATE_GENERATOR_CWD="$PWD"
 ```
 
 ## Fresh sink → push allowed

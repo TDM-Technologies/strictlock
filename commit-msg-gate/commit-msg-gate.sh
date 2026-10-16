@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# commit-msg-gate — require every commit to reference an approved plan, unless it
-# carries an approved "ceremony" prefix (chore/docs/ci/build).
+# commit-msg-gate — require every commit to name a plan (`plan: <slug>`), unless it
+# carries an approved "ceremony" prefix (chore/docs/ci/build). The slug is not
+# validated against any plans directory.
 #
 # Part of StrictLock (https://github.com/TDM-Technologies/strictlock).
-# Install as .git/hooks/commit-msg. Applies to every commit in the repo,
-# whether made by a human or an agent — so the version-control trail always
-# links back to the authorization for the change.
+# Install as .git/hooks/commit-msg. Runs on every commit in the repo that goes
+# through git's hook machinery (--no-verify skips it), whether made by a human
+# or an agent — so the version-control trail names the plan for the change.
 #
 # A commit passes if EITHER:
 #   (a) its first line starts with an approved prefix, e.g.

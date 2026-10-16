@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""memory-cap: a fail-closed PreToolUse hook that caps an agent's memory index size.
+"""memory-cap: a fail-closed PreToolUse hook that caps the length of an agent's memory index entries.
 
 WHY THIS EXISTS
   Many agent harnesses auto-load a memory "index" file into the context of every
@@ -24,14 +24,16 @@ WHAT COUNTS
 FAIL-CLOSED
   - Master switch MEMORY_CAP must be "on" (case-insensitive) or the hook is inert
     (allow-all).
-  - A uniquely-named bypass MEMORY_CAP_BYPASS=1 skips the cap for a single tool
-    call (logged on stderr). A distinct bypass per gate is deliberate: bypassing
-    one fail-closed gate must never silently disable another.
+  - A uniquely-named bypass MEMORY_CAP_BYPASS=1 skips the cap. It is single-use
+    by convention: set inline per command; every use is announced on stderr, so a
+    lingering bypass is visible in the trail. A distinct bypass per gate is
+    deliberate: bypassing one fail-closed gate must never silently disable another.
   - On a stdin parse error or an unhandled crash the hook DENIES (fail-closed).
 
 CONFIGURATION (all via environment)
   MEMORY_CAP            "on" to enable; anything else makes the hook inert.
-  MEMORY_CAP_BYPASS     "1" to bypass for a single tool call (logged on use).
+  MEMORY_CAP_BYPASS     "1" to bypass the cap (single-use by convention: set inline
+                        per command; every use is announced on stderr).
   MEMORY_CAP_CHARS      integer cap on a `- ` line, whole-line excluding trailing
                         whitespace (what the model actually loads). Default 200.
   MEMORY_CAP_PATH_RE    regex identifying the index file to cap, matched
@@ -68,8 +70,9 @@ def _cap_chars() -> int:
 CAP_CHARS = _cap_chars()
 
 # Predicate matching the index file to cap. Configurable; the default targets a
-# Claude Code per-project memory index. Falls back to the default on a bad regex
-# so a misconfiguration can never silently disable the cap.
+# Claude Code per-project memory index. Falls back to the default on an invalid
+# regex. (A valid-but-wrong pattern still matches the wrong file; that is not
+# detectable here.)
 _DEFAULT_PATH_RE = r"/\.claude/projects/[^/]+/memory/memory\.md$"
 try:
     MEMORY_MD_PATH_RE = re.compile(
@@ -261,14 +264,18 @@ def main() -> None:
     if os.environ.get(MASTER_GATE_ENV, "").strip().lower() != "on":
         allow(f"memory-cap: {MASTER_GATE_ENV} != 'on' — gate disabled.")
 
-    # Uniquely-named single-tool-call bypass; logged on use.
+    # Uniquely-named bypass; single-use by convention (set inline per command),
+    # announced on stderr on every use.
     if os.environ.get(OWN_BYPASS_ENV, "").strip() == "1":
         print(
             f"memory-cap: {OWN_BYPASS_ENV}=1 — cap DELIBERATELY bypassed for this "
-            f"tool call (logged on use).",
+            f"tool call (every use is logged on stderr; single-use by convention).",
             file=sys.stderr,
         )
-        allow(f"memory-cap: {OWN_BYPASS_ENV}=1 — explicit single-call bypass (logged).")
+        allow(
+            f"memory-cap: {OWN_BYPASS_ENV}=1 — explicit bypass (single-use by "
+            f"convention: set inline per command; every use is logged)."
+        )
 
     try:
         payload = json.load(sys.stdin)
@@ -357,7 +364,8 @@ def main() -> None:
         f"{lines_report}{overflow_note}\n"
         f"Compress each violating entry to <= {CAP_CHARS} chars and move detail into a "
         f"topic file (the index should stay a one-line-per-entry table of contents). "
-        f"To bypass for one tool call only, set {OWN_BYPASS_ENV}=1 (logged on use)."
+        f"To bypass, set {OWN_BYPASS_ENV}=1 — single-use by convention: set inline "
+        f"per command; every use is logged, so a lingering bypass is visible in the trail."
     )
 
 

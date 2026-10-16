@@ -27,8 +27,9 @@ refs/locks/<sha1(canonical-repo-relative-path)>  ->  a blob
 | `git_dir` | string | The resolved git-common-dir that minted it. `host` + `git_dir` together identify the ref store. |
 
 `host` + `git_dir` are the **fail-loud single-machine boundary**: a lock read from a ref store
-whose host/git-dir differs from this process's is a hard stop (exit 6), never a silent
-acquire-over.
+whose host/git-dir differs from this process's is a hard stop (exit 6) on `acquire` and
+`fence-check`, never a silent acquire-over. (`release` does not currently run this check; it
+deletes only a lock whose `lock_id` matches and whose ref has not moved.)
 
 ## Path normalization (the same-file guard)
 
