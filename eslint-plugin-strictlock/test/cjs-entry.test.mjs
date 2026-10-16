@@ -57,6 +57,13 @@ test('README legacy examples parse and set parserOptions', () => {
   }
 });
 
+const EXPECTED_RULES = {
+  'strictlock/no-smoke-only-assertions': 'error',
+  'strictlock/no-tautological-assertions': 'warn',
+  'strictlock/no-unasserted-result': 'warn',
+};
+const RULE_NAMES = Object.keys(EXPECTED_RULES).map((k) => k.slice('strictlock/'.length));
+
 test('ESM and CJS entries are the very same plugin object', () => {
   assert.equal(esmPlugin, cjsPlugin);
   assert.deepEqual(Object.keys(esmPlugin.rules), Object.keys(cjsPlugin.rules));
@@ -66,27 +73,35 @@ test('package.json exports: import -> index.mjs, require -> index.cjs; main is C
   assert.deepEqual(pkgJson.exports['.'], { import: './index.mjs', require: './index.cjs' });
   assert.equal(pkgJson.main, './index.cjs');
   assert.ok(pkgJson.files.includes('index.cjs'));
-  assert.ok(pkgJson.files.includes('rules/no-smoke-only-assertions.cjs'));
+  assert.ok(pkgJson.files.includes('rules/_shared.cjs'));
+  for (const name of RULE_NAMES) {
+    assert.ok(pkgJson.files.includes(`rules/${name}.cjs`), `files ships rules/${name}.cjs`);
+    assert.ok(pkgJson.files.includes(`rules/${name}.mjs`), `files ships rules/${name}.mjs`);
+  }
 });
 
 test('CJS entry exposes rules, flat recommended, and recommended-legacy', () => {
-  assert.deepEqual(Object.keys(cjsPlugin.rules), ['no-smoke-only-assertions']);
-  assert.equal(typeof cjsPlugin.rules['no-smoke-only-assertions'].create, 'function');
+  assert.deepEqual(Object.keys(cjsPlugin.rules), RULE_NAMES);
+  for (const name of RULE_NAMES) {
+    assert.equal(typeof cjsPlugin.rules[name].create, 'function', `${name} has create()`);
+  }
   assert.deepEqual(cjsPlugin.configs['recommended-legacy'], {
     plugins: ['strictlock'],
-    rules: { 'strictlock/no-smoke-only-assertions': 'error' },
+    rules: EXPECTED_RULES,
   });
   const flat = cjsPlugin.configs.recommended;
   assert.ok(Array.isArray(flat));
   assert.equal(flat[0].plugins.strictlock, cjsPlugin, 'flat config self-references its own plugin');
-  assert.deepEqual(flat[0].rules, { 'strictlock/no-smoke-only-assertions': 'error' });
+  assert.deepEqual(flat[0].rules, EXPECTED_RULES);
 });
 
 test('CJS and ESM entries agree: meta, version, rule, configs', () => {
   assert.deepEqual(cjsPlugin.meta, esmPlugin.meta);
   assert.equal(cjsPlugin.meta.version, pkgJson.version);
   // Same rule implementation (single CommonJS source), so identical objects.
-  assert.equal(cjsPlugin.rules['no-smoke-only-assertions'], esmPlugin.rules['no-smoke-only-assertions']);
+  for (const name of RULE_NAMES) {
+    assert.equal(cjsPlugin.rules[name], esmPlugin.rules[name]);
+  }
   assert.deepEqual(cjsPlugin.configs['recommended-legacy'], esmPlugin.configs['recommended-legacy']);
   const [c] = cjsPlugin.configs.recommended;
   const [e] = esmPlugin.configs.recommended;

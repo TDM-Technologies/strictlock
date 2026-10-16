@@ -5,20 +5,24 @@
  * `configs['recommended-legacy']`), for consumers that load plugins with
  * require(): ESLint 8 with a legacy `.eslintrc`, or a CJS `eslint.config.cjs`.
  *
- * The CJS and ESM entries build separate plugin objects (dual-package hazard);
- * each entry's flat `recommended` config references its own plugin object.
+ * This is the single place rules and configs are registered: index.mjs
+ * re-exports this object, so `import` and `require` get the same plugin.
  */
 'use strict';
 
 const noSmokeOnlyAssertions = require('./rules/no-smoke-only-assertions.cjs');
+const noTautologicalAssertions = require('./rules/no-tautological-assertions.cjs');
+const noUnassertedResult = require('./rules/no-unasserted-result.cjs');
 
 const meta = {
   name: 'eslint-plugin-strictlock',
-  version: '0.1.2',
+  version: '0.2.0',
 };
 
 const rules = {
   'no-smoke-only-assertions': noSmokeOnlyAssertions,
+  'no-tautological-assertions': noTautologicalAssertions,
+  'no-unasserted-result': noUnassertedResult,
 };
 
 const plugin = {
@@ -34,6 +38,8 @@ plugin.configs.recommended = [
     plugins: { strictlock: plugin },
     rules: {
       'strictlock/no-smoke-only-assertions': 'error',
+      'strictlock/no-tautological-assertions': 'warn',
+      'strictlock/no-unasserted-result': 'warn',
     },
   },
 ];
@@ -43,6 +49,8 @@ plugin.configs['recommended-legacy'] = {
   plugins: ['strictlock'],
   rules: {
     'strictlock/no-smoke-only-assertions': 'error',
+    'strictlock/no-tautological-assertions': 'warn',
+    'strictlock/no-unasserted-result': 'warn',
   },
 };
 

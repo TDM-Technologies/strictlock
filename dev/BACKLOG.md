@@ -52,8 +52,8 @@ inversion (zero-fire telemetry = the guard working, not dead) and the trip-test 
 + harvest ritual as one governance narrative (`GOVERNANCE.md`) · blast-radius review-depth trigger
 (after pattern-config genericization).
 
-### Wave 4 — rituals + remaining gates — *4 of 4 built (PR #7 merged; PR #14 in review)*
-**SHIPPED:** the test-protection co-commit guard (`test-protection-guard`, PR #7). **In review (PR #14):** the
+### Wave 4 — rituals + remaining gates — *4 of 4 shipped (PR #7, PR #14 merged)*
+**SHIPPED:** the test-protection co-commit guard (`test-protection-guard`, PR #7). **SHIPPED (PR #14, `1cd53ca`):** the
 three prose items as [`rituals/`](../rituals/) — session kickoff + close-out checklists, WP-interaction analysis,
 pre-WP currency check — faithful, genericized ports. Follow-ups: see *rituals follow-ups* under
 [Open after Stage 2](#open-after-stage-2-2026-10-16).
@@ -310,6 +310,16 @@ Built-but-narrower or deliberately not built in PR 2; each keeps its interim wor
 - **rituals follow-ups (PR #14):** (1) a lessons-file template so adopters can grow per-checklist learnings
   (HARVEST-PLAN "skill learnings siblings", still exploring); (2) a one-line COMPLIANCE.md pointer if a
   procedural-controls row is ever added (skipped: COMPLIANCE maps gate evidence; `rituals/` enforces nothing).
+
+### Mutation-testing gate for wrong-value assertions — *not now (2026-10-16)*
+Lint can't decide whether an expected value is right; a Stryker-style gate scoped to changed lines
+would catch tests that survive mutants of the code they cover. Sketch, CI-cost notes and open
+questions: [`ESLINT-SEMANTIC-RULES-SPEC.md`](ESLINT-SEMANTIC-RULES-SPEC.md) §7 and §8 Q2. Also
+parked from that spec: `no-oracle-reuse` (§4) and `no-mock-echo` (§5).
+
+### Promote the wave-2 rules to `error` in `recommended` — *not now (2026-10-16)*
+Promote `no-tautological-assertions` + `no-unasserted-result` to `error` in `recommended`
+(they ship as `warn` in 0.2.0). Revisit after real-suite feedback.
 
 ## Done
 - **2026-10-16** — **Windows CI bring-up (PR #17)** — two real bugs fixed: scope-lease fed `git update-ref
