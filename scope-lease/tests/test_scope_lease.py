@@ -679,6 +679,17 @@ class CLITests(unittest.TestCase):
         self.assertEqual(rel[0]["owner"], "cli-owner")
         self.assertEqual(rel[0]["lock_id"], "own-lock")
 
+    def test_release_row_owner_is_the_locks_owner_not_the_releaser(self):
+        logdir = self.root / "logs3"
+        sl.acquire_lease(root=self.root, lock_id="L", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+        sl.release_lease(root=self.root, lock_id="L", paths=["src/a.py"],
+                         log_dir=logdir, owner="bob")
+        row = json.loads((logdir / "scope-lease.log").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["event"], "release")
+        self.assertEqual(row["owner"], "alice")
+        self.assertEqual(row["released_by"], "bob")
+
     def test_reclaim_row_carries_detail(self):
         logdir = self.root / "logs2"
         sl.acquire_lease(root=self.root, lock_id="old", owner="alice",

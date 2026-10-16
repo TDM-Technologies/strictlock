@@ -267,10 +267,12 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 Built-but-narrower or deliberately not built in PR 2; each keeps its interim wording where a claim depends on it.
 - **plan-gate PowerShell segment + redirect handling** — not built. PowerShell stays prefix-match with no
   compound parsing (`Get-Content x > f` still passes the read-only prefix). Needs its own scanner; docs name the gap.
-- **plan-gate Edit/Write always-writable check** compares lexically, so a `..`-laundered path can escape an
-  always-writable directory (the new redirect path normalizes and is not affected). Reported, not changed.
-- **plan-gate bypass-hunt wider families** (`eval`, `bash -c`, env prefixes, `xargs`, `git -c`, unicode, long
-  input) — a follow-up verify pass against the new scanner; not run.
+- **plan-gate Edit/Write always-writable check** — re-check whether a symlink inside an always-writable dir
+  can escape it (paths are normalized; a `..` escape did not reproduce on 2026-10-16). Unverified; investigate before acting.
+- **plan-gate bypass-hunt, wider families** — a hand probe on 2026-10-16 (~70 payloads: chain/pipe/newline/
+  background/substitution/heredoc/redirect, `eval`, `bash -c`, env prefixes, `xargs`, `git -c`, `find -exec`,
+  `rg --pre`) found no smuggle; a dedicated adversarial pass (unicode, very long input, `git` config-driven
+  execution such as `--ext-diff`/textconv) is still worth running.
 - **scope-lease denied-acquire logging** — a decision, not built; denied acquires still write no row.
 - **sink-resolver no-conflict `resolve` and dry-run rows** — not built; they still write no row.
 - **memory-cap total caps for `NotebookEdit`** — not evaluated (a notebook edit carries one cell, not the file).

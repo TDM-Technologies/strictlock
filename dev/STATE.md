@@ -5,8 +5,8 @@
 - agent: Claude Code
 - git_ref: branch `feat/claims-truth-code` (local, **not pushed**), stacked on `docs/claims-truth-reword`
   (PR 1) over origin/main 81cad04 (the tip after PR #11, the authorizations record, and PR #12). Full suite run
-  on this branch: **366 Python tests across 10 suites** (plan-gate 78 · memory-cap 35 · externalized-memory
-  7 + 38 · generated-sink-commit-gate 13 · generated-sink-prepush-gate 12 · scope-lease 42 · sink-resolver
+  on this branch: **367 Python tests across 10 suites** (plan-gate 78 · memory-cap 35 · externalized-memory
+  7 + 38 · generated-sink-commit-gate 13 · generated-sink-prepush-gate 12 · scope-lease 43 · sink-resolver
   39 · liveness-scan 46, 1 skipped (symlink test) · test-protection-guard 56) **+ 30 shell checks**
   (commit-msg-gate), all green on macOS. **Windows and macOS CI legs have not run yet** — they run for the
   first time on this PR's first CI run (CI is now 13 jobs: 9 Python matrix + node + 2 shell + secret-scan).

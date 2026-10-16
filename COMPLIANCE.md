@@ -75,7 +75,9 @@ command is split into segments (`&&`, `||`, `;`, `|`, a lone `&`, newlines, and 
 command is only as authorized as its least-authorized segment; a redirection that writes
 (`>`, `>>`, `2>`, ...) is a file write gated like `Edit`/`Write`, and a command the gate cannot
 confidently parse is denied. (`PowerShell` commands are still matched by prefix only, with no
-compound parsing or redirection handling yet; list each shape explicitly.) The envelope is
+compound parsing or redirection handling yet, and that includes the read-only cmdlet set, so
+`Get-Content x; Remove-Item y` passes with or without a plan; route agent shell work through Bash
+where that matters.) The envelope is
 approved per unit of work, then retired. This is least privilege by construction: the agent can
 touch only what an approved plan names, scoped to the session, bounded by enumerated paths and
 command prefixes.
@@ -215,7 +217,9 @@ worktree-anchored guard treats a plan as active for a worktree session only if a
 authorized path resolves under that worktree; otherwise gated writes and commands outside the
 read-only set are denied (read-only inspection stays available, and a compound or
 `>`-redirected command counts as read-only only if every segment is and every redirect target is
-`/dev/null` or an always-writable location), and when active plans exist but none claims the
+`/dev/null` or an always-writable location — Bash only: PowerShell's read-only cmdlets are
+still prefix-matched, so a PowerShell command that starts with one, e.g. `Get-Content x; Remove-Item y`,
+is allowed even with no active plan), and when active plans exist but none claims the
 worktree the deny names that drift. A plan misaligned with where the session is actually running
 therefore fails closed loudly on the first gated action.
 
@@ -249,8 +253,9 @@ register credible.
 
 ### H. Structural cap on auto-loaded memory, with a per-gate bypass → controlled operation / configuration integrity (ISO/IEC 42001; supports CC6/CC7)
 
-**Mechanism** ([`memory-cap`](memory-cap/)). A pre-action hook refuses any write to the configured
-memory-*index* file that would introduce an over-length index entry (default 200 chars per `- ` line)
+**Mechanism** ([`memory-cap`](memory-cap/)). A pre-action hook refuses any `Write`/`Edit`/`NotebookEdit` to the
+configured memory-*index* file (shell writes are not inspected; total caps are not evaluated for
+`NotebookEdit`) that would introduce an over-length index entry (default 200 chars per `- ` line)
 or, when the opt-in total caps are set (`MEMORY_CAP_MAX_ENTRIES`, `MEMORY_CAP_TOTAL_CHARS`), grow the
 index past an entry-count or total-size limit (never wedging an index that is already over: only a
 write that is over the cap *and* larger than before is refused),
@@ -266,7 +271,8 @@ An opt-in, hash-chained decision log (`MEMORY_CAP_DECISION_LOG=1` + `MEMORY_CAP_
 
 **Evidence it emits.** A structurally-enforced operational bound on the index (rather than a convention nobody
 enforces), plus a configuration design in which disabling one gate cannot silently disable another and an
-invalid configuration falls back toward the control being on.
+invalid path regex falls back toward the control being on (an invalid total-cap value disables that
+opt-in cap, announced on stderr).
 
 **What an auditor can trace.** *That a stated operational limit is enforced in code rather than by convention,
 and that the controls' bypasses are independent* — the per-gate bypass isolation and the invalid-regex
@@ -327,7 +333,7 @@ it fails *loud* rather than silently degrading exclusion.
 **Evidence it emits.** A record (when a log directory is configured) of which agent held which paths, for
 which lock, until when (one row per successful acquire) — plus every reclaim of an expired holder, named in
 that acquire row (evicted holder, deadline and the new token) and surfaced on stderr. Releases that drop at
-least one scope are logged with the lock id, owner and released paths; denied acquires are not logged. Exclusive
+least one scope are logged with the lock id, the lock's owner, the releasing owner and released paths; denied acquires are not logged. Exclusive
 access becomes an observable, after-the-fact artifact rather than a coordination convention.
 
 **What an auditor can trace.** *That concurrent automated actors operated under enforced segregation* — no two

@@ -484,6 +484,7 @@ def release_lease(
     # BEFORE any delete, like acquire — a raise mid-loop would strand earlier deletions
     # unlogged and leave later owned locks held. Foreign STORE is not a silent no-op.
     owned: list[tuple[str, str, str]] = []
+    lock_owner = ""  # the owner stamped in the lock blob (one lock_id => one acquiring owner)
     for p in norm:
         ref = _lease_ref(p)
         oid = _ref_oid(root, ref)
@@ -493,6 +494,7 @@ def release_lease(
         _assert_same_refstore(blob, refstore, p)
         if blob.get("lock_id") != lock_id:
             continue  # never release a lock we don't own
+        lock_owner = lock_owner or str(blob.get("owner") or "")
         owned.append((p, ref, oid))
     # Pass 2: delete.
     for p, ref, oid in owned:
@@ -503,7 +505,8 @@ def release_lease(
             released.append(p)
     if released:
         _log_decision(log_dir, {"event": "release", "lock_id": lock_id,
-                                "owner": owner or "", "released": released})
+                                "owner": lock_owner, "released_by": owner or "",
+                                "released": released})
     return released
 
 

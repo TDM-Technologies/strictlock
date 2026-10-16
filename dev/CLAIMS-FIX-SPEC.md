@@ -324,7 +324,7 @@ phrases (search for those three strings in `plan-gate/`, `scope-lease/`, `sink-r
 Branch `feat/claims-truth-code` (local, not pushed): `docs/claims-truth-reword` + four piece branches merged
 `--no-ff` (plan-gate, state-modules, hook-modules, ci; no conflicts), then the restore commit and the close-out
 commit. Each landed fix was checked against code and a test (not against the piece reports). Full suite
-green on macOS: 366 Python tests + 30 shell checks. **Windows and macOS CI legs are unproven until the PR's
+green on macOS: 367 Python tests + 30 shell checks. **Windows and macOS CI legs are unproven until the PR's
 first CI run.**
 
 **Built** (code + test)
