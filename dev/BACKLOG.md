@@ -52,8 +52,8 @@ inversion (zero-fire telemetry = the guard working, not dead) and the trip-test 
 + harvest ritual as one governance narrative (`GOVERNANCE.md`) · blast-radius review-depth trigger
 (after pattern-config genericization).
 
-### Wave 4 — rituals + remaining gates — *4 of 4 built (PR #7 merged; PR #14 in review)*
-**SHIPPED:** the test-protection co-commit guard (`test-protection-guard`, PR #7). **In review (PR #14):** the
+### Wave 4 — rituals + remaining gates — *4 of 4 shipped (PR #7, PR #14 merged)*
+**SHIPPED:** the test-protection co-commit guard (`test-protection-guard`, PR #7). **SHIPPED (PR #14, `1cd53ca`):** the
 three prose items as [`rituals/`](../rituals/) — session kickoff + close-out checklists, WP-interaction analysis,
 pre-WP currency check — faithful, genericized ports. Follow-ups: see *rituals follow-ups* under
 [Open after Stage 2](#open-after-stage-2-2026-10-16).
