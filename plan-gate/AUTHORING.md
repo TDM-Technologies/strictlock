@@ -163,7 +163,16 @@ admit `lsof`), and commands with mutating forms are narrowed: `git branch` is li
 config` is `--get*` only, `git diff|log|show` refuse `--output`, `find` refuses `-delete -exec
 -execdir -ok -fprint* -fls`, `rg` refuses `--pre`. `git fetch` is not read-only (it writes refs) —
 grant it with an `allowed_commands` entry if the work needs it. Validated commands also refuse
-shell expansions in their arguments (`$`, backticks, `{`).
+shell expansions in their arguments, checked quote-aware: an unquoted `$` or backtick, an unquoted
+glob character (`* ? [`), or a real brace expansion (`{a,b}`, `{a..b}`) is refused, because the
+shell would rewrite the argument after the check (a file named `-delete` plus `find . -d?lete`).
+Single-quoted text is literal, so `rg 'foo$'`, `find . -name '*.py'` and ref syntax like `git diff
+@{u}` / `stash@{0}` still pass. The `git -C <path>` form needs a literal path (no `$(...)`,
+`${...}`, backtick or glob in it). A redirection target with an unquoted glob or brace is denied
+(it may land somewhere else), a heredoc whose delimiter uses a `$` form (`<<$'EOF'`) or that never
+terminates is denied, and a command such as `(cd sub && git status)` is allowed when each command
+inside is allowed. Over-denies to know about: `git log --output-indicator-*` is fine, but
+unquoted globs in validated commands (`find . -name *.py`) deny — quote them.
 
 **Migration note.** Plans written before segment checking may have relied on a prefix riding along
 with whatever followed it (`pytest -q && git push` matching `pytest`). Those commands now deny, and

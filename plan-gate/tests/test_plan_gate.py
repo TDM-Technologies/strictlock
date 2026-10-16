@@ -809,6 +809,139 @@ class BashSegmentTests(unittest.TestCase):
             extra_env={"PLAN_GATE_ALWAYS_WRITABLE": str(self.plans)},
         )
 
+    # --- verify-pass regressions (scanner/shell desync, validators) ---
+
+    def both(self, cmd, expect, **kw):
+        """Run `cmd` with no plan and with an active plan (pytest allowed)."""
+        for with_plan in (False, True):
+            if with_plan:
+                self.plan()
+            elif (self.plans / "active.md").exists():
+                (self.plans / "active.md").unlink()
+            if expect == "deny":
+                self.assertDenied(cmd, **kw)
+            else:
+                self.assertAllowed(cmd, **kw)
+
+    def test_comment_hash_after_escape_or_substitution_is_not_a_comment(self):
+        for cmd in [
+            "echo a\\(#;touch SECOND",
+            "echo \\;#x; touch q",
+            "echo foo\\ #bar; touch q",
+            "echo $(true)#;touch SECOND",
+            "echo $(( 1 ))#x; touch q",
+            "echo <(true)#x; touch q",
+            "echo `true`#x; touch q",
+            "echo 'a'#x; touch q",
+            "echo a\\\n#;touch SECOND",
+        ]:
+            self.both(cmd, "deny")
+        self.plan()
+        self.assertDenied("pytest $(echo a)#x; rm -rf zzz")
+
+    def test_real_comments_still_work(self):
+        self.both("git status # a; trailing comment", "allow")
+        self.both("git status\n# whole line comment ; rm -rf x\ngit log", "allow")
+        self.both("git status;# c", "allow")
+        self.both("echo a \\\n# continued comment", "allow")
+
+    def test_git_c_path_must_be_literal(self):
+        for cmd in [
+            "git -C $(cat<<<R${IFS}commit${IFS}--allow-empty${IFS}-m) status",
+            "git -C `echo x` status",
+            "git -C $(echo x) log",
+            "git -C ${X} status",
+            "git -C /tmp/* status",
+            "git -C /tmp/?x status",
+            "git -C \"$X\" status",
+        ]:
+            self.both(cmd, "deny")
+        self.both("git -C /tmp status", "allow")
+        self.both("git -C '/tmp/a b$c' status", "allow")
+        self.both("git -C \"/tmp/a b\" status", "allow")
+
+    def test_quoted_and_ref_syntax_stays_allowed(self):
+        for cmd in [
+            "git diff @{u}",
+            "git diff stash@{0}",
+            "git diff --name-only HEAD@{1}",
+            "rg -n 'foo$' .",
+            "rg 'import \\{' .",
+            "git log --grep='^fix$'",
+            "find . -regex '.*py$'",
+            "find . -name '*.py'",
+            "git log --output-indicator-new=+",
+        ]:
+            self.both(cmd, "allow")
+
+    def test_unquoted_expansion_and_glob_still_denied_for_validated(self):
+        for cmd in [
+            "find . -d?lete",
+            "rg --p?e=x foo",
+            "git branch -?",
+            "find . -name *.py",
+            "git log $(echo --output=x)",
+            "git diff {HEAD,--output=x}",
+            "git log --output=x",
+        ]:
+            self.both(cmd, "deny")
+
+    def test_heredoc_delimiter_mismatch_and_unterminated(self):
+        for cmd in [
+            "cat <<$'EOF'\nhi\nEOF\ntouch q",
+            'cat <<$"EOF"\nhi\nEOF\ntouch q',
+            "cat <<EOF\nhi\ntouch q",
+            "cat <<'EOF'\nhi\ntouch q",
+            "cat <<EOF",
+            "cat <<$X\nhi\n$X\ntouch q",
+        ]:
+            self.both(cmd, "deny")
+        self.plan(commands=("git commit",))
+        self.assertAllowed("git commit -F - <<'EOF'\nmsg\nEOF")
+        self.assertDenied("git commit -F - <<$'EOF'\nmsg\nEOF\nrm -rf x")
+
+    def test_glob_in_redirect_target_denied(self):
+        aw = {"PLAN_GATE_ALWAYS_WRITABLE": str(self.root / "aw")}
+        for cmd in [
+            "echo pwned > %s/aw/.?/victim.txt" % self.root,
+            "echo x > %s/aw/*" % self.root,
+            "echo x > %s/aw/[a]" % self.root,
+            "echo x > %s/aw/{a,b}" % self.root,
+        ]:
+            self.both(cmd, "deny", extra_env=aw)
+        self.both("echo x > '%s/aw/lit*' " % self.root, "allow", extra_env=aw)
+
+    def test_subshell_group_of_allowed_commands(self):
+        self.both("(cd sub && git status)", "allow")
+        self.plan()
+        self.assertAllowed("(pytest -q)")
+        self.assertDenied("(pytest -q; rm -rf x)")
+        self.assertDenied("(pytest -q) rm")
+
+    def test_dev_std_streams_are_not_writes(self):
+        self.plan()
+        for t in ("/dev/stderr", "/dev/stdout", "/dev/tty", "/dev/fd/2"):
+            self.assertAllowed("pytest > %s" % t)
+
+    def test_edit_always_writable_normalizes_dotdot(self):
+        aw = self.root / "aw"
+        aw.mkdir()
+        env = {"PLAN_GATE_ALWAYS_WRITABLE": str(aw)}
+        sneaky = str(aw) + "/../elsewhere/x"
+        p = run_gate({"tool_name": "Write", "tool_input": {"file_path": sneaky}},
+                     self.plans, cwd=self.work, extra_env=env)
+        self.assertEqual(decision(p), "deny")
+        p = run_gate({"tool_name": "Write", "tool_input": {"file_path": str(aw / "ok")}},
+                     self.plans, cwd=self.work, extra_env=env)
+        self.assertEqual(decision(p), "allow")
+
+    def test_powershell_blank_allowed_command_matches_nothing(self):
+        self.plan(commands=('""',))
+        p = run_gate({"tool_name": "PowerShell",
+                      "tool_input": {"command": "Remove-Item -Recurse x"}},
+                     self.plans, cwd=self.work)
+        self.assertEqual(decision(p), "deny")
+
     # --- audit rows ---
 
     def rows(self):

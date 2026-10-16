@@ -568,9 +568,6 @@ class _Scanner(object):
         if msg not in self.problems:
             self.problems.append(msg)
 
-    def _word_start(self):
-        return self.i == 0 or self.s[self.i - 1] in " \t\n;&|()<>"
-
     # -- substitutions ------------------------------------------------------
 
     def _group(self, res, start):
@@ -671,10 +668,13 @@ class _Scanner(object):
         lit = []
         expanded = False
         quoted = False
+        glob = False  # an UNQUOTED * ? [ { : the shell may expand it
         while self.i < n:
             c = s[self.i]
             if c in _WORD_END:
                 break
+            if c in "*?[{":
+                glob = True
             if c == "\\":
                 quoted = True
                 if self.i + 1 < n:
@@ -718,10 +718,18 @@ class _Scanner(object):
                 continue
             lit.append(c)
             self.i += 1
+        self._last_glob = glob
         return s[start:self.i], "".join(lit), expanded, quoted
 
     def _record_write(self, res, operand):
         raw, lit, expanded, _quoted = operand
+        if getattr(self, "_last_glob", False):
+            self._problem(
+                "write redirection target contains an unquoted glob or brace "
+                f"character ({raw[:60]!r}); where it lands cannot be resolved "
+                "statically"
+            )
+            return
         if not raw or not lit:
             self._problem("write redirection with no usable target")
             return
@@ -767,6 +775,14 @@ class _Scanner(object):
                 raw, lit, _exp, quoted = self._read_operand(res)
                 if not raw:
                     self._problem("heredoc without a delimiter")
+                elif _exp or "$" in raw or "`" in raw:
+                    # <<$'EOF' / <<$"EOF" / <<$X: the shell's idea of the
+                    # delimiter differs from the literal text we would look
+                    # for, so the body boundary cannot be placed. Fail closed.
+                    self._problem(
+                        "heredoc delimiter uses a `$` or backtick form "
+                        f"({raw[:30]!r})"
+                    )
                 else:
                     pending.append((lit, quoted, strip_tabs))
                 return
@@ -799,6 +815,7 @@ class _Scanner(object):
         s, n = self.s, self.n
         for tag, quoted, _strip in pending:
             body = []
+            terminated = False
             while self.i < n:
                 j = s.find("\n", self.i)
                 line = s[self.i:] if j == -1 else s[self.i:j]
@@ -807,8 +824,11 @@ class _Scanner(object):
                 # ending the body EARLY only means more text is checked as
                 # commands, never less.
                 if line.strip() == tag:
+                    terminated = True
                     break
                 body.append(line)
+            if not terminated:
+                self._problem("unterminated heredoc (no closing delimiter line)")
             if not quoted and body:
                 if self.depth + 1 > _MAX_NEST:
                     self._problem("substitutions nested too deeply")
@@ -826,11 +846,20 @@ class _Scanner(object):
         buf = []
         pending = []  # heredocs whose body starts at the next newline
         closed = closer is None
+        groups = set()  # exact texts of bare ( ... ) groups appended to buf
+        # True only where bash would START A NEW WORD: input start, after an
+        # unescaped blank/newline, or after a separator the loop consumed. A `#`
+        # starts a comment only there; after anything else (an escape, a quote,
+        # a closed $(...) / `...` / <(...), a plain character) it is part of a
+        # word, and the rest of the line is real commands.
+        ws = True
 
         def flush():
             seg = "".join(buf).strip()
             del buf[:]
-            if seg:
+            # A segment that is nothing but a ( ... ) group has no command of
+            # its own: its body was parsed into `subs` and is checked there.
+            if seg and seg not in groups:
                 res.segments.append(seg)
 
         if self.depth > _MAX_NEST:
@@ -840,9 +869,12 @@ class _Scanner(object):
 
         while self.i < n:
             ch = s[self.i]
+            was_ws = ws
+            ws = False
             if ch == "\n":
                 flush()
                 self.i += 1
+                ws = True
                 if pending:
                     self._read_heredoc_bodies(pending, res)
                     del pending[:]
@@ -850,11 +882,15 @@ class _Scanner(object):
             if ch == " " or ch == "\t":
                 buf.append(ch)
                 self.i += 1
+                ws = True
                 continue
             if ch == "\\":
                 if self.i + 1 < n:
                     if s[self.i + 1] == "\n":
-                        buf.append(" ")  # line continuation
+                        # Line continuation: bash deletes backslash-newline, so
+                        # the text on both sides is ONE continuous word (and a
+                        # `#` after it is a comment only if one would have been).
+                        ws = was_ws
                     else:
                         buf.append(s[self.i:self.i + 2])
                     self.i += 2
@@ -862,7 +898,7 @@ class _Scanner(object):
                     buf.append(ch)
                     self.i += 1
                 continue
-            if ch == "#" and self._word_start():
+            if ch == "#" and was_ws:
                 j = s.find("\n", self.i)
                 self.i = n if j == -1 else j
                 continue
@@ -912,12 +948,14 @@ class _Scanner(object):
             if ch == ";":
                 flush()
                 self.i += 1
+                ws = True
                 continue
             if ch == "&":
                 nxt = s[self.i + 1] if self.i + 1 < n else ""
                 if nxt == "&":
                     flush()
                     self.i += 2
+                    ws = True
                     continue
                 if nxt == ">":  # &> / &>> : stdout+stderr to a file
                     self.i += 2
@@ -927,10 +965,12 @@ class _Scanner(object):
                     continue
                 flush()  # lone & : background separator
                 self.i += 1
+                ws = True
                 continue
             if ch == "|":
                 flush()
                 self.i += 2 if s.startswith(("||", "|&"), self.i) else 1
+                ws = True
                 continue
             if ch == ")":
                 if closer == ")":
@@ -945,7 +985,9 @@ class _Scanner(object):
             if ch == "(":
                 start = self.i
                 self.i += 1
-                buf.append(self._group(res, start))
+                gtxt = self._group(res, start)
+                groups.add(gtxt.strip())
+                buf.append(gtxt)
                 continue
             if ch == "<" or ch == ">":
                 self._handle_redirect(res, buf, pending)
@@ -954,6 +996,8 @@ class _Scanner(object):
             self.i += 1
 
         flush()
+        if pending:
+            self._problem("heredoc with no body (input ends before a newline)")
         if not closed:
             self._problem("unterminated `(` or `$(`")
         return res
@@ -986,7 +1030,54 @@ def _is_cd_like(seg: str) -> bool:
 
 # --- read-only segment checks ------------------------------------------------
 
-_EXPANSION_CHARS = re.compile(r"[$`{]")
+def _has_unsafe_expansion(seg: str) -> bool:
+    """True if `seg` has text the shell would expand at run time, so the
+    token-level argument checks cannot be trusted. Quote-aware:
+      - inside '...' nothing expands (a literal `$`, `{`, `*` is fine);
+      - inside "..." only `$` and a backtick expand;
+      - outside quotes `$`, a backtick, a glob character (* ? [) and a real
+        brace expansion ({a,b} / {a..b}) are refused. A `{...}` with no comma
+        and no `..` (git ref syntax `@{u}`, `stash@{0}`) is literal and passes.
+      - a backslash-escaped character is literal.
+    """
+    i, n = 0, len(seg)
+    while i < n:
+        c = seg[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            j = seg.find("'", i + 1)
+            if j == -1:
+                return True
+            i = j + 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n and seg[i] != '"':
+                if seg[i] == "\\":
+                    i += 2
+                    continue
+                if seg[i] in "$`":
+                    return True
+                i += 1
+            if i >= n:
+                return True
+            i += 1
+            continue
+        if c in "$`*?[":
+            return True
+        if c == "{":
+            j = seg.find("}", i + 1)
+            if j == -1:
+                return True
+            inner = seg[i + 1:j]
+            if "," in inner or ".." in inner or any(ch in inner for ch in "{$`\\'\"*?["):
+                return True
+            i = j + 1
+            continue
+        i += 1
+    return False
 
 
 def _v_no_output(args: list[str]) -> bool:
@@ -996,6 +1087,8 @@ def _v_no_output(args: list[str]) -> bool:
         if a == "--":
             break
         name = a.split("=", 1)[0]
+        if name.startswith("--output-indicator-"):
+            continue  # a display flag, not --output
         if len(name) >= 3 and name.startswith("--") and (
             "--output".startswith(name) or name.startswith("--output")
         ):
@@ -1103,7 +1196,7 @@ def _is_read_only_plain(seg: str) -> bool:
     check = _RO_VALIDATORS.get(prefix)
     if check is None:
         return True
-    if _EXPANSION_CHARS.search(seg):
+    if _has_unsafe_expansion(seg):
         return False  # an expansion could smuggle a mutating flag past the check
     try:
         tokens = shlex.split(seg)
@@ -1128,6 +1221,18 @@ def _is_read_only_git_c(seg: str) -> bool:
     """
     m = re.match(r"""^git\s+-C\s+("[^"]*"|'[^']*'|\S+)\s+(.+)$""", seg)
     if not m:
+        return False
+    # The path must be a LITERAL: an unquoted `$(...)`, `${IFS}`, glob or brace
+    # there is word-split / expanded by the shell into extra arguments (e.g.
+    # `git -C $(cat<<<R${IFS}commit) status` runs `git -C R commit status`).
+    path = m.group(1)
+    if path[0] == "'":
+        if len(path) < 2 or path[-1] != "'" or "'" in path[1:-1]:
+            return False  # single-quoted and fully literal, or refuse
+    elif path[0] == '"' and path[-1] == '"' and len(path) >= 2:
+        if "$" in path or "`" in path or "\\" in path:
+            return False
+    elif _has_unsafe_expansion(path) or "'" in path or '"' in path:
         return False
     rest = "git " + m.group(2)
     return _is_read_only_plain(rest) or _is_read_only_git_c(rest)
@@ -1441,7 +1546,9 @@ def _classify_redirect(target: str, has_cd: bool):
     `cd`/`pushd`/`popd` in the same command, whose destination is not known
     statically, so that case is an error (use an absolute path).
     """
-    if target == "/dev/null" or (os.name == "nt" and target.lower() == "nul"):
+    if target in ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty",
+                  "/dev/fd/0", "/dev/fd/1", "/dev/fd/2") or (
+            os.name == "nt" and target.lower() == "nul"):
         return "null", None
     t = target
     if not os.path.isabs(t):
@@ -1613,7 +1720,9 @@ def main() -> None:
                 f"plan-gate: no file_path in tool_input for {tool}.",
                 class_="empty_input",
             )
-        target_n = norm(str(target))
+        # Collapse `..` / `.` lexically so `<always-writable>/../x` cannot ride
+        # the directory prefix out of it (same treatment as redirect targets).
+        target_n = norm(os.path.normpath(str(target)))
         # Log self-protection — runs BEFORE the always-writable bypass and
         # before allowed_paths matching, so neither can shadow it: the gate
         # never authorizes a gated write to its own decision log (raw AND
@@ -1881,7 +1990,7 @@ def main() -> None:
         # compound parsing. The read-only PS bypass was applied in the early
         # branch.
         for ac in allowed_cmds:
-            if cmd.startswith(ac):
+            if str(ac).strip() and cmd.startswith(ac):
                 gated_allow(
                     f"plan-gate: matches allowed_command prefix {ac!r}.",
                     "allowed_command",

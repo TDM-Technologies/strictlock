@@ -78,8 +78,11 @@ a lone `&` and unquoted newlines; the bodies of `$(...)`, backticks, `<(...)` / 
 `( ... )` are checked as segments too. **Each** segment must be a read-only command, a bare
 `cd`, or start with an `allowed_commands` entry. Redirections `>`, `>>`, `>|`, `&>`, `N>` are
 file writes gated like Edit/Write (exact `allowed_paths` match or an always-writable
-directory; never the log directory; `/dev/null` and, on Windows, `NUL` always fine; `>&N` fd
-dups and `<` input are not writes). Anything the parser cannot confidently place is denied.
+directory; never the log directory; `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty` and, on
+Windows, `NUL` always fine; `>&N` fd dups and `<` input are not writes; a target with an unquoted
+glob or brace is denied). Anything the parser cannot confidently place is denied — including a
+heredoc with a `$`-form or unterminated delimiter. A `#` starts a comment only at the start of a
+word, as in the shell. An empty `allowed_commands` entry matches nothing (Bash and PowerShell).
 PowerShell is unchanged (prefix match, no compound parsing). Details and the migration note:
 [`AUTHORING.md`](AUTHORING.md) §2 and [`README.md`](README.md).
 

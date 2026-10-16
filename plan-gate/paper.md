@@ -227,7 +227,10 @@ incident:
   requires **each** segment to be read-only, a bare `cd`, or an enumerated prefix. Redirections
   that write are file writes, gated like Edit/Write. What the splitter cannot confidently parse
   is denied. The read-only set itself is narrowed to its non-mutating forms (`git branch` lists,
-  `find` has no `-delete`/`-exec`).
+  `find` has no `-delete`/`-exec`), with arguments checked quote-aware so a glob or expansion
+  cannot rewrite a checked flag after the fact. The parser tracks where a shell word begins, so a
+  `#` after an escape or a closed substitution is not mistaken for a comment that would hide the
+  rest of the line.
 - **Fail closed on its own faults.** A gate that crashes or cannot parse its input must not
   become an allow. A malformed payload or an unhandled exception yields an explicit deny with a
   loud, actionable message (and a `gate_error` row); the logged emergency bypass remains the
