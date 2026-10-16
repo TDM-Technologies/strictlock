@@ -18,7 +18,7 @@ is the worktree main / master / detached?
       does an ACTIVE plan own this worktree?
          └─ yes:
               no activity signal at all ──────────────────► ambiguous  [ESCALATE]
-              WP age > CEILING_MIN (even if signal fresh) ► ambiguous  [ESCALATE]
+              branch age > CEILING_MIN (even if signal fresh) ► ambiguous  [ESCALATE]
               signal age > CEILING_MIN ───────────────────► ambiguous  [ESCALATE]
               signal age > the signal's stale window ─────► stalled    (likely slow; watch)
               otherwise ──────────────────────────────────► running
@@ -34,12 +34,12 @@ is the worktree main / master / detached?
   into a reap.
 - The **stale window** is the heartbeat timeout when a heartbeat exists, else the (coarser) commit
   window — see signals below. The **ceiling** is a separate, larger bound with two readings:
-  the **WP age** (time since the earliest branch commit not on base, `git log <base>..HEAD
+  the **branch age** (time since the earliest branch commit not on base, `git log <base>..HEAD
   --reverse`) crossing it escalates even on a fresh signal, and the age of the signal itself
-  crossing it escalates too. WP age is a committer-date proxy, so a rebase/amend/squash restarts
+  crossing it escalates too. branch age is a committer-date proxy, so a rebase/amend/squash restarts
   the clock (under-reports), while a branch stacked on older unmerged work or cut from a stale
   base ref inherits that older start (over-reports: an early, report-only escalation); unresolvable base or no commits beyond
-  base ⇒ WP age unknown ⇒ only the signal bound applies.
+  base ⇒ branch age unknown ⇒ only the signal bound applies.
 
 ## The two activity signals
 
@@ -51,7 +51,7 @@ is the worktree main / master / detached?
 The heartbeat is the sharp signal; the commit-mtime fallback is coarse (a long-thinking agent
 that hasn't committed reads older than it is) and is **flagged in the reason** so the weaker
 signal is never silently trusted. Either way, the **ceiling** (`LIVENESS_SCAN_CEILING_MIN`,
-default 480) is the outer bound that escalates — on the signal's age, and on the work package's age
+default 480) is the outer bound that escalates — on the signal's age, and on the branch age
 (see above).
 
 ## The attribution rule

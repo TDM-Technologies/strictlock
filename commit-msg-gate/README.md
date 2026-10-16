@@ -38,9 +38,18 @@ agent (`--no-verify` skips it).
 
 | Variable | Meaning |
 |---|---|
-| `COMMIT_MSG_GATE_BYPASS` | `on` skips the gate. Single-use by convention: set it inline per commit (`COMMIT_MSG_GATE_BYPASS=on git commit ...`). Each use is announced on stderr; the hook writes no durable record of it. |
+| `COMMIT_MSG_GATE_BYPASS` | Exactly `on` (lowercase) skips the gate; other spellings (`ON`, `1`, `true`) do nothing today. Single-use by convention: set it inline per commit (`COMMIT_MSG_GATE_BYPASS=on git commit ...`). Each use is announced on stderr; the hook writes no durable record of it. |
 | `COMMIT_MSG_GATE_PLANS_DIR` | Opt in to slug validation. When set, at least one `plan: <slug>` line in the body must resolve to `<slug>.md` in this directory (the same `<name>.md` layout [`plan-gate`](../plan-gate/SCHEMA.md) uses for `PLAN_GATE_PLANS_DIR`; the file must be a regular, readable file — its `status` is not inspected, so an archived plan still resolves). If the directory is set but missing or unreadable the gate **fails closed** (rejects). Ceremony-prefix commits need no plan and are unaffected. Unset (default): the slug is not validated. |
 | `COMMIT_MSG_GATE_PREFIXES` | Override the approved first-line prefix regex (`grep -E` syntax). Default: `chore`/`docs`/`ci`/`build` with optional `(scope)`. |
+
+**These variables must reach every git process that runs the hook.** The hook is run by
+whatever process calls `git commit`, and it sees that process's environment. A variable you
+exported in one terminal does not apply to a commit made from another terminal, a GUI git
+client, an IDE's commit button, or a script. For `COMMIT_MSG_GATE_PLANS_DIR` and
+`COMMIT_MSG_GATE_PREFIXES` that means the setting silently does not apply (the gate falls back
+to its defaults) wherever the variable is missing; for the bypass it means the bypass does not
+take effect there. Set them in the environment of every tool that commits to the repo, or use
+the inline form for a one-off.
 
 ### Examples
 

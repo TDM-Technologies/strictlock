@@ -84,6 +84,13 @@ The repo root is resolved with `git rev-parse --show-toplevel`. Full reference: 
 | `TEST_PROTECTION_GUARD_LOG_DIR` | — | directory for the append-only JSONL decision log (`test-protection-guard.log`). Your audit trail. |
 | `TEST_PROTECTION_GUARD_LOG` | — | explicit log **file** path (overrides `_LOG_DIR`; handy for tests). |
 
+**Where the variables must be set.** In the PreToolUse door, the hook is started by the agent
+harness, so the variables must be in the environment the harness was launched with, or its
+settings `env` block (not an `export` inside the agent's own Bash tool). In the git `pre-commit`
+door, they must be present in **every** process that runs `git commit` — other terminals, GUI git
+clients and IDE commit buttons included. Where `TEST_PROTECTION_GUARD=on` is missing, the guard is
+simply inert for that commit.
+
 ## What it prevents, detects, and can't address
 
 - **Surfaces (its whole job):** a commit that changes/removes an existing test assertion *and*

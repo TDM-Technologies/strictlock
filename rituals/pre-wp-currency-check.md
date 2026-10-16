@@ -1,4 +1,4 @@
-# Pre-WP currency check
+# Pre-work currency check
 
 **Before you lock a plan around a backlog item, ask whether the item is still worth doing.**
 

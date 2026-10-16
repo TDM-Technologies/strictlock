@@ -29,7 +29,7 @@ stderr. A misconfigured threshold never silently disables the scan.
 | (none) | Print the human report to stdout; write the gitignored logs if `LIVENESS_SCAN_LOG_DIR` is set. |
 | `--dry-run` | Compute + print the report; **write nothing**. |
 | `--json` | Emit the structured digest as JSON (tooling / tests). |
-| `--explain` | Add a maintainer breakdown to stderr: the thresholds and counts, plus one line per worktree with its status, signal and signal age, commit age, heartbeat age, WP age, owning active/executed plan, and ahead-of-base. (The same per-worktree `internals` object is in the `--json` digest.) |
+| `--explain` | Add a maintainer breakdown to stderr: the thresholds and counts, plus one line per worktree with its status, signal and signal age, commit age, heartbeat age, branch age, owning active/executed plan, and ahead-of-base. (The same per-worktree `internals` object is in the `--json` digest.) |
 | `--root DIR` | A path inside the repo whose worktrees to scan (default: cwd). The repo top-level is resolved so the whole fleet is enumerated even from a subdir. |
 
 ## Exit code
