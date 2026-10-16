@@ -120,6 +120,33 @@ Caveat: accountability only substitutes for prevention if the audit is *actually
 reviewed*; where it won't be, keep prevention. Depends on auto-commit (below). Discuss
 and sequence before building.
 
+### external-check hook point — *exploring* (parked 2026-10-16)
+Trigger: [issue #13](https://github.com/TDM-Technologies/strictlock/issues/13) — a vendor
+(AcqPath) proposed a pre-tool source-rights evidence check. Rather than integrate any provider,
+the idea is a **generic hook point**: plan-gate runs an operator-configured *local* command
+before a gated action, and its result can only **tighten** the decision.
+
+Invariants it would need:
+- **Deny-only** — a hook can deny; it can never allow anything the plan doesn't.
+- **Fail closed** — crash, timeout, or non-zero exit = deny.
+- **Out of the agent's reach** — the hook config is not writable by the gated agent.
+- **Logged** — the hook's verdict lands in the existing hash-chained decision log.
+
+Uses it would unlock: change-ticket approval (Jira/ServiceNow state), second-person sign-off,
+change-freeze / time windows, prod-environment guards, secrets/PII scanners on write content,
+existing policy engines (OPA/Cedar), composing scope-lease ("must hold the lease"), and
+vendor-maintained source-rights adapters (kept out of this repo).
+
+Why it's attractive: the core stays offline + stdlib-only; one clean answer to every vendor
+pitch ("write an adapter"); removes a likely adoption blocker for orgs with their own policy
+systems; one audit trail instead of several (strengthens `COMPLIANCE.md`); positions StrictLock
+as *the* enforcement point.
+
+Costs / open questions: the safety invariants above are safety-critical code to design and test;
+per-call latency; **no real demand yet beyond one vendor pitch** — revisit when a second real use
+shows up. First step if picked up: a short design note pinning the hook's input/output contract
+and the four invariants, before any code.
+
 ## memory-cap
 
 ### changed-region scan — *shipped 2026-06-25* (Wave 0)
