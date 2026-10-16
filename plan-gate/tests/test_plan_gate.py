@@ -978,6 +978,236 @@ class BashSegmentTests(unittest.TestCase):
         ])
 
 
+class WriterScriptTests(unittest.TestCase):
+    """A python/python3/py segment running a writer script (built-in:
+    atomic-write.py) is a file write to its target argument, gated like a `>`
+    redirect target: allowed_paths, log self-protection, always-writable dirs."""
+
+    WRITER = "externalized-memory/atomic-write.py"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()  # cwd is the real path
+        self.plans = self.root / "plans"
+        self.plans.mkdir()
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.logs = self.root / "logs"
+        self.out = (self.work / "STATE.md").as_posix()
+        self.other = (self.work / "OTHER.md").as_posix()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def plan(self, commands=("python3 externalized-memory/atomic-write.py",), paths=None):
+        paths = [self.out] if paths is None else paths
+        text = "---\nname: p\nstatus: active\nallowed_paths:\n"
+        text += "".join("  - %s\n" % p for p in paths)
+        text += "allowed_commands:\n" + "".join("  - %s\n" % c for c in commands)
+        text += "---\n\nbody\n"
+        (self.plans / "active.md").write_text(text, encoding="utf-8")
+
+    def run_tool(self, tool, cmd, **kw):
+        kw.setdefault("cwd", self.work)
+        return run_gate({"tool_name": tool, "tool_input": {"command": cmd}},
+                        self.plans, **kw)
+
+    def run_cmd(self, cmd, **kw):
+        return self.run_tool("Bash", cmd, **kw)
+
+    def assertDenied(self, cmd, tool="Bash", contains=None, **kw):
+        p = self.run_tool(tool, cmd, **kw)
+        self.assertEqual(decision(p), "deny", "should DENY: %r\n%s" % (cmd, p.stdout))
+        if contains:
+            self.assertIn(contains, p.stdout)
+        return p
+
+    def assertAllowed(self, cmd, tool="Bash", **kw):
+        p = self.run_tool(tool, cmd, **kw)
+        self.assertEqual(decision(p), "allow", "should ALLOW: %r\n%s" % (cmd, p.stdout))
+        return p
+
+    def test_allowed_target_passes(self):
+        self.plan()
+        self.assertAllowed("python3 %s %s" % (self.WRITER, self.out))
+
+    def test_out_of_plan_target_denies(self):
+        self.plan()
+        self.assertDenied("python3 %s %s" % (self.WRITER, self.other),
+                          contains="NOT in allowed_paths")
+
+    def test_target_matches_allowed_path_exactly_not_by_prefix_of_command(self):
+        # allowed_commands admits the segment; it does not admit the target.
+        self.plan(commands=("python3",))
+        self.assertDenied("python3 %s %s" % (self.WRITER, self.other))
+
+    def test_segment_still_needs_allowed_commands(self):
+        self.plan(commands=("npm test",))
+        self.assertDenied("python3 %s %s" % (self.WRITER, self.out))
+
+    def test_relative_target_resolves_against_cwd(self):
+        self.plan()
+        self.assertAllowed("python3 %s STATE.md" % self.WRITER)
+        self.assertDenied("python3 %s OTHER.md" % self.WRITER)
+
+    def test_relative_target_after_cd_denies(self):
+        self.plan(commands=("python3 externalized-memory/atomic-write.py", "cd"))
+        self.assertDenied("cd sub && python3 %s STATE.md" % self.WRITER,
+                          contains="relative")
+
+    def test_log_dir_target_denies(self):
+        self.logs.mkdir()
+        logfile = (self.logs / "plan-gate-decisions.log").as_posix()
+        self.plan(paths=[self.out, logfile])
+        p = self.assertDenied("python3 %s %s" % (self.WRITER, logfile),
+                              log_dir=self.logs, contains="PLAN_GATE_LOG_DIR")
+
+    def test_always_writable_target_passes_without_plan_path(self):
+        aw = self.root / "mem"
+        aw.mkdir()
+        self.plan()
+        self.assertAllowed(
+            "python3 %s %s" % (self.WRITER, (aw / "note.md").as_posix()),
+            extra_env={"PLAN_GATE_ALWAYS_WRITABLE": str(aw)})
+
+    def test_missing_target_denies(self):
+        self.plan()
+        self.assertDenied("python3 %s" % self.WRITER, contains="without its target")
+        self.assertDenied("python3 -u %s" % self.WRITER, contains="without its target")
+
+    def test_unresolvable_target_denies(self):
+        self.plan()
+        for tgt in ('$TARGET', '"$TARGET"', '${TARGET}', '$(echo STATE.md)',
+                    '`echo STATE.md`', '*.md', 'STATE.m?', 'ST{A,B}TE.md',
+                    '~/STATE.md/../$X'):
+            self.assertDenied("python3 %s %s" % (self.WRITER, tgt))
+
+    def test_flags_are_not_positionals(self):
+        self.plan()
+        self.assertAllowed("python3 %s -- %s" % (self.WRITER, self.out))
+        self.assertDenied("python3 %s -- %s" % (self.WRITER, self.other))
+
+    def test_interpreter_spellings_are_recognized(self):
+        self.plan(commands=("python", "/usr/bin/python3", "py", "FOO=1", "env",
+                            "C:/Python312/python.exe", "python3.12"))
+        for prefix in ("python", "/usr/bin/python3", "py -3", "FOO=1 python3",
+                       "env python3", "python3 -u -B", "python3.12",
+                       "C:/Python312/python.exe", "py -3.11"):
+            self.assertDenied("%s %s %s" % (prefix, self.WRITER, self.other))
+            self.assertAllowed("%s %s %s" % (prefix, self.WRITER, self.out))
+
+    def test_script_path_spellings_match_by_basename(self):
+        self.plan(commands=("python3",))
+        for script in ("atomic-write.py", "./atomic-write.py",
+                       "/opt/tools/atomic-write.py", "C:/tools/ATOMIC-WRITE.PY"):
+            self.assertDenied("python3 %s %s" % (script, self.other))
+            self.assertAllowed("python3 %s %s" % (script, self.out))
+
+    def test_writer_in_compound_and_substitution_is_checked(self):
+        self.plan(commands=("python3", "echo"))
+        self.assertDenied("echo hi && python3 %s %s" % (self.WRITER, self.other))
+        self.assertDenied("echo $(python3 %s %s)" % (self.WRITER, self.other))
+        self.assertAllowed("echo hi && python3 %s %s" % (self.WRITER, self.out))
+
+    def test_unrelated_python_is_unaffected(self):
+        self.plan(commands=("python3",))
+        self.assertAllowed("python3 -m pytest")
+        self.assertAllowed("python3 -m atomic-write %s" % self.other)
+        self.assertAllowed("python3 -c 'print(1)'")
+        self.assertAllowed("python3 other_script.py %s" % self.other)
+        self.assertAllowed("python3 other_script.py")
+
+    def test_mentioning_the_script_without_running_it_is_unaffected(self):
+        # No plan at all: read-only inspection of the script stays allowed.
+        self.assertAllowed("grep -n python %s" % self.WRITER)
+        self.assertAllowed("cat %s" % self.WRITER)
+        self.plan(commands=("echo",))
+        self.assertAllowed("echo python3 %s" % self.WRITER)
+
+    def test_env_extension_with_argpos(self):
+        self.plan(commands=("python3 tools/my-writer.py",))
+        env = {"PLAN_GATE_WRITER_SCRIPTS": "my-writer.py:2"}
+        self.assertAllowed("python3 tools/my-writer.py src %s" % self.out, extra_env=env)
+        self.assertDenied("python3 tools/my-writer.py src %s" % self.other, extra_env=env)
+        self.assertDenied("python3 tools/my-writer.py %s" % self.out, extra_env=env,
+                          contains="without its target")
+        # The built-in stays on alongside the extension.
+        self.assertDenied("python3 tools/atomic-write.py %s" % self.other, extra_env=env)
+
+    def test_env_extension_is_off_without_the_env(self):
+        self.plan(commands=("python3 tools/my-writer.py",))
+        self.assertAllowed("python3 tools/my-writer.py src %s" % self.other)
+
+    def test_env_may_override_builtin_argpos(self):
+        self.plan(commands=("python3",))
+        env = {"PLAN_GATE_WRITER_SCRIPTS": " Atomic-Write.py : 2 , other.py:1 ,"}
+        self.assertAllowed("python3 atomic-write.py x %s" % self.out, extra_env=env)
+        self.assertDenied("python3 atomic-write.py x %s" % self.other, extra_env=env)
+
+    def test_malformed_env_fails_closed(self):
+        self.plan(commands=("python3", "npm test"))
+        for bad in ("my-writer.py", "my-writer.py:", ":2", "my-writer.py:0",
+                    "my-writer.py:-1", "my-writer.py:x", "my-writer.py:1.5",
+                    "tools/my-writer.py:1", "a.py:1,b.py"):
+            env = {"PLAN_GATE_WRITER_SCRIPTS": bad}
+            self.assertDenied("npm test", extra_env=env, contains="PLAN_GATE_WRITER_SCRIPTS")
+            self.assertDenied("python3 %s %s" % (self.WRITER, self.out), extra_env=env,
+                              contains="PLAN_GATE_WRITER_SCRIPTS")
+            # Read-only commands are not wedged by the bad value.
+            self.assertAllowed("git status", extra_env=env)
+
+    def test_malformed_env_mentions_one_based(self):
+        self.plan()
+        p = self.assertDenied("python3 %s %s" % (self.WRITER, self.out),
+                              extra_env={"PLAN_GATE_WRITER_SCRIPTS": "w.py:0"})
+        self.assertIn("1-based", p.stdout)
+
+    def test_bypass_still_honored_with_malformed_env(self):
+        self.plan()
+        self.assertAllowed("python3 %s %s" % (self.WRITER, self.other),
+                           extra_env={"PLAN_GATE_WRITER_SCRIPTS": "bad",
+                                      "PLAN_GATE_BYPASS": "on"})
+
+    def test_decision_log_records_writer_deny(self):
+        self.plan()
+        self.assertDenied("python3 %s" % self.WRITER, log_dir=self.logs)
+        rows = [json.loads(l) for l in
+                (self.logs / "plan-gate-decisions.log").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[-1]["class"], "writer_script")
+        self.assertEqual(rows[-1]["decision"], "deny")
+
+    # --- PowerShell ---
+
+    def test_ps_allowed_and_denied_targets(self):
+        self.plan(commands=("python3 externalized-memory/atomic-write.py",
+                            "py -3 externalized-memory/atomic-write.py"))
+        self.assertAllowed("python3 %s %s" % (self.WRITER, self.out), tool="PowerShell")
+        self.assertAllowed("py -3 %s '%s'" % (self.WRITER, self.out), tool="PowerShell")
+        self.assertDenied("python3 %s %s" % (self.WRITER, self.other), tool="PowerShell",
+                          contains="NOT in allowed_paths")
+        self.assertDenied("py -3 %s \"%s\"" % (self.WRITER, self.other), tool="PowerShell")
+
+    def test_ps_missing_and_unresolvable_targets_deny(self):
+        self.plan()
+        self.assertDenied("python3 %s" % self.WRITER, tool="PowerShell")
+        self.assertDenied("python3 %s $env:TARGET" % self.WRITER, tool="PowerShell")
+        self.assertDenied("python3 %s (Get-Item x)" % self.WRITER, tool="PowerShell")
+        self.assertDenied("python3 %s '%s" % (self.WRITER, self.out), tool="PowerShell")
+
+    def test_ps_compound_writer_is_checked(self):
+        self.plan(commands=("python3",))
+        self.assertDenied("python3 %s %s; python3 %s %s" % (
+            self.WRITER, self.out, self.WRITER, self.other), tool="PowerShell")
+
+    def test_ps_malformed_env_fails_closed(self):
+        self.plan()
+        self.assertDenied("python3 %s %s" % (self.WRITER, self.out), tool="PowerShell",
+                          extra_env={"PLAN_GATE_WRITER_SCRIPTS": "bad"},
+                          contains="PLAN_GATE_WRITER_SCRIPTS")
+        self.assertAllowed("Get-ChildItem", tool="PowerShell",
+                           extra_env={"PLAN_GATE_WRITER_SCRIPTS": "bad"})
+
+
 class SwitchValueTests(unittest.TestCase):
     """PLAN_GATE / PLAN_GATE_BYPASS accept on/1/true/yes, case-insensitive and
     whitespace-trimmed; every other value is off."""

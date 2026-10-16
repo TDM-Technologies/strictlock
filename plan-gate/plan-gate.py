@@ -50,6 +50,11 @@ CONFIGURATION (all via environment; no machine-specific defaults are baked in)
   PLAN_GATE_LOG_DECISIONS   "all" (default) records every decision on a gated
                             surface, allow and deny; "deny" records denials plus
                             emergency-bypass rows only (volume opt-down).
+  PLAN_GATE_WRITER_SCRIPTS  optional comma-separated name.py:argpos list of
+                            writer scripts (built in: atomic-write.py:1). A
+                            python/python3/py segment running one is a file write
+                            to its argpos-th (1-based) positional argument, gated
+                            like a `>` target. Malformed value fails closed.
   PLAN_GATE_MCP_WRITE_TOOLS optional comma-separated list of MCP tool names that
                             modify external state (e.g. a cloud-drive create/copy
                             tool). Default-denied when set; see the MCP section.
@@ -71,6 +76,8 @@ RULES
       exactly like Edit/Write (/dev/null is always fine; >&N fd dups and
       input redirection are not writes). Anything the splitter cannot
       confidently parse is denied (class unparseable_command).
+      A segment running a writer script (python atomic-write.py TARGET, see
+      PLAN_GATE_WRITER_SCRIPTS) is a file write to TARGET, gated the same way.
   - PowerShell:
       command must start with an entry in allowed_commands, OR be a known
       read-only command (prefix-matched, NO compound parsing — list each shape
@@ -1544,7 +1551,7 @@ def _is_under_log_dir(target: str) -> bool:
     return _under_any(target_n, log_dirs) or _under_any(target_resolved_n, log_dirs)
 
 
-def _classify_redirect(target: str, has_cd: bool):
+def _classify_redirect(target: str, has_cd: bool, what: str = "redirection target"):
     """Classify one write-redirection target of a Bash command, mirroring the
     Edit/Write sequence (log self-protection, then always-writable dirs, then
     the plan's allowed_paths). Returns (kind, value):
@@ -1565,7 +1572,7 @@ def _classify_redirect(target: str, has_cd: bool):
     if not os.path.isabs(t):
         if has_cd:
             return "error", (
-                f"plan-gate: redirection target {target!r} is relative, but the "
+                f"plan-gate: {what} {target!r} is relative, but the "
                 f"command also changes directory, so where it lands cannot be "
                 f"resolved statically. Use an absolute path."
             )
@@ -1573,19 +1580,280 @@ def _classify_redirect(target: str, has_cd: bool):
             base = os.getcwd()
         except OSError:
             return "error", (
-                f"plan-gate: redirection target {target!r} is relative and the "
+                f"plan-gate: {what} {target!r} is relative and the "
                 f"working directory cannot be determined."
             )
         t = os.path.join(base, t)
     t = os.path.normpath(t)
     if _is_under_log_dir(t):
         return "log", (
-            f"plan-gate: redirection target {t} is under PLAN_GATE_LOG_DIR; the "
+            f"plan-gate: {what} {t} is under PLAN_GATE_LOG_DIR; the "
             f"gate never authorizes gated writes to its own decision log."
         )
     if _under_any(norm(t), ALWAYS_WRITABLE_DIRS):
         return "always", None
     return "plan", t
+
+
+# --- writer scripts (a script whose job is to write a file) -----------------------
+# `python3 atomic-write.py STATE.md` is a Bash command, and allowed_commands matches
+# it by prefix, so without more it would let the script write ANYWHERE. A segment
+# whose program is python/python3/py (or a path ending in one, `py -3`, python3.12,
+# python.exe, behind env assignments / env / nohup / time / ...) running a script on
+# the writer list is treated as a file write to the script's target argument, gated
+# like a `>` redirect target: log self-protection, always-writable dirs, then
+# allowed_paths. The segment must STILL be admitted by allowed_commands.
+#
+# Built-in list: atomic-write.py, target = its 1st (only) positional argument.
+# Extend with PLAN_GATE_WRITER_SCRIPTS=name.py:argpos[,name2.py:argpos2...] where
+# argpos is the 1-BASED position among the script's positional arguments (words that
+# do not start with '-'; everything after a bare `--` is positional). A flag's value
+# counts as a positional, so prefer the `--flag=value` form. A malformed value fails
+# CLOSED (see _WRITER_CFG_ERROR). Script names match by lowercased basename.
+_BUILTIN_WRITER_SCRIPTS = {"atomic-write.py": 1}
+
+
+def _parse_writer_scripts(raw: str):
+    """(writers, error). `writers` maps lowercased script basename -> 1-based
+    positional index of its target; `error` is a message when `raw` is malformed
+    (writers is then just the built-ins)."""
+    writers = dict(_BUILTIN_WRITER_SCRIPTS)
+    if not raw.strip():
+        return writers, None
+    extra: dict = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, sep, pos = entry.rpartition(":")
+        name = name.strip()
+        pos = pos.strip()
+        if not sep or not name:
+            return dict(_BUILTIN_WRITER_SCRIPTS), (
+                f"entry {entry!r} is not name.py:argpos"
+            )
+        if "/" in name or "\\" in name:
+            return dict(_BUILTIN_WRITER_SCRIPTS), (
+                f"entry {entry!r}: the script must be a bare file name "
+                f"(matched by basename), not a path"
+            )
+        if not re.match(r"^[0-9]+$", pos) or int(pos) < 1:
+            return dict(_BUILTIN_WRITER_SCRIPTS), (
+                f"entry {entry!r}: argpos must be a positive integer; it is "
+                f"1-based (1 = the script's first positional argument)"
+            )
+        extra[name.lower()] = int(pos)
+    writers.update(extra)
+    return writers, None
+
+
+WRITER_SCRIPTS, _WRITER_CFG_ERROR = _parse_writer_scripts(
+    os.environ.get("PLAN_GATE_WRITER_SCRIPTS", "")
+)
+
+_PYTHON_PROG_RE = re.compile(r"^(python([0-9]+(\.[0-9]+)*)?|py)$")
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Words that may sit in front of the interpreter without changing what runs.
+_COMMAND_WRAPPERS = ("env", "nohup", "time", "exec", "command", "sudo", "nice")
+_PS_CD_WORDS = ("cd", "chdir", "sl", "set-location", "pushd", "popd")
+
+
+def _basename_lc(tok: str) -> str:
+    return tok.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+
+
+def _is_python_prog(tok: str) -> bool:
+    b = _basename_lc(tok)
+    if b.endswith(".exe"):
+        b = b[:-4]
+    return bool(_PYTHON_PROG_RE.match(b))
+
+
+def _writer_invocation(tokens: list[str]):
+    """If `tokens` (one simple command) runs a listed writer script via a python
+    interpreter, return (script_basename_lc, args_after_script); else None.
+    `python -m mod`, `python -c code`, a non-listed script, or a program that is
+    not python are all None (unaffected)."""
+    i = 0
+    n = len(tokens)
+    while i < n and (
+        _ENV_ASSIGN_RE.match(tokens[i])
+        or tokens[i] in ("&", ".")
+        or _basename_lc(tokens[i]) in _COMMAND_WRAPPERS
+    ):
+        i += 1
+    if i >= n or not _is_python_prog(tokens[i]):
+        return None
+    j = i + 1
+    while j < n:
+        t = tokens[j]
+        if t == "-":
+            return None  # script on stdin
+        if t.startswith("-") and not t.startswith("--"):
+            if t[1:2] in ("m", "c"):
+                return None  # -m module / -c code: not a script file
+            j += 2 if t in ("-W", "-X") else 1  # -u, -B, -3, -3.11, -W arg ...
+            continue
+        if t.startswith("--"):
+            j += 1
+            continue
+        break
+    if j >= n:
+        return None
+    base = _basename_lc(tokens[j])
+    if base not in WRITER_SCRIPTS:
+        return None
+    return base, tokens[j + 1:]
+
+
+def _writer_target(base: str, args: list[str]):
+    """(True, target) or (False, reason) for one recognized writer invocation."""
+    argpos = WRITER_SCRIPTS[base]
+    positionals: list[tuple[int, str]] = []
+    after_dd = False
+    for idx, a in enumerate(args):
+        if not after_dd and a == "--":
+            after_dd = True
+            continue
+        if not after_dd and a.startswith("-") and a != "-":
+            continue
+        positionals.append((idx, a))
+    if len(positionals) < argpos:
+        return False, (
+            f"{base} was run without its target (needs positional argument "
+            f"#{argpos}, found {len(positionals)})"
+        )
+    idx, target = positionals[argpos - 1]
+    # An expansion at or before the target could change which word lands in the
+    # target slot (word splitting), or be the target itself: unresolvable.
+    for a in args[:idx + 1]:
+        if any(ch in a for ch in "$`*?[{"):
+            return False, (
+                f"{base} has a shell expansion, glob or brace in its arguments "
+                f"({a[:60]!r}); where it writes cannot be resolved statically"
+            )
+    if not target.strip():
+        return False, f"{base} has an empty target argument"
+    if target.startswith("~"):
+        target = os.path.expanduser(target)
+    return True, target
+
+
+def _tokenize_ps(cmd: str) -> list[list[str]]:
+    """Split a PowerShell command into simple-command token lists. Minimal and
+    conservative: honors '...' and "..." quoting (no backtick escapes: a token
+    containing a backtick is kept verbatim and later refused as an expansion);
+    treats ; | & ( ) { } and newlines outside quotes as command separators.
+    Raises ValueError on an unterminated quote."""
+    segs: list[list[str]] = []
+    cur: list[str] = []
+    buf: list[str] = []
+    have = False
+    i, n = 0, len(cmd)
+
+    def end_tok():
+        nonlocal have
+        if have:
+            cur.append("".join(buf))
+        del buf[:]
+        have = False
+
+    def end_seg():
+        end_tok()
+        if cur:
+            segs.append(list(cur))
+        del cur[:]
+
+    while i < n:
+        c = cmd[i]
+        if c in "'\"":
+            j = cmd.find(c, i + 1)
+            if j == -1:
+                raise ValueError("unterminated quote")
+            buf.append(cmd[i + 1:j])
+            have = True
+            i = j + 1
+            continue
+        if c in " \t":
+            end_tok()
+        elif c in ";|&(){}\n\r":
+            end_seg()
+        else:
+            buf.append(c)
+            have = True
+        i += 1
+    end_seg()
+    return segs
+
+
+def _extra_write_target_checks(target: str):
+    """Hook point for additional per-target write checks. Returns a deny reason
+    or None. Runs for every resolved writer-script target (and, when added, any
+    other file-write target) AFTER log self-protection and BEFORE the allowed_paths
+    check. The scope-lease holder check (spec section 3) plugs in here."""
+    return None
+
+
+def _collect_writer_targets(raw_segs: list[str], shell: str, has_cd: bool):
+    """Find writer-script invocations among `raw_segs` (Bash segments, or for
+    shell == "ps" the whole command) and classify each target like a redirect.
+    Returns (plan_targets, problem): plan_targets is [(abs_target, script)] that
+    must be in allowed_paths; problem is None or (deny_reason, log_class)."""
+    plan_targets: list[tuple[str, str]] = []
+    token_segs: list[list[str]] = []
+    for raw in raw_segs:
+        try:
+            if shell == "ps":
+                token_segs.extend(_tokenize_ps(raw))
+            else:
+                token_segs.append(shlex.split(raw))
+        except ValueError:
+            low = raw.lower()
+            hit = [w for w in WRITER_SCRIPTS if w in low]
+            if hit:
+                return plan_targets, (
+                    f"plan-gate: cannot tokenize a command that mentions writer "
+                    f"script {hit[0]} ({raw[:120]!r}); where it writes cannot be "
+                    f"resolved statically. Failing closed.",
+                    "writer_script",
+                )
+    for toks in token_segs:
+        if shell == "ps" and toks and toks[0].lower() in _PS_CD_WORDS:
+            has_cd = True
+    for toks in token_segs:
+        inv = _writer_invocation(toks)
+        if inv is None:
+            continue
+        base, args = inv
+        ok, val = _writer_target(base, args)
+        if not ok:
+            return plan_targets, (f"plan-gate: writer script: {val}. Failing closed.",
+                                  "writer_script")
+        what = f"{base} write target"
+        kind, v = _classify_redirect(val, has_cd, what)
+        if kind == "error":
+            return plan_targets, (v, "writer_script")
+        if kind == "log":
+            return plan_targets, (v, "log_self_protect")
+        if kind in ("always", "plan"):
+            abs_t = v if kind == "plan" else os.path.normpath(
+                val if os.path.isabs(val) else os.path.join(os.getcwd(), val))
+            extra = _extra_write_target_checks(abs_t)
+            if extra:
+                return plan_targets, (extra, "writer_script")
+            if kind == "plan":
+                plan_targets.append((v, base))
+    return plan_targets, None
+
+
+def _writer_cfg_deny_reason() -> str:
+    return (
+        f"plan-gate: PLAN_GATE_WRITER_SCRIPTS is malformed ({_WRITER_CFG_ERROR}). "
+        f"Expected name.py:argpos[,name2.py:argpos2] with argpos the 1-based "
+        f"position of the target among the script's positional arguments. "
+        f"Failing closed: Bash/PowerShell commands that are not read-only are "
+        f"denied until it is fixed. " + _BYPASS_HOWTO
+    )
 
 
 # What the top-level handler knows about the call in flight, so a gate_error row
@@ -1789,6 +2057,14 @@ def main() -> None:
                 gated_deny(r_val, class_="log_self_protect")
             elif r_kind == "plan":
                 plan_targets.append(r_val)
+        # Writer scripts (python atomic-write.py TARGET ...): the target is a
+        # file write, gated like a redirect target.
+        if _WRITER_CFG_ERROR and _first_bad_segment(all_segs, []) is not None:
+            gated_deny(_writer_cfg_deny_reason(), class_="writer_script")
+        writer_plan_targets, w_problem = _collect_writer_targets(
+            all_segs, "bash", has_cd)
+        if w_problem:
+            gated_deny(w_problem[0], class_=w_problem[1])
         # Pre-plan read-only bypass: a compound is read-only only if EVERY
         # segment is (a `cd` segment is a navigation no-op), and every write
         # redirection is /dev/null or lands in an always-writable directory.
@@ -1824,6 +2100,14 @@ def main() -> None:
         # No bare-cd / Set-Location bypass for PS: the quote-aware Bash splitter
         # does not model PS compound semantics. Any PS compound needs an explicit
         # allowed_commands entry.
+        # Writer scripts (python atomic-write.py TARGET ...): the target is a
+        # file write, gated like a redirect target.
+        if _WRITER_CFG_ERROR:
+            gated_deny(_writer_cfg_deny_reason(), class_="writer_script")
+        ps_writer_plan_targets, w_problem = _collect_writer_targets(
+            [cmd], "ps", False)
+        if w_problem:
+            gated_deny(w_problem[0], class_=w_problem[1])
 
     if tool in MCP_FILE_WRITE_TOOLS:
         # Distinguish "empty payload" from "non-empty, also denied" in telemetry.
@@ -1984,6 +2268,14 @@ def main() -> None:
                     f"redirection (>, >>, >|, &>) is a file write and is gated "
                     f"like Edit/Write. Command: {cmd[:200]}"
                 )
+        for tgt, script in writer_plan_targets:
+            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+                gated_deny(
+                    f"plan-gate: {script} target {tgt} is NOT in allowed_paths "
+                    f"of active plan ({plan_path.name}). A writer script's "
+                    f"target is a file write and is gated like Edit/Write. "
+                    f"Command: {cmd[:200]}"
+                )
         used_plan_cmd = any(
             _segment_class(sg, allowed_cmds) == "allowed_command" for sg in all_segs
         )
@@ -1991,6 +2283,8 @@ def main() -> None:
             f"plan-gate: all {len(all_segs)} segment(s) permitted"
             + (f"; {len(plan_targets)} redirection target(s) in allowed_paths"
                if plan_targets else "")
+            + (f"; {len(writer_plan_targets)} writer-script target(s) in "
+               f"allowed_paths" if writer_plan_targets else "")
             + ".",
             "allowed_command" if used_plan_cmd else "allowed_paths",
         )
@@ -2001,6 +2295,14 @@ def main() -> None:
         # branch.
         for ac in allowed_cmds:
             if str(ac).strip() and cmd.startswith(ac):
+                for tgt, script in ps_writer_plan_targets:
+                    if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+                        gated_deny(
+                            f"plan-gate: {script} target {tgt} is NOT in "
+                            f"allowed_paths of active plan ({plan_path.name}). "
+                            f"A writer script's target is a file write and is "
+                            f"gated like Edit/Write. Command: {cmd[:200]}"
+                        )
                 gated_allow(
                     f"plan-gate: matches allowed_command prefix {ac!r}.",
                     "allowed_command",

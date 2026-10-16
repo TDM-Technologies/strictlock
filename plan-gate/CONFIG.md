@@ -14,11 +14,41 @@ everything.
 | `PLAN_GATE_LOG_DIR` | no | Directory for the append-only, hash-chained decision log (`plan-gate-decisions.log`). This log is your audit trail; if unset, no log is written. |
 | `PLAN_GATE_LOG_DECISIONS` | no | `all` (default) records every decision on a gated surface, allow and deny; `deny` records denials plus emergency-bypass rows only. |
 | `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated list of MCP tool names that modify external state (e.g. a cloud-drive create/copy tool). When set, those tools are **default-denied** so they can't evade the gate. |
+| `PLAN_GATE_WRITER_SCRIPTS` | no | Extra "writer scripts", comma-separated `name.py:argpos`. A Bash/PowerShell command that runs `python`/`python3`/`py` on a listed script is treated as a file write to that script's target argument and gated like a `>` redirect target (see below). `atomic-write.py:1` is built in. A malformed value **fails closed**. |
 | `PLAN_GATE_BYPASS` | no | Emergency escape hatch. `on` / `1` / `true` / `yes` (case-insensitive) disables the gate for the call (set it inline per command; every use is logged). Also honored when the gate itself faults. Use deliberately. |
 | `_PLAN_GATE_TEST_PLANS_DIR` | no | Test-only override that redirects the plans scan to a temp dir. Not a security boundary — used by the test suite. |
 
 `os.pathsep` is `;` on Windows and `:` on Linux/macOS — it applies to
 `PLAN_GATE_ALWAYS_WRITABLE`.
+
+## Writer scripts
+
+`python3 externalized-memory/atomic-write.py STATE.md` is a Bash command, and `allowed_commands`
+matches by prefix, so an entry admitting it would otherwise let the script write anywhere. A
+segment whose program is `python`, `python3`, `python3.N`, `py` (also `py -3`, a path ending in
+one of those, a `.exe` suffix, behind `VAR=val`, `env`, `nohup`, `time`, `exec`, `command`,
+`sudo` or `nice`) running a script whose **basename** is on the writer list is treated as a file
+write to the script's target argument. The target is gated exactly like a `>` redirect target:
+log self-protection, then always-writable directories, then the plan's `allowed_paths`. The
+segment must still be admitted by `allowed_commands`; the two checks are independent.
+
+- **Built in:** `atomic-write.py`, target = its first (only) positional argument.
+- **Extend:** `PLAN_GATE_WRITER_SCRIPTS=name.py:argpos,other.py:argpos`. `argpos` is **1-based**:
+  1 is the script's first positional argument, 2 the second. Positional arguments are words that
+  do not start with `-`; everything after a bare `--` is positional. A flag's value counts as a
+  positional, so prefer the `--flag=value` form. `name.py` is a bare file name matched by
+  lowercased basename (not a path). An entry for a built-in name overrides its `argpos`.
+- **Unaffected:** `python -m module`, `python -c code`, and any script not on the list.
+- **Deny (fail closed):** the target is missing; the target, or any argument before it, uses a
+  shell expansion (`$VAR`, `$(...)`, backticks), a glob (`* ? [`) or a brace; the target is
+  relative after a `cd` in the same command; the command cannot be tokenized. For PowerShell the
+  command is split on `; | & ( ) { }` and newlines; there is no other compound parsing.
+- **Malformed `PLAN_GATE_WRITER_SCRIPTS`** (no `:`, empty name, a path instead of a name,
+  `argpos` not a positive integer, including `0`): every Bash/PowerShell command that is not
+  read-only is denied with a message naming the variable, until it is fixed or
+  `PLAN_GATE_BYPASS` is set. Read-only commands are not affected.
+- Decision-log class for these denials: `writer_script` (or `log_self_protect` for a log-dir
+  target).
 
 ## Per-OS examples
 
