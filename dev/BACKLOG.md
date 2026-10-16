@@ -311,6 +311,12 @@ Built-but-narrower or deliberately not built in PR 2; each keeps its interim wor
   (HARVEST-PLAN "skill learnings siblings", still exploring); (2) a one-line COMPLIANCE.md pointer if a
   procedural-controls row is ever added (skipped: COMPLIANCE maps gate evidence; `rituals/` enforces nothing).
 
+### Mutation-testing gate for wrong-value assertions — *not now (2026-10-16)*
+Lint can't decide whether an expected value is right; a Stryker-style gate scoped to changed lines
+would catch tests that survive mutants of the code they cover. Sketch, CI-cost notes and open
+questions: [`ESLINT-SEMANTIC-RULES-SPEC.md`](ESLINT-SEMANTIC-RULES-SPEC.md) §7 and §8 Q2. Also
+parked from that spec: `no-oracle-reuse` (§4) and `no-mock-echo` (§5).
+
 ## Done
 - **2026-10-16** — **Windows CI bring-up (PR #17)** — two real bugs fixed: scope-lease fed `git update-ref
   --stdin` in text mode (CRLF → every lease transaction failed on Windows; now bytes); the externalized-memory

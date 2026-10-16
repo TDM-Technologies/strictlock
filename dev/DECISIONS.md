@@ -115,3 +115,12 @@ invented here. Every decision from D-008 forward is recorded at the time it is m
   HIPAAPath original (git-resolved repo root; own `TEST_PROTECTION_GUARD` switch; env-configured
   test/source globs + assertion pattern; house `_LOG_DIR`), then independently adversarially
   verified before landing.
+
+## D-008 · eslint-plugin-strictlock wave 2: build two rules first; mutation gate deferred — 2026-10-16
+- **Decided by:** Tim Downs Mullen
+- **Context:** [`ESLINT-SEMANTIC-RULES-SPEC.md`](ESLINT-SEMANTIC-RULES-SPEC.md) proposed four
+  semantic lint rules plus a separate mutation-testing gate for wrong-value assertions.
+- **Decision:** build `no-tautological-assertions` and `no-unasserted-result` first. The other
+  two (`no-oracle-reuse`, `no-mock-echo`) and the mutation gate (spec §7) are not built now.
+- **Re-arguable:** yes — the remaining rules and the mutation gate stay open; the backlog carries
+  the mutation gate as a not-now item.

@@ -8,8 +8,9 @@ not in prose it can talk its way past. A test suite is governance too: it's the 
 supposed to catch a regression before it ships. A test that turns **green whether or not the
 code is correct** is a hole in that floor. This plugin makes that hole a lint error.
 
-It ships one rule today — [`no-smoke-only-assertions`](#rule-no-smoke-only-assertions) — and
-isolates the JS toolchain inside its own `package.json`, so the rest of the StrictLock repo
+It ships three rules today — [`no-smoke-only-assertions`](#rule-no-smoke-only-assertions),
+[`no-tautological-assertions`](#rule-no-tautological-assertions) and
+[`no-unasserted-result`](#rule-no-unasserted-result) — and isolates the JS toolchain inside its own `package.json`, so the rest of the StrictLock repo
 stays Python + shell and zero-dep.
 
 ## Install
@@ -45,6 +46,8 @@ export default [
     plugins: { strictlock },
     rules: {
       'strictlock/no-smoke-only-assertions': 'error',
+      'strictlock/no-tautological-assertions': 'error',
+      'strictlock/no-unasserted-result': 'error',
     },
   },
 ];
@@ -65,7 +68,9 @@ export default [
 {
   "plugins": ["strictlock"],
   "rules": {
-    "strictlock/no-smoke-only-assertions": "error"
+    "strictlock/no-smoke-only-assertions": "error",
+    "strictlock/no-tautological-assertions": "error",
+    "strictlock/no-unasserted-result": "error"
   }
 }
 ```
@@ -156,6 +161,72 @@ files while **new files and new violations still error**. Treat the baseline as 
 worklist — strengthen the tests and remove the entries; never add to it. (Ship the baseline
 *list* in your config; the content is yours, and this plugin carries none.)
 
+## Rule: `no-tautological-assertions`
+
+### What it does
+
+Flags an `expect(...)` assertion whose outcome is fixed by the test text alone, so it can
+never depend on the code under test:
+
+- **self-comparison** — `expect(user.name).toEqual(user.name)` (same text both sides, no calls)
+- **literal vs literal** — `expect(5).toBe(5)`, `expect([1, 2]).toEqual([1, 2])`
+- **constant subject** — `expect(true).toBeTruthy()`, `expect('abc').toMatch(/b/)`
+
+It follows one `const` hop, so `const x = 5; expect(x).toBe(5)` is caught too. A value counts
+as constant only if it is a literal, a call-free array/object of constants, a unary operator
+on one, or a `const` bound to one.
+
+Deliberately **not** flagged: anything with a call, `await` or `new` (`expect(next()).toBe(next())`
+— two calls can differ), arithmetic (`expect(0.1 + 0.2).toBeCloseTo(0.3)`), parameters and
+`let` bindings (`it.each` tables), and function subjects (`expect(() => f()).toThrow()`).
+
+Like the other rules it only looks inside `it` / `test` blocks of test files.
+
+### Options
+
+| Option | Type | Default | Purpose |
+|---|---|---|---|
+| `baseline` | `string[]` | `[]` | Grandfather known files (rule inert for them). |
+| `marker` | `string` | `"TEST-CORRECTNESS:"` | Inline comment that justifies the exception. |
+
+```js
+it('matcher library sanity', () => {
+  // TEST-CORRECTNESS: exercising Object.is semantics of the matcher itself
+  expect(NaN).toBe(NaN);
+});
+```
+
+## Rule: `no-unasserted-result`
+
+### What it does
+
+Flags a variable bound from a call (`const r = f()`, `await f()`, `new X()`) inside a test
+block whose value is then dropped — never read, or read only where nothing can assert on it
+(`console.log(r)`, `void r`, a bare `r;` statement). The test computed something and checked
+nothing about it.
+
+Conservative on purpose: any other use counts as consumed — passing it to a call, using it in
+`expect`, returning it, calling it (cleanup handles), deriving another value. A destructuring
+binding is flagged only when none of its names are used. Calls rooted at `jest`, `vi` or
+`sinon` are skipped, since `const spy = vi.spyOn(...)` installs a spy even if `spy` is never read.
+
+Not covered yet: a result that is *read* but never reaches any assertion (a stricter mode is
+sketched in the design spec, `dev/ESLINT-SEMANTIC-RULES-SPEC.md` §6).
+
+### Options
+
+| Option | Type | Default | Purpose |
+|---|---|---|---|
+| `baseline` | `string[]` | `[]` | Grandfather known files (rule inert for them). |
+| `marker` | `string` | `"TEST-CORRECTNESS:"` | Inline comment that justifies the exception. |
+
+```js
+it('constructs without side effects', () => {
+  // TEST-CORRECTNESS: the constructor throwing is the failure; nothing to read back
+  const widget = new Widget();
+});
+```
+
 ## What it prevents, detects, and can't address
 
 In the StrictLock house style — be honest about the boundary of the mechanism.
@@ -165,12 +236,15 @@ In the StrictLock house style — be honest about the boundary of the mechanism.
   preventive, fail-closed posture as the gates: catch it at the boundary, not after.
 - **Detects (as a side effect).** Run it across an existing suite and the violation list is a
   map of your born-weak tests — the worklist you'd otherwise have to find by hand.
-- **Can't address (be clear).** It is a **syntactic** check on assertion *shape*, not a
-  semantic judge of test *quality*. A test with a strong-looking matcher asserting the wrong
-  value (`expect(total).toBe(0)` when it should be `42`), a tautology hidden inside a custom
-  matcher or helper it can't see into, or a meaningful behavior left entirely unasserted —
-  all pass. It raises the floor under your assertions; it does not certify they're correct.
-  Pair it with review and real behavioral tests.
+- **Can't address (be clear).** These are **syntactic** checks on assertion *shape* and on
+  what a test does with its results, not semantic judges of test *quality*. Still uncovered:
+  a strong-looking matcher asserting the **wrong value** (`expect(total).toBe(0)` when it
+  should be `42` — a fact about intent that no lint rule can see; a mutation-testing gate is the
+  usual answer), an expected value **computed by the function under test** (oracle reuse), an
+  assertion on a value the test itself **stubbed** (mock echo), a result that is read but never
+  reaches an assertion, and anything hidden inside a custom matcher or helper the rules can't
+  see into. They raise the floor under your assertions; they do not certify they're correct.
+  Pair them with review and real behavioral tests.
 
 ## License
 

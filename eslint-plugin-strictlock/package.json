@@ -15,7 +15,10 @@
   },
   "files": [
     "index.mjs",
+    "rules/_shared.mjs",
     "rules/no-smoke-only-assertions.mjs",
+    "rules/no-tautological-assertions.mjs",
+    "rules/no-unasserted-result.mjs",
     "README.md",
     "LICENSE",
     "NOTICE"
