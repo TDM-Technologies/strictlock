@@ -160,11 +160,19 @@ def _git_run(
     quoting off (so ref output is byte-comparable). `input` is fed on stdin (for
     `hash-object --stdin` / `update-ref --stdin`). Raises LeaseError on a non-zero exit when
     check_rc."""
-    proc = subprocess.run(
+    # Bytes on the wire, not text mode: on Windows a text-mode stdin pipe rewrites "\n" as
+    # "\r\n", and `update-ref --stdin` rejects the stray CR ("extra input"). Decode output
+    # ourselves with the same universal-newline result text mode would give.
+    raw = subprocess.run(
         ["git", "-C", str(root), "-c", "commit.gpgsign=false",
          "-c", "core.quotepath=false", *args],
-        capture_output=True, text=True, input=input,
+        capture_output=True, input=None if input is None else input.encode("utf-8"),
     )
+
+    def _text(b: bytes) -> str:
+        return b.decode("utf-8", "replace").replace("\r\n", "\n")
+
+    proc = subprocess.CompletedProcess(raw.args, raw.returncode, _text(raw.stdout), _text(raw.stderr))
     if check_rc and proc.returncode != 0:
         raise LeaseError(
             f"git {' '.join(args)} failed (exit {proc.returncode}): "
