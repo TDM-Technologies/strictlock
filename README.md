@@ -23,7 +23,7 @@ decision, which is the kind of evidence SOC 2 and ISO audits ask for.
 > **Fail closed** means: when the gate is unsure, it refuses. The opposite, failing open, is
 > what advisory prose does. Two limits to know up front. A gate that never starts does not
 > gate (see [what is and isn't enforced today](#what-is-and-isnt-enforced-today)), and
-> approval of a plan is currently a convention, not a recorded step.
+> recorded plan approval needs a decision-log directory to be set.
 
 **Terms used below.** The *harness* is the agent tool you run, such as Claude Code. A *hook* is
 a small program the harness runs at a set point; a `PreToolUse` hook runs just before each tool
@@ -67,22 +67,36 @@ See [**roadmap.md**](roadmap.md) for planned modules and what has shipped since 
 
 ## What is and isn't enforced today
 
-The list below describes what the code does now. The first four items have planned changes
-written up in [`dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](dev/CLAIMS-TRUE-ROUND-2-SPEC.md); the last is
-a property of how hooks work, with no code change planned.
+The list below states what the code does and where its limits are. The exact behaviour is
+in [`plan-gate/CONFIG.md`](plan-gate/CONFIG.md) and [`scope-lease/CONFIG.md`](scope-lease/CONFIG.md).
 
-- **Plan approval is a convention.** A plan is live when its frontmatter says
-  `status: active`. Nothing records who approved it or when, and with the example settings a
-  gated agent can write an active plan itself. Recorded approval is planned, not built.
-- **MCP tools** (tools provided by connected servers): the ones you name in
-  `PLAN_GATE_MCP_WRITE_TOOLS` are always denied while a plan is active; their arguments are not
-  read. The example hook `matcher` does not route MCP tools to the gate, so add them (for
-  example `mcp__.*`) or the gate never sees them. Other MCP tools are not gated.
-- **Scripts are matched as commands.** Allowing a command such as
-  `python3 atomic-write.py STATE.md` does not check the file it writes against `allowed_paths`.
-- **Leases are voluntary.** scope-lease excludes only agents that call `acquire` themselves.
-  plan-gate does not read lock refs, and any merge-time check on a lease is something you
-  build.
+- **Plan approval.** With a log directory set, a plan takes effect only after someone runs
+  `plan-gate.py approve` on its exact bytes. The decision log records who (self-declared OS and
+  git identity), when, and the plan's sha256, in a hash chain that shows whether that record was
+  later changed. That's tamper-evident, not authentication. plan-gate blocks the direct ways a
+  gated agent could run `approve` itself, but a plan that lets the agent run code it can change
+  can be used to approve another plan. Without `PLAN_GATE_LOG_DIR`, `status: active` alone
+  activates a plan. The latest approval per plan name wins; retiring an approved plan is
+  described in [`plan-gate/CONFIG.md`](plan-gate/CONFIG.md#plan-approval).
+- **MCP tools** (tools provided by connected servers): a tool listed in
+  `PLAN_GATE_MCP_WRITE_TOOLS` with an argument spec has each path in that argument checked like
+  an Edit/Write target; a bare entry is denied. An unlisted MCP tool gets no decision from
+  plan-gate, so the harness's normal permission prompt applies (a log row is kept). Only the
+  arguments you name are checked, nested arguments cannot be named, and names are
+  case-sensitive. The example matcher routes MCP tools to the gate.
+- **Writer scripts.** `python3 atomic-write.py FILE` (and any script you list in
+  `PLAN_GATE_WRITER_SCRIPTS`) is checked as a write to FILE, like a `>` redirect. Only one
+  target per script is checked, and launchers such as `uv run` or `bash -c` are not recognized.
+- **Leases.** With `PLAN_GATE_SCOPE_LEASE` set, plan-gate denies a gated agent's write to a
+  file another agent holds a scope-lease on, on the write surfaces it parses (Edit/Write/
+  NotebookEdit, Bash redirects, writer scripts, MCP path arguments), and it checks both the
+  spelled path and the real path. Agents are told apart by `SCOPE_LEASE_OWNER`, else by the
+  session's git branch (agents sharing a branch count as one). With
+  `PLAN_GATE_REQUIRE_LEASE=on`, every such write must hold a lease. Not covered: `cp`, `mv`,
+  `tee`, `sed -i` and build tools admitted through `allowed_commands`, hardlinks, nested repos
+  or submodules, and code the agent controls.
+- **PowerShell** commands are checked segment by segment; parentheses, script blocks,
+  backticks and redirections are denied, and file-writing cmdlets are denied even if listed.
 - **A hook that cannot start does not gate.** A missing interpreter (for example `python` where
   only `python3` exists) makes the harness proceed without the check. A wrong script path makes
   every tool call fail with a "can't open file" error instead. Verify the gate after wiring it
@@ -134,25 +148,11 @@ Full configuration (all `PLAN_GATE_*` variables, on Windows, Linux and macOS) is
 
 ## Switches and bypass values
 
-Every gate has an on-switch or a bypass variable, and the accepted values **differ by module
-today**. A value a module does not accept is silently ignored, so for example
-`MEMORY_CAP_BYPASS=on` does nothing because that module wants `1`. All variables are read from
-the process environment; a planned change will make every module accept `on`, `1`, `true` and
-`yes`.
-
-| Module | Turn on | Bypass variable | Value accepted today |
-|---|---|---|---|
-| plan-gate | `PLAN_GATE=on` (any case) | `PLAN_GATE_BYPASS` | `on` only (any case) |
-| memory-cap | `MEMORY_CAP=on` (any case) | `MEMORY_CAP_BYPASS` | `1` only |
-| generated-sink-commit-gate | `GENERATED_SINK_COMMIT_GATE=on` (any case) | `GENERATED_SINK_COMMIT_GATE_BYPASS` | `1` only |
-| generated-sink-prepush-gate | `GENERATED_SINK_PREPUSH_GATE=on` (any case) | `GENERATED_SINK_PREPUSH_GATE_BYPASS` | `1` only |
-| commit-msg-gate | the hook being installed (no switch) | `COMMIT_MSG_GATE_BYPASS` | lowercase `on` only |
-| test-protection-guard | `TEST_PROTECTION_GUARD=on` (any case) | none (it never blocks) | not applicable |
-| scope-lease | runs unless disabled | `SCOPE_LEASE` as an opt-out | `on`, `1`, `true`, `yes` mean enabled; any other set value disables it |
-| sink-resolver | runs unless disabled | `SINK_RESOLVER` as an opt-out | `on`, `1`, `true`, `yes` mean enabled; any other set value disables it |
-| liveness-scan | no switch (read-only) | none | not applicable |
-
-One further `1`-only switch: `MEMORY_CAP_DECISION_LOG` (the opt-in decision log).
+Every module's on-switch and bypass variable accepts `on`, `1`, `true` or `yes`, in any case
+(for example `PLAN_GATE_BYPASS=1`, `MEMORY_CAP_BYPASS=on`, `COMMIT_MSG_GATE_BYPASS=true`).
+Values such as `PLAN_GATE_BYPASS=1`, which used to do nothing, now bypass. Any other value
+leaves the switch off. All variables are read from the process environment. `scope-lease`
+and `sink-resolver` run unless their switch is set to something other than those four values.
 
 **Where the variable has to be set.**
 

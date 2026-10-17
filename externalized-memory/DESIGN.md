@@ -131,7 +131,9 @@ evidence with a timestamp and a hash. An approval that lived in a context window
 
 StrictLock moves agent governance out of prose and into a fail-closed gate at the
 tool boundary; the gate checks every file edit and shell command (and denies configured MCP
-tools) against the active plan. Who approved a plan is a convention today, not a recorded step.
+tools) against the active plan. With a log directory set, a plan takes effect only after a
+human runs `plan-gate.py approve`, and the log records who, when and which plan bytes
+(tamper-evident, not authentication).
 But a plan only means something because the plan, the state, and the close-out
 all live on disk, in git, where an auditor — or just you, three weeks later — can
 trace what was authorized, what ran, and what changed. The decision log is written by the gate

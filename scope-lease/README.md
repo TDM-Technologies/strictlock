@@ -1,19 +1,34 @@
 # scope-lease
 
 **A git-native, zero-service exclusive lock over a path set. Agents that call `acquire` cannot
-hold the same file at the same time.**
+hold the same file at the same time, and plan-gate can refuse a gated agent's write to a file
+someone else holds.**
 
 The Concurrency flagship of the [StrictLock](../README.md) suite. [`plan-gate`](../plan-gate/)
 enumerates the paths a unit of work *may* touch; `scope-lease` lets agents claim those paths
 **exclusively** against each other. plan-gate says "only these paths"; scope-lease adds "…and
-no other lease-using agent holds them while you do."
+no other agent holds them while you do."
 
-**Today the exclusion is voluntary.** A lease excludes only agents that themselves call
-`scope-lease.py acquire`. plan-gate does not read the lock refs, so a gated agent that never
-calls `acquire` can still edit a leased file, and nothing in the suite blocks it. Likewise,
-`fence-check` is a command you run at your own merge step; no merge gate ships with the suite.
-Having plan-gate honor leases is planned (see
-[`../dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](../dev/CLAIMS-TRUE-ROUND-2-SPEC.md)).
+**Two levels of enforcement.**
+
+1. **Lease-aware gate.** With `PLAN_GATE_SCOPE_LEASE` set to the path of `scope-lease.py`,
+   plan-gate denies a gated agent's write to a file another agent holds a lease on. This covers
+   the write surfaces plan-gate parses: Edit/Write/NotebookEdit, Bash redirects, writer scripts
+   such as `atomic-write.py`, and MCP path arguments. It checks both the spelled path and the
+   real path (symlinks). An agent is identified by `SCOPE_LEASE_OWNER` if set, else by the git
+   branch of its session's worktree; agents sharing a branch count as one. A gated agent cannot
+   pick its own identity with the direct routes (`--owner`, `--lock-id`, setting the variables,
+   editing `refs/locks`), which plan-gate refuses.
+2. **Strict mode.** With `PLAN_GATE_REQUIRE_LEASE=on` as well, every such write must hold a
+   lease, so an agent that never called `acquire` is blocked.
+
+**What is not covered.** Commands that `allowed_commands` admits and that write files without
+plan-gate parsing a target (`cp`, `mv`, `tee`, `sed -i`, `git checkout`, build tools), hardlinks,
+files in nested repos or submodules leased through the outer repo, and code the agent controls
+(a plan that lets it run code it can change can edit lock refs). Agents that are not gated by
+plan-gate are only excluded if they call `acquire` themselves, and a human's own edits and
+merges are never blocked. `fence-check` is a command you run at your own merge step; no merge
+gate ships with the suite. Details: [`../plan-gate/CONFIG.md`](../plan-gate/CONFIG.md#scope-lease-honored).
 
 It exists to close the two failures human supervision used to cover when you run one agent at a
 time and let two agents run at once:
@@ -57,8 +72,9 @@ default, or a standalone fallback.
 Same honesty the rest of StrictLock ships with — know exactly what guarantee you're buying:
 
 - **Prevents** (at `acquire`): two agents *that each call `acquire`* concurrently holding the
-  same file on **one machine sharing one `.git`**. This is the load-bearing guarantee; it does
-  not reach an agent that never calls `acquire`. With correct repo-relative
+  same file on **one machine sharing one `.git`**. This is the load-bearing guarantee; on its
+  own it does not reach an agent that never calls `acquire` (plan-gate's lease-aware mode, above,
+  covers a gated agent). With correct repo-relative
   normalization, the same file under any spelling — absolute vs. relative, `./` prefix, a
   trailing slash, and (on a case-insensitive or unicode-normalizing filesystem) a casing or
   NFD/NFC difference — collapses to one ref key, so the second claim is denied, not silently
