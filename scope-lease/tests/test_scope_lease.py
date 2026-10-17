@@ -981,7 +981,24 @@ class CaseVariantPrefixTests(unittest.TestCase):
         r = sl.holder_status(root=self.root, paths=[swapped], owner="bob")[0]
         self.assertEqual(r["status"], "held")
 
+    def _fs_is_case_insensitive(self) -> bool:
+        probe = Path(self._tmp.name) / "CaseProbe.tmp"
+        probe.write_text("x")
+        return (Path(self._tmp.name) / "caseprobe.tmp").exists()
+
+    def test_case_variant_repo_spelling_is_not_a_foreign_ref_store(self):
+        if not self._fs_is_case_insensitive():
+            self.skipTest("needs a case-insensitive filesystem")
+        sl.acquire_lease(root=self.root, lock_id="L", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+        variant = Path(str(self.root).swapcase())
+        self.assertEqual(sl._refstore(variant), sl._refstore(self.root))
+        rows = sl.holder_status(root=variant, paths=["src/a.py"], owner="bob")
+        self.assertEqual(rows[0]["status"], "held")  # found, and no MachineBoundaryError
+
     def test_case_sensitive_repo_keeps_them_distinct(self):
+        if self._fs_is_case_insensitive():
+            self.skipTest("the filesystem folds case: resolve() cannot keep them distinct")
         _git(self.root, "config", "core.ignorecase", "false")
         top = sl._git_toplevel(self.root)
         swapped = str(top).swapcase() + os.sep + "src" + os.sep + "a.py"

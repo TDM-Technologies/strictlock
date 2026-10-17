@@ -251,7 +251,32 @@ def _refstore(root: Path) -> dict:
     common = Path(_git_run(root, "rev-parse", "--git-common-dir").stdout.strip())
     if not common.is_absolute():
         common = Path(root) / common
-    return {"host": socket.gethostname(), "git_dir": str(common.resolve())}
+    return {"host": socket.gethostname(),
+            "git_dir": str(_true_case(_resolve_loose(common)))}
+
+
+def _true_case(p: Path) -> Path:
+    """`p` spelled with the case the filesystem actually stores. On a case-insensitive
+    filesystem `resolve()` keeps the caller's spelling, so `/Repo/.git` and `/repo/.git`
+    would compare unequal and a holder spelling its own repo with a case variant would be
+    refused as a 'foreign ref store'. Each component is matched against its parent's real
+    directory listing (exact name first; otherwise a unique case-insensitive match)."""
+    parts = p.parts
+    if not parts:
+        return p
+    cur = Path(parts[0])
+    for part in parts[1:]:
+        try:
+            names = os.listdir(str(cur))
+        except OSError:
+            cur = cur / part
+            continue
+        if part in names:
+            cur = cur / part
+            continue
+        hits = [n for n in names if n.casefold() == part.casefold()]
+        cur = cur / (hits[0] if len(hits) == 1 else part)
+    return cur
 
 
 def _assert_same_refstore(blob: dict, refstore: dict, path: str) -> None:

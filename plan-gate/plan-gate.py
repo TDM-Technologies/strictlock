@@ -904,6 +904,8 @@ def approve_command_for(plan_path) -> str:
     parts = [sys.executable or "python3", os.path.abspath(__file__), "approve",
              os.path.abspath(str(plan_path)), "--log-dir",
              os.path.abspath(str(LOGS_DIR)) if LOGS_DIR is not None else ""]
+    if PLANS_DIR is not None:
+        parts += ["--plans-dir", os.path.abspath(str(PLANS_DIR))]
     return " ".join(_quote_arg(p) for p in parts)
 
 
@@ -2404,9 +2406,10 @@ def _approve_self_check(raw_segs: list[str], shell: str):
     (or cannot be ruled out): interpreter + plan-gate.py + `approve` in any spelling
     the writer-script detection recognizes, plan-gate.py executed directly, an
     unresolvable script word next to `approve`, or a shell/eval/interpreter -c
-    style runner whose words mention plan-gate and approve. Best-effort for
-    indirection through other scripts; the TTY requirement and the protected log
-    directory are the barriers that do not depend on parsing."""
+    style runner whose words mention plan-gate and approve. Best-effort: indirection
+    through other scripts is not parsed, `--no-tty-check` is something an agent can
+    pass, and the log guard depends on parsing paths. This is a barrier against the
+    direct routes, not authentication."""
     why = (
         "plan-gate: this command would run `plan-gate.py approve` (or could not be "
         "ruled out). Approving a plan is a human act: run it yourself in a terminal; "
@@ -2461,6 +2464,123 @@ def _approve_self_check(raw_segs: list[str], shell: str):
             if prog_b in _RUNNER_PROGS and _mentions_gate_approve(" ".join(rest)):
                 return why
     return None
+
+
+# --- lease identity and lock refs are not the agent's to set ------------------------
+# A lease is owned by the identity the HARNESS gives the agent (SCOPE_LEASE_OWNER in the
+# hook/harness environment, else its branch). If the agent could type an identity into a
+# command, it could take over, extend or release another agent's lease with values the
+# deny message or `git for-each-ref` shows it. So a gated command may not (a) pass
+# identity to scope-lease.py acquire/release, set SCOPE_LEASE_OWNER / SCOPE_LEASE_LOCK_ID,
+# or (b) change refs/locks/ with git. Best effort, like the approve check: a plan that
+# lets the agent run code it can change can still edit lock refs.
+_LEASE_ENV_ASSIGN_RE = re.compile(r"SCOPE_LEASE_(OWNER|LOCK_ID)\s*=", re.IGNORECASE)
+_LEASE_IDENTITY_FLAGS = ("--owner", "--lock-id", "--no-owner", "--owner-root")
+_GIT_READ_ONLY_SUBS = (
+    "for-each-ref", "show-ref", "rev-parse", "cat-file", "log", "show", "ls-remote",
+    "rev-list", "describe", "name-rev", "diff", "status", "ls-tree", "ls-files",
+    "check-ref-format", "show-branch", "reflog", "var",
+)
+_GIT_REF_WRITER_SUBS = ("update-ref", "symbolic-ref", "branch", "tag", "push", "fetch",
+                        "pull", "replace", "notes")
+
+
+def _is_scope_lease_script(tok: str) -> bool:
+    return _basename_lc(tok) in ("scope-lease.py", "scope-lease")
+
+
+def _lease_self_check(raw_segs: list[str], shell: str):
+    """Deny reason (str) or None. Only meaningful when scope-lease is configured."""
+    why_id = (
+        "plan-gate: a command may not choose its own lease identity (--owner, --lock-id, "
+        "--no-owner, --owner-root, or setting SCOPE_LEASE_OWNER / SCOPE_LEASE_LOCK_ID) "
+        "when it acquires or releases a lease. Identity comes only from the harness "
+        "environment. Run the plain command (scope-lease.py acquire / release) instead."
+    )
+    why_ref = (
+        "plan-gate: this command would change refs/locks/ (the scope-lease lock refs), or "
+        "could not be ruled out. Lock refs change only through scope-lease.py acquire / "
+        "release, run with the harness-provided identity."
+    )
+    for raw in raw_segs:
+        if _LEASE_ENV_ASSIGN_RE.search(raw):
+            return why_id
+        try:
+            seglists = _tokenize_ps(raw) if shell == "ps" else [shlex.split(raw)]
+        except ValueError:
+            low = raw.lower()
+            if ("scope-lease" in low and any(f in low for f in _LEASE_IDENTITY_FLAGS)):
+                return why_id
+            if "refs/locks" in low:
+                return why_ref
+            continue
+        for toks in seglists:
+            if not toks:
+                continue
+            i = _program_index(toks)
+            if i >= len(toks):
+                continue
+            prog_b = _basename_lc(toks[i])
+            if prog_b.endswith(".exe"):
+                prog_b = prog_b[:-4]
+            rest = toks[i + 1:]
+            joined = " ".join(toks)
+            # (a) scope-lease.py invocations
+            script, sargs = None, rest
+            inv = _python_invocation(toks)
+            if inv is not None:
+                script, sargs = inv
+            elif _is_scope_lease_script(toks[i]):
+                script = toks[i]
+            if script is not None and (_is_scope_lease_script(script)
+                                       or any(ch in script for ch in _EXPANSION_CHARS)):
+                sub = sargs[0] if sargs else ""
+                flags = any(a == f or a.startswith(f + "=") for a in sargs
+                            for f in _LEASE_IDENTITY_FLAGS)
+                dynamic = any(ch in a for a in sargs for ch in "$`") or any(
+                    ch in sub for ch in _EXPANSION_CHARS)
+                if sub in ("holder", "fence-check"):
+                    pass  # read-only: identity flags change nothing that is written
+                elif flags or dynamic:
+                    return why_id
+            elif script is None and inv is not None and "scope-lease" in joined.lower():
+                if any(f in joined for f in _LEASE_IDENTITY_FLAGS):
+                    return why_id  # python -c / stdin script naming scope-lease
+            if prog_b in _RUNNER_PROGS and "scope-lease" in joined.lower() and any(
+                    f in joined for f in _LEASE_IDENTITY_FLAGS):
+                return why_id
+            # (b) raw lock-ref changes through git
+            if prog_b == "git":
+                sub = ""
+                k = 0
+                while k < len(rest):
+                    a = rest[k]
+                    if a in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+                        k += 2
+                        continue
+                    if a.startswith("-"):
+                        k += 1
+                        continue
+                    sub = a
+                    break
+                gargs = rest[k + 1:] if sub else rest
+                if sub in _GIT_READ_ONLY_SUBS:
+                    continue
+                low = " ".join(rest).lower()
+                if "refs/locks" in low:
+                    return why_ref
+                if sub in _GIT_REF_WRITER_SUBS or not sub:
+                    if any(ch in a for a in gargs for ch in "$`"):
+                        return why_ref
+                    if sub in ("update-ref", "symbolic-ref") and "--stdin" in gargs:
+                        return why_ref
+            elif prog_b in _RUNNER_PROGS and "refs/locks" in joined.lower():
+                return why_ref
+    return None
+
+
+def _lease_configured() -> bool:
+    return bool(SCOPE_LEASE_SCRIPT) or _env_truthy("PLAN_GATE_REQUIRE_LEASE")
 
 
 def _writer_target(base: str, args: list[str]):
@@ -2618,6 +2738,14 @@ def _lease_check(targets: list[str]):
     require = _env_truthy("PLAN_GATE_REQUIRE_LEASE")
     if not SCOPE_LEASE_SCRIPT and not require:
         return None
+    for t in targets:
+        tn = norm(t)
+        if "/refs/locks/" in tn + "/" or tn.endswith("/packed-refs"):
+            return (
+                f"plan-gate: {t} is a git ref store path (refs/locks/ holds the scope-lease "
+                f"locks); the gate does not authorize gated writes to it. Lock refs change "
+                f"only through scope-lease.py."
+            )
     # Every target is looked up under TWO spellings when they differ: the lexical
     # absolute path (`..` collapsed textually) and its realpath (symlinks followed),
     # so `lnk/../x.py` and a symlink pointing at a leased file elsewhere are both
@@ -2627,13 +2755,16 @@ def _lease_check(targets: list[str]):
     lookups: list[tuple] = []     # (lookup path, is_real_file, display target)
     seen: set = set()
     for t in targets:
-        a = t if os.path.isabs(t) else os.path.join(os.getcwd(), t)
-        a = os.path.normpath(a)
+        raw_joined = t if os.path.isabs(t) else os.path.join(os.getcwd(), t)
+        a = os.path.normpath(raw_joined)
         if a in uniq:
             continue
         uniq.append(a)
         try:
-            real = os.path.realpath(a)
+            # realpath of the RAW path: `lnk/../x` must resolve `lnk` first and then
+            # step up from the link's target, as the OS does when it opens the file.
+            # (Collapsing `..` textually first would look up a different file.)
+            real = os.path.realpath(raw_joined)
         except (OSError, ValueError):
             real = a
         spellings = [(a, real == a or norm(real) == norm(a))]
@@ -2659,10 +2790,21 @@ def _lease_check(targets: list[str]):
             f"(got {SCOPE_LEASE_SCRIPT!r}); a relative one would resolve against whatever "
             f"directory the target is in. Failing closed. " + _BYPASS_HOWTO
         )
-    try:
-        agent_cwd = os.getcwd()
-    except OSError:
-        agent_cwd = ""
+    # Identity anchor, in order: SCOPE_LEASE_OWNER (inherited by the lookup), else the
+    # branch of $CLAUDE_PROJECT_DIR (Claude Code sets it for hooks to the session's
+    # project root, so an agent that `cd`s elsewhere does not change who it is), else the
+    # `cwd` the harness put in the hook payload, else the hook process's cwd.
+    agent_cwd = ""
+    for cand in (os.environ.get("CLAUDE_PROJECT_DIR", "").strip(),
+                 str(_CALL_CTX.get("payload_cwd") or "").strip()):
+        if cand and os.path.isdir(cand):
+            agent_cwd = cand
+            break
+    if not agent_cwd:
+        try:
+            agent_cwd = os.getcwd()
+        except OSError:
+            agent_cwd = ""
     groups: dict = {}
     for item in lookups:
         groups.setdefault(_lease_root_for(item[0]), []).append(item)
@@ -2745,8 +2887,8 @@ def _lease_check(targets: list[str]):
             alias = ("" if r["_target"] == r["_display"]
                      else f" (reached as {r['_display']})")
             return (
-                f"plan-gate: {r['_target']}{alias} is leased by another agent: lock "
-                f"{r.get('lock_id', '?')!r} (owner {r.get('owner', '?')}), lease age "
+                f"plan-gate: {r['_target']}{alias} is leased by another agent: owner "
+                f"{r.get('owner', '?')}, lease age "
                 f"{_fmt_age(r.get('age_seconds'))}, until {r.get('deadline', '?')}. "
                 f"Pick a different file, or wait for the lease to lapse or be released."
             )
@@ -3043,6 +3185,7 @@ def main() -> None:
         )
     _CALL_CTX["tool"] = tool
     _CALL_CTX["tool_input"] = tool_input
+    _CALL_CTX["payload_cwd"] = payload.get("cwd") if isinstance(payload.get("cwd"), str) else ""
     if _inject == "late":
         raise RuntimeError("injected test crash (late)")
     plan_name: str | None = None
@@ -3150,6 +3293,10 @@ def main() -> None:
         approve_reason = _approve_self_check(all_segs, "bash")
         if approve_reason:
             gated_deny(approve_reason, class_="approve_self_protect")
+        if _lease_configured():
+            lease_id_reason = _lease_self_check(all_segs, "bash")
+            if lease_id_reason:
+                gated_deny(lease_id_reason, class_="lease_identity_protect")
         has_cd = any(_is_cd_like(sg) for sg in all_segs)
         # Redirection-as-write: each target is a file write, gated like
         # Edit/Write (log self-protection -> always-writable -> allowed_paths).
@@ -3206,6 +3353,10 @@ def main() -> None:
         approve_reason = _approve_self_check([cmd], "ps")
         if approve_reason:
             gated_deny(approve_reason, class_="approve_self_protect")
+        if _lease_configured():
+            lease_id_reason = _lease_self_check([cmd], "ps")
+            if lease_id_reason:
+                gated_deny(lease_id_reason, class_="lease_identity_protect")
         # Split into simple commands (like the Bash path). Anything the splitter
         # cannot place is refused outright.
         ps_segs, ps_problem = _ps_segments(cmd)

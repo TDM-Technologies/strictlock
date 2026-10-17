@@ -186,8 +186,9 @@ python plan-gate.py approve <plan.md> --log-dir <DIR> [--plans-dir <DIR>] [--no-
   writer-script detection recognizes, `plan-gate.py` executed directly, a script or subcommand
   hidden behind a variable expansion, and shell / `eval` / `-c` style runners whose words
   mention both. An agent cannot write the log directory either (`log_self_protect`), so it
-  cannot forge a row. Indirection through some other script is not parsed; the terminal
-  requirement and the protected log do not depend on parsing.
+  cannot forge a row. All of this is best effort: indirection through some other script is not
+  parsed, an agent can pass `--no-tty-check` (the row records that it was used), and the log
+  guard depends on parsing paths. See the honest limits below.
 - **What this is, and is not.** The approver's identity is the OS user and git config the person
   themselves set. It shows approval happened outside the gated agent, at a recorded time, for
   exact plan bytes, and the chain shows whether the record was altered. It is tamper-evident,
@@ -218,8 +219,13 @@ the repo is the nearest git root above each target, else the hook's working dire
 all the lookups of a call**, not per repo:
 
 - **Who "I" am (Q9, 2026-10-17).** The agent's identity is `SCOPE_LEASE_OWNER` if set in the
-  hook's environment, else the git **branch of the agent's own worktree** (the hook's working
-  directory), *not* the branch of the repo the target lives in. There is no `user.email`
+  hook's environment, else the git **branch of the agent's own worktree**, *not* the branch of
+  the repo the target lives in. That worktree is found, in order, from `$CLAUDE_PROJECT_DIR`
+  (Claude Code sets it for hooks to the session's project root), else the `cwd` field of the
+  hook payload, else the hook process's working directory. The branch fallback therefore
+  follows the **session's project directory**: an agent that `cd`s into another worktree does
+  not become that worktree's owner. A per-agent `SCOPE_LEASE_OWNER` set by the harness is the
+  robust setting. There is no `user.email`
   fallback. An agent with no identity (detached HEAD, no variable) cannot claim any lease:
   every leased file is denied to it. Two agents on the same branch (or sharing a
   `SCOPE_LEASE_OWNER`) count as **one** agent; to tell them apart, give each its own
@@ -239,6 +245,30 @@ all the lookups of a call**, not per repo:
 - `PLAN_GATE_REQUIRE_LEASE=on` additionally denies a path with no live lease (or an expired
   one): "acquire it first". Targets under `PLAN_GATE_ALWAYS_WRITABLE` (plans, memory) are
   exempt from that rule only, so drafting plans keeps working.
+
+**The agent cannot choose its identity (and plan-gate refuses the direct routes).** Because
+the command line is agent-controlled, a gated Bash/PowerShell command is **denied** (class
+`lease_identity_protect`) when it:
+
+- runs `scope-lease.py acquire` / `release` (interpreter, wrapper or direct execution, as for
+  writer scripts) with `--owner`, `--lock-id`, `--no-owner` or `--owner-root`, or with
+  arguments hidden behind a variable expansion;
+- sets `SCOPE_LEASE_OWNER` / `SCOPE_LEASE_LOCK_ID` anywhere in a segment (an env prefix, `env`,
+  `export`, `$env:`, `set`);
+- changes `refs/locks/` with git: `update-ref` / `symbolic-ref` naming it (or with `--stdin`),
+  `push` / `fetch` / `pull` / `branch` / `tag` with a `refs/locks` argument, or any such git
+  command whose arguments contain a variable expansion (a plain `git push` stays allowed);
+- writes `.git/refs/locks/...` or `packed-refs` through Edit / Write / a redirect / a writer
+  script.
+
+Plain `scope-lease.py acquire` / `release` (identity from the harness environment) stay
+allowed, subject to `allowed_commands`; `holder` and `fence-check` are read-only and are not
+restricted. These checks are active only when `PLAN_GATE_SCOPE_LEASE` or
+`PLAN_GATE_REQUIRE_LEASE` is set, and the deny message no longer prints the holder's lock id.
+**Honest scope:** these are the direct ways an agent could take over a lease. As with plan
+approval, a plan that lets the agent run code it can change (`python3`, `make`, `npm test`, a
+script it can edit) can still edit lock refs or run scope-lease with an identity of its
+choosing; plan-gate gates tool calls, not what an allowed program does.
 
 **What is and is not checked.** Leases are enforced only on the write surfaces plan-gate
 parses: Edit / Write / NotebookEdit, Bash redirects, writer scripts and MCP path arguments.

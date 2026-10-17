@@ -59,6 +59,7 @@ def run_gate(
     env["PLAN_GATE_MCP_WRITE_TOOLS"] = ""
     env["PLAN_GATE_SCOPE_LEASE"] = ""
     env["PLAN_GATE_REQUIRE_LEASE"] = ""
+    env["CLAUDE_PROJECT_DIR"] = ""  # a real session's value must not leak into the tests
     # Approval is required whenever a log dir is set; the legacy tests stage
     # unapproved plans, so they opt out (ApprovalTests overrides this).
     env["PLAN_GATE_REQUIRE_APPROVAL"] = "off"
@@ -2054,7 +2055,7 @@ class ScopeLeaseTests(unittest.TestCase):
         r = self.reason(p)
         self.assertIn("alice", r)
         self.assertIn("lease age", r)
-        self.assertIn("lock-alice", r)
+        self.assertNotIn("lock-alice", r)  # the lock id is not handed to the agent
 
     def test_redirect_denied_when_held_by_other(self):
         self.lease("alice", self.leased)
@@ -2240,16 +2241,31 @@ class ScopeLeaseTests(unittest.TestCase):
         self.assertIn("alice", self.reason(p))
 
     def test_dotdot_through_a_symlinked_dir_checks_both_spellings(self):
-        sub = self.repo / "sub"
-        sub.mkdir()
-        (sub / "x.py").write_text("x\n")
-        elsewhere = Path(self._tmp.name) / "elsewhere"
-        elsewhere.mkdir()
-        self._symlink(self.repo / "lnk", sub)
-        # `lnk/../x.py` is <repo>/x.py textually, but the OS resolves it via sub/.. too.
-        target = "%s/lnk/../sub/x.py" % self.repo.as_posix()
-        self.lease("alice", sub / "x.py")
-        self.write_plan(os.path.normpath(target), sub / "x.py")
+        # lnk -> <repo>/deep/d. The target <repo>/lnk/../x.py is <repo>/x.py when `..` is
+        # collapsed textually, but the OS opens <repo>/deep/x.py (the parent of the
+        # link's TARGET). The lease is on the REAL file; the lexical spelling is free.
+        repo = self.repo.resolve()
+        (repo / "deep" / "d").mkdir(parents=True)
+        self._symlink(repo / "lnk", repo / "deep" / "d")
+        target = "%s/lnk/../x.py" % repo.as_posix()
+        real = repo / "deep" / "x.py"
+        self.assertNotEqual(os.path.realpath(target), os.path.normpath(target))
+        self.write_plan(os.path.normpath(target), real)
+        self.lease("alice", real)
+        p = self.run_edit(target, "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("alice", self.reason(p))
+        # Control: with nothing leased the same call is a normal plan decision.
+        q = self.run_edit(repo / "x.py", "bob")
+        self.assertEqual(decision(q), "allow", q.stdout)
+
+    def test_dotdot_through_a_symlinked_dir_lexical_lease_also_denies(self):
+        repo = self.repo.resolve()
+        (repo / "deep" / "d").mkdir(parents=True)
+        self._symlink(repo / "lnk", repo / "deep" / "d")
+        target = "%s/lnk/../x.py" % repo.as_posix()
+        self.write_plan(os.path.normpath(target))
+        self.lease("alice", repo / "x.py")  # the lexical spelling's file
         p = self.run_edit(target, "bob")
         self.assertEqual(decision(p), "deny", p.stdout)
 
@@ -2328,6 +2344,132 @@ class ScopeLeaseTests(unittest.TestCase):
         self.assertEqual(decision(proc), "deny", proc.stdout)
         # Two lookups of 1.2s each would take 2.4s; one 1.5s budget stops at ~1.5s.
         self.assertLess(time.time() - p0, 2.35)
+
+    # --- the agent cannot type its way into someone else's lease -----------------------
+    def _plan_allowing(self, *commands):
+        (self.plans / "active.md").write_text(
+            "---\nname: lease-test\nstatus: active\nallowed_paths:\n  - %s\n"
+            "allowed_commands:\n%s---\n" % (
+                self.free, "".join("  - %s\n" % c for c in commands)), encoding="utf-8")
+
+    def test_scope_lease_identity_flags_and_env_are_denied(self):
+        self._plan_allowing("python3", "env", "SCOPE_LEASE_OWNER", "export", "git", "bash")
+        sl = SCOPE_LEASE.as_posix()
+        for cmd in (
+            "python3 %s release --lock-id lock-alice --owner alice" % sl,
+            "python3 %s acquire --owner alice" % sl,
+            "python3 %s acquire --owner=alice" % sl,
+            "python3 %s release --lock-id=lock-alice" % sl,
+            "python3 %s acquire --no-owner" % sl,
+            "python3 %s acquire --owner-root /x" % sl,
+            "SCOPE_LEASE_OWNER=alice python3 %s release" % sl,
+            "SCOPE_LEASE_LOCK_ID=lock-alice python3 %s release" % sl,
+            "env SCOPE_LEASE_OWNER=alice python3 %s release" % sl,
+            "export SCOPE_LEASE_OWNER=alice",
+            "python3 %s acquire $ARGS" % sl,
+            "python3 $S acquire --owner alice",
+            "bash -c 'python3 %s release --owner alice'" % sl,
+        ):
+            p = self.run_bash(cmd, "bob")
+            self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
+            self.assertIn("lease identity", self.reason(p), cmd)
+
+    def test_plain_scope_lease_commands_and_reads_are_not_blocked(self):
+        self._plan_allowing("python3", "git", "echo")
+        sl = SCOPE_LEASE.as_posix()
+        for cmd in (
+            "python3 %s acquire" % sl,
+            "python3 %s release" % sl,
+            "python3 %s holder --owner alice %s" % (sl, self.free.as_posix()),
+            "python3 %s fence-check --lock-id x" % sl,
+            "echo $SCOPE_LEASE_OWNER",
+            "git push",
+            "git push origin main",
+            "git update-ref refs/heads/topic HEAD",
+            "git for-each-ref refs/locks/",
+            "git show-ref",
+        ):
+            p = self.run_bash(cmd, "bob")
+            self.assertEqual(decision(p), "allow", cmd + " -> " + p.stdout)
+
+    def test_raw_lock_ref_changes_are_denied(self):
+        self._plan_allowing("git", "bash")
+        for cmd in (
+            "git update-ref -d refs/locks/abc123",
+            "git update-ref refs/locks/abc123 HEAD",
+            "git update-ref --stdin",
+            "git update-ref $REF HEAD",
+            "git -C %s update-ref -d refs/locks/x" % self.repo.as_posix(),
+            "git push origin :refs/locks/abc",
+            "git push --delete origin refs/locks/abc",
+            "git push origin HEAD:refs/locks/abc",
+            "git fetch origin +refs/locks/*:refs/locks/*",
+            "git branch -D refs/locks/abc",
+            "git tag -d refs/locks/abc",
+            "git symbolic-ref refs/locks/abc refs/heads/x",
+            "git push origin $REFSPEC",
+            "bash -c 'git update-ref -d refs/locks/abc'",
+        ):
+            p = self.run_bash(cmd, "bob")
+            self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
+            self.assertIn("refs/locks", self.reason(p), cmd)
+
+    def test_writing_the_lock_ref_files_directly_is_denied(self):
+        git_dir = self.repo.resolve() / ".git"
+        for target in (git_dir / "refs" / "locks" / "abc", git_dir / "packed-refs"):
+            self.write_plan(target)
+            p = self.run_edit(target, "bob")
+            self.assertEqual(decision(p), "deny", p.stdout)
+            self.assertIn("ref store", self.reason(p))
+        self.write_plan(git_dir / "refs" / "locks" / "x")
+        q = self.run_bash("echo x > %s" % (git_dir / "refs" / "locks" / "x").as_posix(), "bob")
+        self.assertEqual(decision(q), "deny", q.stdout)
+
+    def test_lease_self_protection_is_off_without_lease_config(self):
+        self._plan_allowing("python3", "git")
+        sl = SCOPE_LEASE.as_posix()
+        p = self.run_bash("python3 %s acquire --owner alice" % sl, "bob",
+                          PLAN_GATE_SCOPE_LEASE="")
+        self.assertEqual(decision(p), "allow", p.stdout)
+
+    # --- identity anchor: the session's project dir, not wherever the hook runs -------
+    def test_claude_project_dir_is_the_identity_anchor(self):
+        wt_a = self._worktree("wt-anchor-a", "anchor-a")
+        wt_b = self._worktree("wt-anchor-b", "anchor-b")
+        shared = wt_a.resolve() / "shared.txt"
+        (self.plans / "active.md").write_text(
+            "---\nname: x\nstatus: active\nworktree_bypass: true\nallowed_paths:\n  - %s\n---\n"
+            % shared, encoding="utf-8")
+        env = dict(os.environ, SCOPE_LEASE_OWNER="")
+        subprocess.run([sys.executable, str(SCOPE_LEASE), "acquire", "--root", str(wt_a),
+                        "--source", "paths", "--lock-id", "la", "--paths", str(shared)],
+                       env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       stdin=subprocess.DEVNULL)
+        edit = {"tool_name": "Edit", "tool_input": {"file_path": str(shared)}}
+        # B's hook process runs in A's directory (a `cd`), but its session project is B's:
+        # B stays B and is denied.
+        p = run_gate(edit, self.plans, cwd=wt_a,
+                     extra_env=self.env("", CLAUDE_PROJECT_DIR=str(wt_b)))
+        self.assertEqual(decision(p), "deny", p.stdout)
+        # A's session project is A's even if the hook process runs elsewhere.
+        q = run_gate(edit, self.plans, cwd=wt_b,
+                     extra_env=self.env("", CLAUDE_PROJECT_DIR=str(wt_a)))
+        self.assertEqual(decision(q), "allow", q.stdout)
+
+    def test_payload_cwd_is_the_anchor_when_no_project_dir(self):
+        wt_a = self._worktree("wt-payload-a", "payload-a")
+        wt_b = self._worktree("wt-payload-b", "payload-b")
+        shared = wt_a.resolve() / "shared.txt"
+        self.write_plan(shared)
+        env = dict(os.environ, SCOPE_LEASE_OWNER="")
+        subprocess.run([sys.executable, str(SCOPE_LEASE), "acquire", "--root", str(wt_a),
+                        "--source", "paths", "--lock-id", "la", "--paths", str(shared)],
+                       env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       stdin=subprocess.DEVNULL)
+        edit = {"tool_name": "Edit", "tool_input": {"file_path": str(shared)},
+                "cwd": str(wt_b)}
+        p = run_gate(edit, self.plans, cwd=wt_a, extra_env=self.env(""))
+        self.assertEqual(decision(p), "deny", p.stdout)
 
     def test_many_targets_go_over_stdin_not_argv(self):
         names = [self.repo / ("f%04d_" % i + "x" * 100 + ".txt") for i in range(400)]
@@ -2515,6 +2657,7 @@ class ApprovalTests(unittest.TestCase):
         self.assertIn(str(GATE), r.replace('"', ""))
         self.assertIn(str(self.plan), r.replace('"', ""))
         self.assertIn("--log-dir", r)
+        self.assertIn("--plans-dir", r)
         self.assertIn(str(self.logs), r.replace('"', "").replace("'", ""))
         self.assertEqual(self.rows()[-1]["class"], "plan_not_approved")
 
