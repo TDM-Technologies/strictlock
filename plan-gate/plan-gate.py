@@ -55,6 +55,13 @@ CONFIGURATION (all via environment; no machine-specific defaults are baked in)
                             python/python3/py segment running one is a file write
                             to its argpos-th (1-based) positional argument, gated
                             like a `>` target. Malformed value fails closed.
+  PLAN_GATE_REQUIRE_APPROVAL  a plan is active only if `status: active` AND a
+                            human ran `plan-gate.py approve <plan.md>` on its exact
+                            bytes (an `approve` row in the decision log). Required
+                            whenever PLAN_GATE_LOG_DIR is set unless this is an
+                            explicit off/0/false/no; `on` without a log dir is a
+                            configuration error (deny). `approve` needs a TTY unless
+                            --no-tty-check; a gated command running it is denied.
   PLAN_GATE_SCOPE_LEASE     optional path to scope-lease.py: every file-write
                             target is looked up with `scope-lease.py holder`
                             before the plan check; a path held by another agent
@@ -526,25 +533,37 @@ def _log_decision(
         }
         if extra:
             row["extra"] = extra
-        with open(DECISIONS_LOG, "a+b") as fh:
-            with _Flock(fh):
-                row["prev"] = _read_prev_hash(fh)
-                row["h"] = _canonical_row_hash(row["prev"], row)
-                fh.seek(0, os.SEEK_END)
-                fh.write(
-                    (
-                        json.dumps(
-                            row,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            ensure_ascii=False,
-                        )
-                        + "\n"
-                    ).encode("utf-8")
-                )
-                fh.flush()
+        _append_row(row)
     except Exception:
         pass  # Never let logging failure break the gate.
+
+
+def _append_row(row: dict, durable: bool = False) -> None:
+    """Chain `row` onto the decision log under the advisory lock: sets `prev` and
+    `h`, appends one canonical JSON line. Raises on I/O failure (the decision
+    logger swallows that; `approve` must not). Caller has created LOGS_DIR."""
+    with open(DECISIONS_LOG, "a+b") as fh:
+        with _Flock(fh):
+            row["prev"] = _read_prev_hash(fh)
+            row["h"] = _canonical_row_hash(row["prev"], row)
+            fh.seek(0, os.SEEK_END)
+            fh.write(
+                (
+                    json.dumps(
+                        row,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            fh.flush()
+            if durable:
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
 
 
 def verify_log(path_arg: str | None) -> int:
@@ -570,6 +589,7 @@ def verify_log(path_arg: str | None) -> int:
     expected = _GENESIS
     problems: list[str] = []
     rows = 0
+    approvals: list = []
     for i, raw in enumerate(raw_lines, start=1):
         if not raw.strip():
             problems.append(f"line {i}: blank line (never written by the gate)")
@@ -585,6 +605,8 @@ def verify_log(path_arg: str | None) -> int:
             expected = hashlib.sha256(raw).hexdigest()
             continue
         rows += 1
+        if row.get("class") == _APPROVE_CLASS and row.get("surface") == _APPROVE_CLASS:
+            approvals.append((i, row))
         prev = row.get("prev")
         h = row.get("h")
         if prev != expected:
@@ -605,8 +627,199 @@ def verify_log(path_arg: str | None) -> int:
         print(f"verify-log: {p}: {len(problems)} problem(s) across {rows} row(s):")
         for msg in problems[:50]:
             print("  " + msg)
+    else:
+        print(f"verify-log: {p}: chain intact — {rows} row(s) verified.")
+    print(f"verify-log: {len(approvals)} plan approval(s) recorded"
+          + (":" if approvals else "."))
+    for i, row in approvals[:200]:
+        who = f"{row.get('os_user', '?')}"
+        gname, gmail = row.get("git_user_name", ""), row.get("git_user_email", "")
+        if gname or gmail:
+            who += f" (git: {gname} <{gmail}>)"
+        print(f"  line {i}: {row.get('ts', '?')} {row.get('plan', '?')} "
+              f"sha256 {str(row.get('sha256', ''))[:16]}… by {who} on "
+              f"{row.get('hostname', '?')}"
+              + (" [--no-tty-check]" if row.get("no_tty_check") == "true" else ""))
+    return 2 if problems else 0
+
+
+# --- plan approval ------------------------------------------------------------------
+# A plan is active only if it says `status: active` AND a human approved the exact
+# bytes: `plan-gate.py approve <plan.md>` (run in a terminal, never by a gated agent)
+# appends an `approve` row to the hash-chained decision log holding the plan name and
+# the sha256 of the whole file. Any later edit changes the hash and voids the approval.
+# Approval is required whenever PLAN_GATE_LOG_DIR is set, unless
+# PLAN_GATE_REQUIRE_APPROVAL is explicitly off/0/false/no; PLAN_GATE_REQUIRE_APPROVAL=on
+# without a log dir is a configuration error (the gate denies).
+_APPROVAL_OFF = ("off", "0", "false", "no")
+_APPROVE_CLASS = "approve"
+
+
+def _approval_mode():
+    """(required, config_error). Only an explicit off value disables approval while
+    PLAN_GATE_LOG_DIR is set; an explicit truthy value without a log dir is a
+    configuration error; anything else follows PLAN_GATE_LOG_DIR."""
+    v = os.environ.get("PLAN_GATE_REQUIRE_APPROVAL", "").strip().lower()
+    if v in _APPROVAL_OFF:
+        return False, None
+    if v in _TRUTHY:
+        if LOGS_DIR is None:
+            return True, (
+                "plan-gate: PLAN_GATE_REQUIRE_APPROVAL is on but PLAN_GATE_LOG_DIR is "
+                "not set. Approvals are recorded in the decision log, so approval mode "
+                "needs a log directory. Set PLAN_GATE_LOG_DIR, or turn "
+                "PLAN_GATE_REQUIRE_APPROVAL off. " + _BYPASS_HOWTO
+            )
+        return True, None
+    return LOGS_DIR is not None, None
+
+
+def _plan_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+_APPROVED_CACHE: list = []  # one-element cache, per process (one hook call)
+
+
+def _approved_set() -> set:
+    """{(plan file name, sha256 of its bytes)} for every `approve` row in the
+    decision log. Scans the raw log for the row marker first, so the cost on a big
+    log is one linear byte search plus a JSON parse per approve row. A row counts
+    only if its own hash verifies (cheap edit detection; `verify-log` checks the
+    whole chain)."""
+    if _APPROVED_CACHE:
+        return _APPROVED_CACHE[0]
+    found: set = set()
+    _APPROVED_CACHE.append(found)
+    if DECISIONS_LOG is None:
+        return found
+    try:
+        data = DECISIONS_LOG.read_bytes()
+    except OSError:
+        return found
+    needle = b'"class":"' + _APPROVE_CLASS.encode() + b'"'
+    pos = 0
+    while True:
+        i = data.find(needle, pos)
+        if i < 0:
+            break
+        s = data.rfind(b"\n", 0, i) + 1
+        e = data.find(b"\n", i)
+        if e < 0:
+            e = len(data)
+        pos = e + 1
+        try:
+            row = json.loads(data[s:e].decode("utf-8"))
+            if not isinstance(row, dict):
+                continue
+            if row.get("class") != _APPROVE_CLASS or row.get("surface") != _APPROVE_CLASS:
+                continue
+            body = {k: v for k, v in row.items() if k != "h"}
+            if _canonical_row_hash(str(row.get("prev")), body) != row.get("h"):
+                continue
+            found.add((str(row.get("plan", "")), str(row.get("sha256", ""))))
+        except Exception:
+            continue
+    return found
+
+
+def _git_config_value(cwd: Path, key: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "config", "--get", key],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+        return proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def approve_cli(argv: list[str]) -> int:
+    """`plan-gate.py approve <plan.md> [--no-tty-check]`: record that a human
+    approved this plan's exact bytes. Exit 0 ok, 2 usage / config problem, 3 refused
+    (no terminal), 1 failure."""
+    no_tty_check = False
+    positional: list[str] = []
+    for a in argv:
+        if a == "--no-tty-check":
+            no_tty_check = True
+        elif a.startswith("-") and a != "-":
+            print(f"approve: unknown option {a!r}. Usage: plan-gate.py approve "
+                  f"<plan.md> [--no-tty-check]", file=sys.stderr)
+            return 2
+        else:
+            positional.append(a)
+    if len(positional) != 1:
+        print("Usage: plan-gate.py approve <plan.md> [--no-tty-check]", file=sys.stderr)
         return 2
-    print(f"verify-log: {p}: chain intact — {rows} row(s) verified.")
+    if LOGS_DIR is None or DECISIONS_LOG is None:
+        print("approve: PLAN_GATE_LOG_DIR is not set. Approvals are recorded in the "
+              "decision log, so it must point at the log directory.", file=sys.stderr)
+        return 2
+    try:
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+    except Exception:
+        interactive = False
+    if not interactive and not no_tty_check:
+        print("approve: refusing to run without an interactive terminal on stdin (an "
+              "agent tool call has none). Run it yourself in a terminal; for CI or "
+              "scripted approval pass --no-tty-check (the row records that you did).",
+              file=sys.stderr)
+        return 3
+    plan = Path(positional[0]).expanduser()
+    if not plan.is_file() and PLANS_DIR is not None and (PLANS_DIR / positional[0]).is_file():
+        plan = PLANS_DIR / positional[0]
+    try:
+        raw = plan.read_bytes()
+    except OSError as exc:
+        print(f"approve: cannot read {plan}: {exc}", file=sys.stderr)
+        return 1
+    plan_name = plan.name  # the name the plans-dir scan will see, even for a symlink
+    plan = plan.resolve()
+    text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+    status = str(parse_frontmatter(text).get("status", "")).strip().lower()
+    digest = _plan_sha256(raw)
+    try:
+        import getpass
+        os_user = getpass.getuser()
+    except Exception:
+        os_user = os.environ.get("USER") or os.environ.get("USERNAME") or ""
+    try:
+        import socket
+        host = socket.gethostname()
+    except Exception:
+        host = ""
+    row = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "decision": _APPROVE_CLASS,
+        "surface": _APPROVE_CLASS,
+        "tool": "plan-gate approve",
+        "target": _safe_str(str(plan), 2048),
+        "command": "",
+        "class": _APPROVE_CLASS,
+        "reason": _safe_str(f"approved {plan_name}", 300),
+        "plan": _safe_str(plan_name, 300),
+        "cwd": _safe_str(os.getcwd(), 1024),
+        "sha256": digest,
+        "os_user": _safe_str(os_user, 200),
+        "git_user_name": _safe_str(_git_config_value(plan.parent, "user.name"), 200),
+        "git_user_email": _safe_str(_git_config_value(plan.parent, "user.email"), 200),
+        "hostname": _safe_str(host, 200),
+        "no_tty_check": "true" if no_tty_check else "false",
+    }
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        _append_row(row, durable=True)
+    except Exception as exc:
+        print(f"approve: could not write the approval to {DECISIONS_LOG}: {exc}",
+              file=sys.stderr)
+        return 1
+    print(f"approved {plan_name} (sha256 {digest}) as {row['os_user']} on {row['hostname']}.")
+    if status != "active":
+        print(f"note: the plan's status is {status or '(none)'!r}, not 'active'. Changing "
+              f"it later edits the file and voids this approval; approve again after the "
+              f"edit.", file=sys.stderr)
     return 0
 
 
@@ -1431,8 +1644,17 @@ def parse_frontmatter(text: str) -> dict:
     return result
 
 
-def find_active_plans(worktree_root: Path | None = None) -> list[tuple[Path, dict]]:
+def find_active_plans(
+    worktree_root: Path | None = None, approval: str = "enforce"
+) -> list[tuple[Path, dict]]:
     """Return active plans, optionally filtered by which sit under worktree_root.
+
+    Approval (approval mode on, see _approval_mode): a plan counts as active only
+    if it says `status: active` AND the decision log holds an `approve` row for
+    this plan name and the plan file's current bytes. approval="enforce" (default)
+    returns only those; approval="unapproved" returns the `status: active` plans
+    that FAIL that test (for the deny message); approval="ignore" skips the test.
+    With approval mode off every status-active plan counts, as before.
 
     Per-worktree active invariant: "exactly one active plan per worktree" instead
     of "globally." This unblocks N concurrent agent sessions in different
@@ -1460,31 +1682,49 @@ def find_active_plans(worktree_root: Path | None = None) -> list[tuple[Path, dic
     """
     if PLANS_DIR is None or not PLANS_DIR.is_dir():
         return []
+    approval_required, _cfg_err = _approval_mode()
+    if approval == "ignore":
+        approval_required = False
     actives: list[tuple[Path, dict]] = []
     wt_norm = (norm(str(worktree_root)) + "/") if worktree_root is not None else None
     for md in PLANS_DIR.glob("*.md"):
         try:
-            text = md.read_text(encoding="utf-8", errors="replace")
+            raw = md.read_bytes()
         except OSError:
             continue
+        # One read feeds both the parse and the approval hash, so the bytes that
+        # were approved are the bytes that are parsed. Newlines are normalized the
+        # way text mode would (CRLF / CR -> LF); the hash uses the raw bytes.
+        text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
         fm = parse_frontmatter(text)
         status = str(fm.get("status", "")).strip().lower()
         if status != "active":
             continue
+        claimed = False
         if worktree_root is None:
-            actives.append((md, fm))
+            claimed = True
+        elif str(fm.get("worktree_bypass", "")).strip().lower() == "true":
+            claimed = True
+        else:
+            for ap in fm.get("allowed_paths") or []:
+                if not Path(str(ap)).is_absolute():
+                    continue
+                resolved = resolve_allowed_path(
+                    str(ap), repo_root=None, worktree_root=worktree_root)
+                if norm(resolved).startswith(wt_norm):
+                    claimed = True
+                    break
+        if not claimed:
             continue
-        if str(fm.get("worktree_bypass", "")).strip().lower() == "true":
-            actives.append((md, fm))
-            continue
-        allowed_paths = fm.get("allowed_paths") or []
-        for ap in allowed_paths:
-            if not Path(str(ap)).is_absolute():
+        if approval_required or approval == "unapproved":
+            is_approved = (md.name, hashlib.sha256(raw).hexdigest()) in _approved_set()
+            if approval == "unapproved":
+                if not is_approved and _approval_mode()[0]:
+                    actives.append((md, fm))
                 continue
-            resolved = resolve_allowed_path(str(ap), repo_root=None, worktree_root=worktree_root)
-            if norm(resolved).startswith(wt_norm):
-                actives.append((md, fm))
-                break
+            if not is_approved:
+                continue
+        actives.append((md, fm))
     return actives
 
 
@@ -1749,11 +1989,8 @@ def _is_python_prog(tok: str) -> bool:
     return bool(_PYTHON_PROG_RE.match(b))
 
 
-def _writer_invocation(tokens: list[str]):
-    """If `tokens` (one simple command) runs a listed writer script via a python
-    interpreter, return (script_basename_lc, args_after_script); else None.
-    `python -m mod`, `python -c code`, a non-listed script, or a program that is
-    not python are all None (unaffected)."""
+def _program_index(tokens: list[str]) -> int:
+    """Index of the program word, past env assignments / `&` / `.` / wrappers."""
     i = 0
     n = len(tokens)
     while i < n and (
@@ -1762,16 +1999,26 @@ def _writer_invocation(tokens: list[str]):
         or _basename_lc(tokens[i]) in _COMMAND_WRAPPERS
     ):
         i += 1
+    return i
+
+
+def _python_invocation(tokens: list[str]):
+    """None if `tokens` (one simple command) is not a python interpreter call.
+    Else (script_token, args_after_script), where script_token is None when python
+    is not running a script file (`-m mod`, `-c code`, script on stdin, or no
+    script) and args_after_script is then every word after the interpreter."""
+    i = _program_index(tokens)
+    n = len(tokens)
     if i >= n or not _is_python_prog(tokens[i]):
         return None
     j = i + 1
     while j < n:
         t = tokens[j]
         if t == "-":
-            return None  # script on stdin
+            return None, tokens[j + 1:]  # script on stdin
         if t.startswith("-") and not t.startswith("--"):
             if t[1:2] in ("m", "c"):
-                return None  # -m module / -c code: not a script file
+                return None, tokens[j + 1:]  # -m module / -c code: not a script file
             j += 2 if t in ("-W", "-X") else 1  # -u, -B, -3, -3.11, -W arg ...
             continue
         if t.startswith("--"):
@@ -1779,11 +2026,107 @@ def _writer_invocation(tokens: list[str]):
             continue
         break
     if j >= n:
+        return None, []
+    return tokens[j], tokens[j + 1:]
+
+
+def _writer_invocation(tokens: list[str]):
+    """If `tokens` (one simple command) runs a listed writer script via a python
+    interpreter, return (script_basename_lc, args_after_script); else None.
+    `python -m mod`, `python -c code`, a non-listed script, or a program that is
+    not python are all None (unaffected)."""
+    inv = _python_invocation(tokens)
+    if inv is None or inv[0] is None:
         return None
-    base = _basename_lc(tokens[j])
+    base = _basename_lc(inv[0])
     if base not in WRITER_SCRIPTS:
         return None
-    return base, tokens[j + 1:]
+    return base, inv[1]
+
+
+# --- plan approval is a human act (the gate refuses to run it for an agent) --------
+# Programs that run another command line or script given as text; if their words
+# mention plan-gate and approve, the gate cannot rule out a self-approval.
+_RUNNER_PROGS = (
+    "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash", "busybox",
+    "eval", "xargs", "pwsh", "powershell", "cmd", "node", "nodejs", "ruby", "perl",
+    "php", "deno", "bun", "script", "ssh", "su", "watch", "timeout", "setsid",
+    "find", "parallel", "at", "batch", "start", "start-process", "invoke-expression",
+    "iex", "invoke-command", "icm",
+)
+_EXPANSION_CHARS = "$`*?[{"
+_APPROVE_WORD_RE = re.compile(r"(?<![A-Za-z0-9_-])approve(?![A-Za-z0-9_-])", re.IGNORECASE)
+
+
+def _mentions_gate_approve(text: str) -> bool:
+    low = text.lower()
+    return "plan-gate" in low and bool(_APPROVE_WORD_RE.search(low))
+
+
+def _is_gate_script(tok: str) -> bool:
+    b = _basename_lc(tok)
+    return b in ("plan-gate.py", "plan-gate")
+
+
+def _approve_self_check(raw_segs: list[str], shell: str):
+    """Deny reason when a Bash/PowerShell command would run `plan-gate.py approve`
+    (or cannot be ruled out): interpreter + plan-gate.py + `approve` in any spelling
+    the writer-script detection recognizes, plan-gate.py executed directly, an
+    unresolvable script word next to `approve`, or a shell/eval/interpreter -c
+    style runner whose words mention plan-gate and approve. Best-effort for
+    indirection through other scripts; the TTY requirement and the protected log
+    directory are the barriers that do not depend on parsing."""
+    why = (
+        "plan-gate: this command would run `plan-gate.py approve` (or could not be "
+        "ruled out). Approving a plan is a human act: run it yourself in a terminal; "
+        "an agent may not approve its own plan."
+    )
+    for raw in raw_segs:
+        try:
+            if shell == "ps":
+                seglists = _tokenize_ps(raw)
+            else:
+                seglists = [shlex.split(raw)]
+        except ValueError:
+            if _mentions_gate_approve(raw):
+                return why
+            continue
+        for toks in seglists:
+            if not toks:
+                continue
+            i = _program_index(toks)
+            if i >= len(toks):
+                continue
+            prog = toks[i]
+            rest = toks[i + 1:]
+            has_approve = any(a.lower() == "approve" for a in rest)
+            prog_b = _basename_lc(prog)
+            if prog_b.endswith(".exe"):
+                prog_b = prog_b[:-4]
+            inv = _python_invocation(toks)
+            if inv is not None:
+                script, sargs = inv
+                if script is None:
+                    # -c / -m / stdin script: text we cannot read.
+                    if any(a.lower() == "approve" for a in sargs) and (
+                            any(t == "-" for t in toks[i + 1:i + 6])):
+                        return why
+                    if _mentions_gate_approve(" ".join(toks)):
+                        return why
+                    continue
+                s_unsure = any(a.lower() == "approve" for a in sargs) or any(
+                    ch in a for a in sargs for ch in "$`")
+                if s_unsure and (_is_gate_script(script)
+                                 or any(ch in script for ch in _EXPANSION_CHARS)):
+                    return why
+                continue
+            unsure = has_approve or any(ch in a for a in rest for ch in "$`")
+            if unsure and (_is_gate_script(prog)
+                           or any(ch in prog for ch in _EXPANSION_CHARS)):
+                return why
+            if prog_b in _RUNNER_PROGS and _mentions_gate_approve(" ".join(rest)):
+                return why
+    return None
 
 
 def _writer_target(base: str, args: list[str]):
@@ -2271,6 +2614,9 @@ def main() -> None:
                 "after parsing. Failing closed. Command: " + cmd[:200],
                 class_="unparseable_command",
             )
+        approve_reason = _approve_self_check(all_segs, "bash")
+        if approve_reason:
+            gated_deny(approve_reason, class_="approve_self_protect")
         has_cd = any(_is_cd_like(sg) for sg in all_segs)
         # Redirection-as-write: each target is a file write, gated like
         # Edit/Write (log self-protection -> always-writable -> allowed_paths).
@@ -2323,6 +2669,9 @@ def main() -> None:
                 "plan-gate: PowerShell tool_input has no 'command'.",
                 class_="empty_command",
             )
+        approve_reason = _approve_self_check([cmd], "ps")
+        if approve_reason:
+            gated_deny(approve_reason, class_="approve_self_protect")
         for prefix in READ_ONLY_PS_PREFIXES:
             p = prefix.rstrip()
             if cmd == p or cmd.startswith(prefix):
@@ -2399,7 +2748,22 @@ def main() -> None:
         repo_root, worktree_root = find_repo_and_worktree_roots(cwd)
 
     # === Active-plan check ===
+    approval_required, approval_cfg_error = _approval_mode()
+    if approval_cfg_error:
+        gated_deny(approval_cfg_error, class_="approval_config")
     actives = find_active_plans(worktree_root=worktree_root)
+    if not actives and approval_required:
+        # A plan can say `status: active` and still not count: nobody approved
+        # these exact bytes (or it was edited after approval). Say so, by name.
+        unapproved = find_active_plans(worktree_root=worktree_root, approval="unapproved")
+        if unapproved:
+            first = unapproved[0][0]
+            more = (f" (and {len(unapproved) - 1} more)" if len(unapproved) > 1 else "")
+            gated_deny(
+                f"plan-gate: plan {first.name} is marked active but not approved (or "
+                f"changed since approval){more}. Run: plan-gate.py approve {first}",
+                class_="plan_not_approved",
+            )
     if not actives:
         if worktree_root is not None:
             # The REAL no-claim path: find_active_plans filtered every active
@@ -2615,6 +2979,10 @@ if __name__ == "__main__":
     # reads tool-use JSON from stdin as usual.
     if len(sys.argv) >= 2 and sys.argv[1] == "verify-log":
         sys.exit(verify_log(sys.argv[2] if len(sys.argv) > 2 else None))
+    # `plan-gate.py approve <plan.md> [--no-tty-check]` records a human's approval
+    # of the plan's exact bytes in the decision log (see approve_cli).
+    if len(sys.argv) >= 2 and sys.argv[1] == "approve":
+        sys.exit(approve_cli(sys.argv[2:]))
     try:
         main()
     except SystemExit:

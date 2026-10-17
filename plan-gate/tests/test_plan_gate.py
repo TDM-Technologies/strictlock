@@ -9,6 +9,7 @@ Run:  python plan-gate/tests/test_plan_gate.py
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -58,6 +59,9 @@ def run_gate(
     env["PLAN_GATE_MCP_WRITE_TOOLS"] = ""
     env["PLAN_GATE_SCOPE_LEASE"] = ""
     env["PLAN_GATE_REQUIRE_LEASE"] = ""
+    # Approval is required whenever a log dir is set; the legacy tests stage
+    # unapproved plans, so they opt out (ApprovalTests overrides this).
+    env["PLAN_GATE_REQUIRE_APPROVAL"] = "off"
     # Test-only override: scan our staged plans dir, never the real one.
     env["_PLAN_GATE_TEST_PLANS_DIR"] = str(plans_dir)
     if extra_env:
@@ -1913,6 +1917,335 @@ class ScopeLeaseTests(unittest.TestCase):
         self.lease("alice", self.repo / nfc)
         p = self.run_edit(self.repo / nfd, "bob")
         self.assertEqual(decision(p), "deny", p.stdout)
+
+
+class ApprovalTests(unittest.TestCase):
+    """Plan approval: a plan is active only if `status: active` AND the decision
+    log holds an `approve` row for its exact bytes (required whenever
+    PLAN_GATE_LOG_DIR is set, unless PLAN_GATE_REQUIRE_APPROVAL is off)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.plans = root / "plans"
+        self.plans.mkdir()
+        self.logs = root / "logs"
+        self.work = root / "work"
+        self.work.mkdir()
+        self.allowed = self.work / "allowed.txt"
+        self.plan = self.plans / "active.md"
+        write_active_plan(self.plans, str(self.allowed))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def cli(self, *args, log_dir="default", env_extra=None, stdin=subprocess.DEVNULL):
+        env = dict(os.environ)
+        env["PLAN_GATE_LOG_DIR"] = str(self.logs) if log_dir == "default" else (log_dir or "")
+        env["PLAN_GATE_REQUIRE_APPROVAL"] = ""
+        env["_PLAN_GATE_TEST_PLANS_DIR"] = str(self.plans)
+        env.update(env_extra or {})
+        return subprocess.run([sys.executable, str(GATE), *args], stdin=stdin,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              env=env, cwd=str(self.work))
+
+    def approve(self, *extra):
+        return self.cli("approve", str(self.plan), "--no-tty-check", *extra)
+
+    def edit(self, path=None, **kw):
+        kw.setdefault("log_dir", self.logs)
+        kw.setdefault("cwd", self.work)
+        env = {"PLAN_GATE_REQUIRE_APPROVAL": ""}
+        env.update(kw.pop("extra_env", None) or {})
+        return run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(path or self.allowed)}},
+                        self.plans, extra_env=env, **kw)
+
+    def bash(self, cmd, **kw):
+        kw.setdefault("log_dir", self.logs)
+        kw.setdefault("cwd", self.work)
+        env = {"PLAN_GATE_REQUIRE_APPROVAL": ""}
+        env.update(kw.pop("extra_env", None) or {})
+        return run_gate({"tool_name": "Bash", "tool_input": {"command": cmd}},
+                        self.plans, extra_env=env, **kw)
+
+    def reason(self, proc):
+        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def rows(self):
+        f = self.logs / "plan-gate-decisions.log"
+        return [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    # --- the core loop -------------------------------------------------------------
+    def test_unapproved_active_plan_is_denied_with_how_to_approve(self):
+        p = self.edit()
+        self.assertEqual(decision(p), "deny", p.stdout)
+        r = self.reason(p)
+        self.assertIn("marked active but not approved (or changed since approval)", r)
+        self.assertIn("plan-gate.py approve", r)
+        self.assertIn("active.md", r)
+        self.assertEqual(self.rows()[-1]["class"], "plan_not_approved")
+
+    def test_approve_then_allow(self):
+        a = self.approve()
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertIn(hashlib.sha256(self.plan.read_bytes()).hexdigest(), a.stdout)
+        self.assertEqual(decision(self.edit()), "allow")
+        self.assertEqual(decision(self.edit(self.work / "other.txt")), "deny")  # plan still rules
+
+    def test_edit_after_approve_voids_it_and_reapprove_restores_it(self):
+        self.assertEqual(self.approve().returncode, 0)
+        self.plan.write_text(self.plan.read_text(encoding="utf-8") + "\nsneaky widening\n",
+                             encoding="utf-8")
+        p = self.edit()
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("changed since approval", self.reason(p))
+        self.assertEqual(self.approve().returncode, 0)
+        self.assertEqual(decision(self.edit()), "allow")
+
+    def test_a_single_byte_changes_the_hash(self):
+        self.assertEqual(self.approve().returncode, 0)
+        data = self.plan.read_bytes()
+        self.plan.write_bytes(data.replace(b"test body", b"test bodz"))
+        self.assertEqual(decision(self.edit()), "deny")
+
+    def test_approval_is_per_plan_name(self):
+        self.assertEqual(self.approve().returncode, 0)
+        copy = self.plans / "copy.md"
+        copy.write_bytes(self.plan.read_bytes())
+        self.plan.write_text("---\nname: x\nstatus: archived\n---\n", encoding="utf-8")
+        p = self.edit()
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("copy.md", self.reason(p))
+
+    def test_unapproved_draft_does_not_disturb_an_approved_plan(self):
+        self.assertEqual(self.approve().returncode, 0)
+        (self.plans / "draft.md").write_text(
+            "---\nname: draft\nstatus: active\nallowed_paths:\n  - %s\n---\n" % self.allowed,
+            encoding="utf-8")
+        self.assertEqual(decision(self.edit()), "allow")  # no multiple_active_plans deny
+
+    def test_approve_accepts_plan_name_relative_to_plans_dir(self):
+        a = self.cli("approve", "active.md", "--no-tty-check")
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertEqual(decision(self.edit()), "allow")
+
+    def test_crlf_plan_approves_and_parses(self):
+        self.plan.write_bytes(self.plan.read_bytes().replace(b"\n", b"\r\n"))
+        self.assertEqual(self.approve().returncode, 0)
+        self.assertEqual(decision(self.edit()), "allow")
+
+    # --- the row ---------------------------------------------------------------------
+    def test_row_carries_identity_hash_and_flag(self):
+        subprocess.run(["git", "init", "-q", str(self.plans)], check=True)
+        _git(self.plans, "config", "user.name", "Pat Approver")
+        _git(self.plans, "config", "user.email", "pat@example.com")
+        self.assertEqual(self.approve().returncode, 0)
+        (row,) = [r for r in self.rows() if r["class"] == "approve"]
+        self.assertEqual(row["plan"], "active.md")
+        self.assertEqual(row["sha256"], hashlib.sha256(self.plan.read_bytes()).hexdigest())
+        self.assertEqual(row["git_user_name"], "Pat Approver")
+        self.assertEqual(row["git_user_email"], "pat@example.com")
+        self.assertEqual(row["no_tty_check"], "true")
+        for key in ("ts", "os_user", "hostname", "target", "prev", "h"):
+            self.assertIn(key, row)
+        self.assertTrue(row["ts"].endswith("Z"))
+
+    def test_git_identity_is_empty_when_unavailable(self):
+        self.assertEqual(self.approve().returncode, 0)
+        (row,) = [r for r in self.rows() if r["class"] == "approve"]
+        self.assertIn("git_user_name", row)
+        self.assertIn("git_user_email", row)
+
+    def test_approve_rows_share_the_chain_and_verify(self):
+        self.edit()  # a normal decision row first
+        self.assertEqual(self.approve().returncode, 0)
+        self.edit()
+        v = self.cli("verify-log")
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+        self.assertIn("chain intact", v.stdout)
+        self.assertIn("1 plan approval(s) recorded", v.stdout)
+        self.assertIn("active.md", v.stdout)
+
+    def test_verify_log_flags_a_tampered_approve_row(self):
+        self.assertEqual(self.approve().returncode, 0)
+        log = self.logs / "plan-gate-decisions.log"
+        text = log.read_text(encoding="utf-8")
+        digest = hashlib.sha256(self.plan.read_bytes()).hexdigest()
+        log.write_text(text.replace(digest, "0" * 64), encoding="utf-8")
+        v = self.cli("verify-log")
+        self.assertEqual(v.returncode, 2, v.stdout)
+        self.assertIn("row hash invalid", v.stdout)
+        self.assertIn("1 plan approval(s) recorded", v.stdout)
+
+    def test_a_forged_row_with_a_bad_hash_is_not_honored(self):
+        self.logs.mkdir()
+        digest = hashlib.sha256(self.plan.read_bytes()).hexdigest()
+        forged = {"class": "approve", "surface": "approve", "plan": "active.md",
+                  "sha256": digest, "prev": "0" * 64, "h": "f" * 64}
+        (self.logs / "plan-gate-decisions.log").write_text(
+            json.dumps(forged, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        self.assertEqual(decision(self.edit()), "deny")
+
+    def test_deny_rows_still_logged_after_approval_rows(self):
+        self.assertEqual(self.approve().returncode, 0)
+        self.edit(self.work / "other.txt")
+        self.assertEqual(self.rows()[-1]["decision"], "deny")
+        self.assertEqual(self.cli("verify-log").returncode, 0)
+
+    # --- who may run approve ---------------------------------------------------------
+    def test_approve_refuses_without_a_terminal(self):
+        a = self.cli("approve", str(self.plan))
+        self.assertEqual(a.returncode, 3)
+        self.assertIn("interactive terminal", a.stderr)
+        self.assertIn("--no-tty-check", a.stderr)
+        self.assertFalse((self.logs / "plan-gate-decisions.log").exists())
+        self.assertEqual(decision(self.edit()), "deny")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "openpty"), "needs a pty")
+    def test_approve_succeeds_on_a_terminal_and_records_no_flag(self):
+        master, slave = os.openpty()
+        try:
+            a = self.cli("approve", str(self.plan), stdin=slave)
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(a.returncode, 0, a.stderr)
+        (row,) = [r for r in self.rows() if r["class"] == "approve"]
+        self.assertEqual(row["no_tty_check"], "false")
+        self.assertEqual(decision(self.edit()), "allow")
+
+    def test_approve_needs_a_log_dir(self):
+        a = self.cli("approve", str(self.plan), "--no-tty-check", log_dir="")
+        self.assertNotEqual(a.returncode, 0)
+        self.assertIn("PLAN_GATE_LOG_DIR", a.stderr)
+
+    def test_approve_usage_errors(self):
+        self.assertEqual(self.cli("approve").returncode, 2)
+        self.assertEqual(self.cli("approve", str(self.plan), "--bogus").returncode, 2)
+        self.assertNotEqual(self.cli("approve", str(self.work / "missing.md"),
+                                     "--no-tty-check").returncode, 0)
+
+    def test_gated_agent_cannot_run_approve(self):
+        self.assertEqual(self.approve().returncode, 0)
+        plan = self.plan.read_text(encoding="utf-8").replace(
+            "  - npm test", "  - npm test\n  - python3 \n  - bash \n  - env \n  - /opt")
+        self.plan.write_text(plan, encoding="utf-8")
+        self.assertEqual(self.approve().returncode, 0)  # re-approve the widened plan
+        gate = "/opt/strictlock/plan-gate/plan-gate.py"
+        for cmd in (
+            "python3 %s approve p.md" % gate,
+            "PYTHONUTF8=1 python %s approve p.md" % gate,
+            "env python3 %s approve p.md" % gate,
+            "python3 -u %s approve p.md --no-tty-check" % gate,
+            "py -3 %s approve p.md" % gate,
+            "python3.12 C:/tools/PLAN-GATE.PY approve p.md",
+            "python3 \"%s\" approve p.md" % gate,
+            "cd /opt && python3 plan-gate.py approve p.md",
+            "echo ok; python3 %s approve p.md" % gate,
+            "%s approve p.md" % gate,
+            "/opt/plan-gate approve p.md",
+            "python3 $GATE approve p.md",
+            "python3 ${HOME}/x approve p.md",
+            "python3 %s $SUB p.md" % gate,
+            "python3 %s `echo approve` p.md" % gate,
+            "bash -c 'python3 %s approve p.md'" % gate,
+            "bash -c \"python3 plan-gate.py approve p.md\"",
+            "cat %s | python3 - approve p.md" % gate,
+            "python3 -c 'import runpy; runpy.run_path(\"plan-gate.py\")' approve",
+            "script -q /dev/null python3 %s approve p.md" % gate,
+            "echo $(python3 %s approve p.md)" % gate,
+        ):
+            p = self.bash(cmd)
+            self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
+            self.assertEqual(self.rows()[-1]["class"], "approve_self_protect", cmd)
+
+    def test_approve_denied_even_with_no_plan_and_approval_off(self):
+        self.plan.unlink()
+        p = self.bash("python3 /opt/plan-gate.py approve p.md",
+                      extra_env={"PLAN_GATE_REQUIRE_APPROVAL": "off"})
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("human act", self.reason(p))
+
+    def test_powershell_approve_is_denied(self):
+        for cmd in ("python C:\\tools\\plan-gate.py approve p.md",
+                    "& python C:\\tools\\plan-gate.py approve p.md",
+                    "Get-ChildItem; python plan-gate.py approve p.md",
+                    "powershell -Command \"python plan-gate.py approve p.md\""):
+            p = run_gate({"tool_name": "PowerShell", "tool_input": {"command": cmd}},
+                         self.plans, cwd=self.work, log_dir=self.logs,
+                         extra_env={"PLAN_GATE_REQUIRE_APPROVAL": ""})
+            self.assertEqual(decision(p), "deny", cmd)
+
+    def test_other_mentions_of_plan_gate_and_approve_are_not_blocked(self):
+        self.assertEqual(self.approve().returncode, 0)
+        plan = self.plan.read_text(encoding="utf-8").replace(
+            "  - npm test", "  - npm test\n  - git commit\n  - python3 ")
+        self.plan.write_text(plan, encoding="utf-8")
+        self.assertEqual(self.approve().returncode, 0)
+        for cmd in ('git commit -m "docs: plan-gate approve flow"',
+                    'echo "run plan-gate.py approve yourself"',
+                    "python3 /opt/plan-gate.py verify-log",
+                    "python3 other.py approve p.md"):
+            p = self.bash(cmd)
+            self.assertEqual(decision(p), "allow", cmd + " -> " + p.stdout)
+
+    def test_agent_cannot_write_the_log_or_forge_a_row(self):
+        self.assertEqual(self.approve().returncode, 0)
+        log = self.logs / "plan-gate-decisions.log"
+        p = self.edit(log)
+        self.assertEqual(decision(p), "deny")
+        q = self.bash("echo x >> %s" % log)
+        self.assertEqual(decision(q), "deny")
+
+    # --- switches -------------------------------------------------------------------
+    def test_require_approval_off_values_restore_legacy_behavior(self):
+        for v in ("off", "0", "false", "no", "OFF", " No "):
+            p = self.edit(extra_env={"PLAN_GATE_REQUIRE_APPROVAL": v})
+            self.assertEqual(decision(p), "allow", v + " -> " + p.stdout)
+
+    def test_only_an_explicit_off_disables_approval(self):
+        for v in ("", "on", "maybe", "disabled", "2"):
+            p = self.edit(extra_env={"PLAN_GATE_REQUIRE_APPROVAL": v})
+            self.assertEqual(decision(p), "deny", v)
+
+    def test_no_log_dir_is_legacy_behavior(self):
+        p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.allowed)}},
+                     self.plans, cwd=self.work, extra_env={"PLAN_GATE_REQUIRE_APPROVAL": ""})
+        self.assertEqual(decision(p), "allow")
+
+    def test_require_approval_on_without_log_dir_is_a_config_error(self):
+        p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.allowed)}},
+                     self.plans, cwd=self.work,
+                     extra_env={"PLAN_GATE_REQUIRE_APPROVAL": "on"})
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("PLAN_GATE_LOG_DIR", self.reason(p))
+
+    def test_bypass_still_works(self):
+        p = self.edit(extra_env={"PLAN_GATE_BYPASS": "on"})
+        self.assertEqual(decision(p), "allow")
+
+    def test_read_only_commands_and_always_writable_dirs_need_no_approval(self):
+        self.assertEqual(decision(self.bash("git status")), "allow")
+        p = self.edit(self.plans / "new-draft.md",
+                      extra_env={"PLAN_GATE_ALWAYS_WRITABLE": str(self.plans)})
+        self.assertEqual(decision(p), "allow")  # agents may keep drafting plans
+
+    def test_decision_rows_stay_fast_to_scan_with_a_large_log(self):
+        self.assertEqual(self.approve().returncode, 0)
+        log = self.logs / "plan-gate-decisions.log"
+        # 20k chained filler rows after the approval: a scan must still find it.
+        fh = log.open("ab")
+        prev = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["h"]
+        for n in range(20000):
+            row = {"class": "allowed_paths", "decision": "allow", "surface": "file",
+                   "target": "/x/%d" % n, "prev": prev}
+            canon = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            row["h"] = hashlib.sha256((prev + "\n" + canon).encode("utf-8")).hexdigest()
+            prev = row["h"]
+            fh.write((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        fh.close()
+        self.assertEqual(self.cli("verify-log").returncode, 0)
+        self.assertEqual(decision(self.edit()), "allow")
 
 
 if __name__ == "__main__":

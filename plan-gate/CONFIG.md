@@ -13,6 +13,7 @@ everything.
 | `PLAN_GATE_ALWAYS_WRITABLE` | no | `os.pathsep`-separated list of directories that are *always* writable regardless of plan state. Intended for the plans dir itself and any agent-memory dir that never ships. Same blast radius as plan files — keep it tight. |
 | `PLAN_GATE_LOG_DIR` | no | Directory for the append-only, hash-chained decision log (`plan-gate-decisions.log`). This log is your audit trail; if unset, no log is written. |
 | `PLAN_GATE_LOG_DECISIONS` | no | `all` (default) records every decision on a gated surface, allow and deny; `deny` records denials plus emergency-bypass rows only. |
+| `PLAN_GATE_REQUIRE_APPROVAL` | no | Plan approval (see [Plan approval](#plan-approval)). Required **whenever `PLAN_GATE_LOG_DIR` is set**; only an explicit `off` / `0` / `false` / `no` (case-insensitive) turns it off. Explicit `on` / `1` / `true` / `yes` with no log dir is a configuration error (every gated call that needs a plan is denied with a message). Unset, or any other value: follows `PLAN_GATE_LOG_DIR`. |
 | `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated MCP tools that modify external state. Each entry is `tool` (a bare name: **default-denied**, arguments never read) or `tool:arg` / `tool:arg1+arg2` (the argument(s) that hold target paths; see below). |
 | `PLAN_GATE_WRITER_SCRIPTS` | no | Extra "writer scripts", comma-separated `name.py:argpos`. A Bash/PowerShell command that runs `python`/`python3`/`py` on a listed script is treated as a file write to that script's target argument and gated like a `>` redirect target (see below). `atomic-write.py:1` is built in. A malformed value **fails closed**. |
 | `PLAN_GATE_SCOPE_LEASE` | no | Path to `scope-lease.py`. When set, every file-write target (Edit/Write/NotebookEdit `file_path`, Bash redirect targets, writer-script targets, MCP path arguments) is looked up with `scope-lease.py holder` before the plan check; a path leased by another agent is denied (see [scope-lease honored](#scope-lease-honored)). Unset: no lookup, no subprocess. |
@@ -73,6 +74,48 @@ segment must still be admitted by `allowed_commands`; the two checks are indepen
   `PLAN_GATE_BYPASS` is set. Read-only commands are not affected.
 - Decision-log class for these denials: `writer_script` (or `log_self_protect` for a log-dir
   target).
+
+## Plan approval
+
+A plan is active only if it says `status: active` **and** the decision log holds an `approve`
+row for that plan's name and the sha256 of its **whole file as it is now**. Any edit after
+approval (one byte, including the `status` line) voids it.
+
+```
+python plan-gate.py approve <plan.md> [--no-tty-check]
+```
+
+- Run it yourself, in a terminal. It reads `PLAN_GATE_LOG_DIR` (required; without it the
+  command exits nonzero). It **refuses without an interactive terminal on stdin** (exit 3)
+  unless `--no-tty-check` is given (CI / scripted approval); the flag is recorded on the row.
+- `<plan.md>` is a path, or a file name inside `PLAN_GATE_PLANS_DIR`. A plan's approval is tied
+  to its **file name** and its bytes (a renamed or copied file needs its own approval).
+- The row is appended to the same hash-chained log under the same lock. Fields (all strings):
+  the usual `ts`, `decision` / `surface` / `class` = `approve`, `tool` = `plan-gate approve`,
+  `target` (absolute plan path), `plan` (file name), `cwd`, plus `sha256`, `os_user`,
+  `git_user_name`, `git_user_email` (from `git config` in the plan's directory; empty if
+  unavailable), `hostname` and `no_tty_check` (`"true"` / `"false"`).
+- An unapproved `status: active` plan is **inert** (it does not count toward the one-active
+  rule either) and the gate denies with: *plan X is marked active but not approved (or changed
+  since approval). Run: plan-gate.py approve X* (decision class `plan_not_approved`). Read-only
+  commands and always-writable directories stay available, so an agent can keep drafting plans.
+- `plan-gate.py verify-log` still verifies the chain and also lists every approve row
+  (who, when, which plan hash). Altering an approve row fails the chain check.
+- A gated Bash/PowerShell command that runs `plan-gate.py approve` is **denied** (class
+  `approve_self_protect`): interpreter + `plan-gate.py` + `approve` in any spelling the
+  writer-script detection recognizes, `plan-gate.py` executed directly, a script or subcommand
+  hidden behind a variable expansion, and shell / `eval` / `-c` style runners whose words
+  mention both. An agent cannot write the log directory either (`log_self_protect`), so it
+  cannot forge a row. Indirection through some other script is not parsed; the terminal
+  requirement and the protected log do not depend on parsing.
+- **What this is, and is not.** The approver's identity is the OS user and git config the person
+  themselves set. It shows approval happened outside the gated agent, at a recorded time, for
+  exact plan bytes, and the chain shows whether the record was altered. It is tamper-evident,
+  not authentication: someone with a shell can approve as anyone they can configure.
+- Upgrading: setting `PLAN_GATE_LOG_DIR` now implies approval. Existing plans stay inert
+  until approved once; set `PLAN_GATE_REQUIRE_APPROVAL=off` to keep the old behavior.
+- Cost: each hook call that reaches the plan check reads the log once to find approve rows
+  (about +20 ms on a 60 MB log).
 
 ## scope-lease honored
 
@@ -180,7 +223,9 @@ When `PLAN_GATE_LOG_DIR` is set, every decision on a gated surface appends a JSO
 `plan-gate-decisions.log`: a UTC timestamp, the decision (`allow`/`deny`), the surface
 (`file`/`bash`/`ps`/`mcp`/`gate`), the tool, the command/target, a decision class (e.g.
 `allowed_paths`, `allowed_command`, `read_only_bypass`, `navigation`, `emergency_bypass`,
-`log_self_protect`, `silent_drift`, `unparseable_command`, `gate_error`), the reason, the
+`log_self_protect`, `silent_drift`, `unparseable_command`, `gate_error`, `scope_lease`,
+`plan_not_approved`, `approval_config`, `approve_self_protect`; plus `approve` rows written by
+`plan-gate.py approve`), the reason, the
 governing plan, and the working directory. File contents and full payloads are never logged.
 `unparseable_command` is a Bash command the parser could not confidently place (denied);
 `gate_error` is a fault inside the gate itself (denied, see Fault posture).
