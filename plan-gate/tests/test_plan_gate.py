@@ -2132,11 +2132,209 @@ class ScopeLeaseTests(unittest.TestCase):
 
     def test_unset_means_today_s_behavior_and_no_subprocess(self):
         self.lease("alice", self.leased)
+        marker = Path(self._tmp.name) / "stub-ran"
         stub = Path(self._tmp.name) / "stub.py"
-        stub.write_text("import sys; sys.exit(9)\n")
-        # PLAN_GATE_SCOPE_LEASE empty: lease is ignored entirely (held path is allowed).
+        stub.write_text("open(%r, 'w').write('ran')\n" % str(marker))
+        # PLAN_GATE_SCOPE_LEASE empty: lease is ignored entirely (held path is allowed
+        # and nothing is run). A stub script would leave a marker if it were invoked.
         p = self.run_edit(self.leased, "bob", PLAN_GATE_SCOPE_LEASE="")
         self.assertEqual(decision(p), "allow", p.stdout)
+        self.assertFalse(marker.exists())
+        # Control: with the stub configured, the same call does run it.
+        self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE=str(stub))
+        self.assertTrue(marker.exists(), "stub script should have been run")
+
+    # --- Q9: identity is SCOPE_LEASE_OWNER, else the AGENT's own branch ---------------
+    def _worktree(self, name, branch=None):
+        wt = Path(self._tmp.name) / name
+        args = ["worktree", "add", "-q"] + (["-b", branch] if branch else ["--detach"])
+        _git(self.repo, *args, str(wt))
+        return wt
+
+    def test_agent_in_another_worktree_is_denied_on_a_file_leased_through_this_one(self):
+        # B leases a file of the main checkout; A (its own worktree, branch agent-a) edits
+        # the same path through the main checkout's absolute path: must be denied.
+        wt_a = self._worktree("wt-a", "agent-a")
+        branch_b = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        self.lease(branch_b, self.leased)  # owner = the main checkout's branch
+        env = self.env("")
+        p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.leased)}},
+                     self.plans, cwd=wt_a, extra_env=env)
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn(branch_b, self.reason(p))
+        # ... and the lease holder (cwd on its own branch) is not blocked by its own lease.
+        q = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.leased)}},
+                     self.plans, cwd=self.repo, extra_env=env)
+        self.assertEqual(decision(q), "allow", q.stdout)
+
+    def test_two_branches_are_two_agents(self):
+        wt_a = self._worktree("wt-a2", "agent-a2")
+        wt_b = self._worktree("wt-b2", "agent-b2")
+        shared = wt_a.resolve() / "shared.txt"
+        self.write_plan(shared)
+        # agent-a2 leases a path in its own tree.
+        env = dict(os.environ, SCOPE_LEASE_OWNER="")
+        subprocess.run([sys.executable, str(SCOPE_LEASE), "acquire", "--root", str(wt_a),
+                        "--source", "paths", "--lock-id", "la", "--paths", str(shared)],
+                       env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       stdin=subprocess.DEVNULL)
+        mine = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(shared)}},
+                        self.plans, cwd=wt_a, extra_env=self.env(""))
+        theirs = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(shared)}},
+                          self.plans, cwd=wt_b, extra_env=self.env(""))
+        self.assertEqual(decision(mine), "allow", mine.stdout)
+        self.assertEqual(decision(theirs), "deny", theirs.stdout)
+
+    def test_detached_head_agent_with_no_env_owner_is_denied_on_a_leased_file(self):
+        wt = self._worktree("wt-detached")  # detached HEAD: no identity
+        self.lease("alice", self.leased)
+        p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.leased)}},
+                     self.plans, cwd=wt, extra_env=self.env(""))
+        self.assertEqual(decision(p), "deny", p.stdout)
+
+    def test_same_branch_is_one_agent(self):
+        # Documented behaviour: the lock's owner is a branch name; any agent running
+        # with that branch (or that SCOPE_LEASE_OWNER) is "the same agent".
+        branch = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        self.lease(branch, self.leased)
+        for _ in range(2):
+            p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.leased)}},
+                         self.plans, cwd=self.repo, extra_env=self.env(""))
+            self.assertEqual(decision(p), "allow", p.stdout)
+
+    # --- aliasing --------------------------------------------------------------------
+    def _symlink(self, link, target):
+        try:
+            os.symlink(str(target), str(link), target_is_directory=Path(target).is_dir())
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks unavailable")
+
+    def test_symlink_to_a_leased_file_is_denied(self):
+        self.lease("alice", self.leased)
+        link = self.repo / "alias.txt"
+        self._symlink(link, self.leased)
+        self.write_plan(link)
+        p = self.run_edit(link, "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("alice", self.reason(p))
+
+    def test_symlink_in_one_repo_to_a_leased_file_in_another_is_denied(self):
+        other = Path(self._tmp.name) / "repo-b"
+        other.mkdir()
+        _git(other, "init", "-q")
+        _git(other, "config", "user.email", "t@example.com")
+        _git(other, "config", "user.name", "T")
+        (other / "f.txt").write_text("x\n")
+        _git(other, "add", "-A")
+        _git(other, "commit", "-q", "-m", "s")
+        env = dict(os.environ, SCOPE_LEASE_OWNER="alice")
+        subprocess.run([sys.executable, str(SCOPE_LEASE), "acquire", "--root", str(other),
+                        "--source", "paths", "--lock-id", "lb", "--paths", str(other / "f.txt")],
+                       env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       stdin=subprocess.DEVNULL)
+        link = self.repo / "to-b.txt"
+        self._symlink(link, other / "f.txt")
+        self.write_plan(link)
+        p = self.run_edit(link, "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("alice", self.reason(p))
+
+    def test_dotdot_through_a_symlinked_dir_checks_both_spellings(self):
+        sub = self.repo / "sub"
+        sub.mkdir()
+        (sub / "x.py").write_text("x\n")
+        elsewhere = Path(self._tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        self._symlink(self.repo / "lnk", sub)
+        # `lnk/../x.py` is <repo>/x.py textually, but the OS resolves it via sub/.. too.
+        target = "%s/lnk/../sub/x.py" % self.repo.as_posix()
+        self.lease("alice", sub / "x.py")
+        self.write_plan(os.path.normpath(target), sub / "x.py")
+        p = self.run_edit(target, "bob")
+        self.assertEqual(decision(p), "deny", p.stdout)
+
+    # --- fail-closed spots -------------------------------------------------------------
+    def _stub(self, body):
+        stub = Path(self._tmp.name) / "stub.py"
+        stub.write_text(body)
+        return stub
+
+    def test_unknown_status_denies_even_without_strict_mode(self):
+        stub = self._stub("import sys,json\n"
+                          "for p in sys.stdin.buffer.read().split(b'\\0'):\n"
+                          "    p and print(json.dumps({'path': p.decode(), 'status': 'weird'}))\n")
+        p = self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE=str(stub))
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("unknown status", self.reason(p))
+        self.assertIn("PLAN_GATE_BYPASS", self.reason(p))
+
+    def test_exit_5_without_a_held_row_denies(self):
+        stub = self._stub("import sys,json\n"
+                          "for p in sys.stdin.buffer.read().split(b'\\0'):\n"
+                          "    p and print(json.dumps({'path': p.decode(), 'status': 'free'}))\n"
+                          "sys.exit(5)\n")
+        p = self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE=str(stub))
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("no held path", self.reason(p))
+
+    def test_exit_0_with_empty_stdout_denies(self):
+        stub = self._stub("pass\n")
+        p = self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE=str(stub))
+        self.assertEqual(decision(p), "deny", p.stdout)
+
+    def test_row_count_mismatch_denies(self):
+        stub = self._stub("import json\n"
+                          "for i in range(3): print(json.dumps({'path': 'x', 'status': 'free'}))\n")
+        p = self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE=str(stub))
+        self.assertEqual(decision(p), "deny", p.stdout)
+
+    def test_held_row_with_exit_0_still_denies(self):
+        stub = self._stub("import sys,json\n"
+                          "for p in sys.stdin.buffer.read().split(b'\\0'):\n"
+                          "    p and print(json.dumps({'path': p.decode(), 'status': 'held',"
+                          " 'lock_id': 'L', 'owner': 'zed'}))\n")
+        p = self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE=str(stub))
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("zed", self.reason(p))
+
+    def test_redirect_into_an_always_writable_dir_is_lease_checked(self):
+        notes = self.repo / "notes"
+        notes.mkdir()
+        held = notes / "a.md"
+        self.lease("alice", held)
+        p = self.run_bash("echo hi > %s" % held, "bob", PLAN_GATE_ALWAYS_WRITABLE=str(notes))
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("alice", self.reason(p))
+
+    def test_relative_script_path_is_a_config_error(self):
+        p = self.run_edit(self.free, "bob", PLAN_GATE_SCOPE_LEASE="scope-lease/scope-lease.py")
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("absolute path", self.reason(p))
+
+    def test_timeout_is_one_budget_across_repos(self):
+        import time
+        other = Path(self._tmp.name) / "repo-c"
+        other.mkdir()
+        _git(other, "init", "-q")
+        slow = self._stub("import time; time.sleep(1.2)\n")
+        self.write_plan(self.free, other / "c.txt")
+        p0 = time.time()
+        proc = run_gate(
+            {"tool_name": "Bash", "tool_input": {"command": "echo a > %s && echo b > %s" % (
+                self.free.as_posix(), (other / "c.txt").as_posix())}},
+            self.plans, cwd=self.repo,
+            extra_env=self.env("bob", PLAN_GATE_SCOPE_LEASE=str(slow),
+                               PLAN_GATE_SCOPE_LEASE_TIMEOUT="1.5"))
+        self.assertEqual(decision(proc), "deny", proc.stdout)
+        # Two lookups of 1.2s each would take 2.4s; one 1.5s budget stops at ~1.5s.
+        self.assertLess(time.time() - p0, 2.35)
+
+    def test_many_targets_go_over_stdin_not_argv(self):
+        names = [self.repo / ("f%04d_" % i + "x" * 100 + ".txt") for i in range(400)]
+        self.write_plan(*names)
+        cmd = " && ".join("echo a > %s" % n.as_posix() for n in names)
+        p = self.run_bash(cmd, "bob")
+        self.assertEqual(decision(p), "allow", p.stdout[:300])
 
     def test_bypass_still_works(self):
         self.lease("alice", self.leased)

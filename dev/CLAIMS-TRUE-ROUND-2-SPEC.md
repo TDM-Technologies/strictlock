@@ -129,6 +129,13 @@ plan-gate never reads these refs, so a lease only excludes agents that themselve
 - **Q6 — strict mode default.** **Recommended:** opt-in. The README then states both levels:
   "leases are honored by every gated agent; with REQUIRE_LEASE, every gated write must hold one."
 
+**Identity (Q9, 2026-10-17):** "me" is `SCOPE_LEASE_OWNER` if set, else the git branch of the
+AGENT's own worktree (the hook's cwd, not the target's repo). No `user.email` fallback. An agent
+with no identity (detached HEAD, no variable) can claim no lease: leased files deny for it. Two
+agents sharing a branch count as one agent; the fix is a per-agent `SCOPE_LEASE_OWNER` (subagents
+of one session share the hook's environment). A live lock can only be extended or released by
+the same owner and lock id; a lock id alone is not enough.
+
 ## §4 Writer scripts write where the plan allows (#12)
 
 **Today (verified):** `python3 atomic-write.py STATE.md` is a Bash command. plan-gate matches it
@@ -196,3 +203,5 @@ Q5 lease-held behavior · Q6 strict-lease default · Q7 writer list.
 - Q7: `atomic-write.py` is built in, extendable with `PLAN_GATE_WRITER_SCRIPTS`.
 
 **2026-10-17 (maintainer):** Q8 — approval replay: latest approval for a plan name wins; no expiry.
+Q9 — lease identity: `SCOPE_LEASE_OWNER` if set, else the branch of the agent's own worktree;
+no `user.email` fallback; no identity means no lease is mine.

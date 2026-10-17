@@ -19,7 +19,7 @@ no-op. An explicit call with `SCOPE_LEASE` unset still runs.
 | `SCOPE_LEASE_PATHS_FILE` | for `file` | An own-frontmatter file (`--source file`) whose `allowed_paths` is the path set and whose `name` is the lock id. |
 | `SCOPE_LEASE_LOCK_ID` | for `paths` | The lock id for `--source paths` (the `plan-gate` / `file` sources derive it from the plan `name`). Overrides a derived id when set. The identity that holds the scope — keep it **stable** across acquire / fence-check / release. |
 | `SCOPE_LEASE_TTL` | no | Lease lifetime in **seconds** (the deadline = now + TTL). Default `1800` (30 min): long enough to cover a work burst, short enough that a crashed holder's scope frees by deadline. `--ttl-seconds` overrides. |
-| `SCOPE_LEASE_OWNER` | no | The owner label stamped in the blob. Resolution order: `SCOPE_LEASE_OWNER` → the worktree's git branch → `user.email`. Errors only if all three are unavailable (an unresolvable owner is routed back to you, never guessed). `--owner` overrides. |
+| `SCOPE_LEASE_OWNER` | no | The owner label stamped in the blob. Resolution order: `SCOPE_LEASE_OWNER` → the git branch of the worktree (no `user.email` fallback). Errors if both are unavailable, e.g. a detached HEAD (an unresolvable owner is routed back to you, never guessed). `--owner` overrides. Owner is part of lock identity: with a live lock, `acquire` / extend / `release` by the same lock id but a different owner is refused (exit `5`). Two agents on one branch are one owner; give each its own `SCOPE_LEASE_OWNER`. |
 | `SCOPE_LEASE_LOG_DIR` | no | Directory for the append-only decision log (`scope-lease.log`). Each successful acquire appends a JSON line (UTC timestamp, lock id, owner, leased/reclaimed paths), and each release that drops at least one scope appends one (UTC timestamp, lock id, the lock's owner as stamped at acquire, `released_by` = the releasing process's resolved owner, released paths). A reclaiming acquire row also carries a per-path `reclaimed_detail` (the evicted lock id, owner, deadline, and the new token). A denied acquire is not logged. If unset, no log is written. This is your concurrency audit trail. |
 
 `os.pathsep` is `;` on Windows and `:` on Linux/macOS — it applies to `SCOPE_LEASE_PATHS`.
@@ -77,8 +77,12 @@ The contract a calling script branches on:
 ## `holder` — read-only lookup
 
 ```
-python3 scope-lease.py holder [--root DIR] [--lock-id ID] [--owner OWNER] [--json] PATH ...
+python3 scope-lease.py holder [--root DIR] [--lock-id ID] [--owner OWNER | --owner-root DIR | --no-owner]
+                              [--paths-from FILE|-] [--json] [PATH ...]
 ```
+
+`--paths-from -` reads NUL-separated paths from stdin (no argv length limit, newlines in names
+are fine); it adds to any `PATH` arguments. At least one path is required.
 
 Reports, per path, whether it is `FREE`, `MINE` or `HELD` by someone else, and writes
 nothing. Exit `0` when every path is free or mine, `5` when at least one is held by someone
@@ -87,8 +91,10 @@ same path canonicalization as `acquire` (so case/Unicode folding agrees), looks 
 `--root` (default: the current directory), and ignores the `SCOPE_LEASE` on/off switch.
 
 *Mine* means the lock's `lock_id` equals `--lock-id` / `SCOPE_LEASE_LOCK_ID`, **or** the lock's
-`owner` equals `--owner` / `SCOPE_LEASE_OWNER` (else the worktree's git branch, else
-`user.email`). An expired lock counts as free. `--json` prints one JSON object per path
+`owner` equals `--owner` / `SCOPE_LEASE_OWNER` (else the git branch of `--owner-root`, default
+`--root`: the checkout of the *agent*, which need not be the repo the path lives in). With no
+derivable identity (detached HEAD, no variable) or `--no-owner`, nothing is mine by owner. An
+expired lock counts as free. `--json` prints one JSON object per path
 (`path`, `key`, `status`, and for a lock: `lock_id`, `owner`, `token`, `deadline`, `acquired`,
 `age_seconds`, `expired`). `plan-gate` calls this when `PLAN_GATE_SCOPE_LEASE` is set.
 

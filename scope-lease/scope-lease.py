@@ -294,12 +294,27 @@ def _normalize_repo_relative(
     if not p.is_absolute():
         p = top / p
     p = _resolve_loose(p)
+    ignorecase, precompose = fold if fold is not None else _fold_flags(root)
     try:
         rel = p.relative_to(top).as_posix()
     except ValueError:
-        rel = p.as_posix()  # outside the repo: still canonical, just not repo-relative
+        rel = None
+        if ignorecase or precompose:
+            # On a case-insensitive / Unicode-normalizing filesystem the SAME directory can
+            # be spelled `/private/TMP/r` and `/private/tmp/r`; resolve() keeps the spelling it
+            # was given, so relative_to() fails and the key would silently become the absolute
+            # path (a different key => the lock is missed). Compare prefix parts folded the way
+            # the repo's filesystem folds them.
+            def _f(s: str) -> str:
+                if precompose:
+                    s = unicodedata.normalize("NFC", s)
+                return s.casefold() if ignorecase else s
+            pp, tp = p.parts, top.parts
+            if len(pp) >= len(tp) and all(_f(a) == _f(b) for a, b in zip(pp, tp)):
+                rel = "/".join(pp[len(tp):])
+        if rel is None:
+            rel = p.as_posix()  # outside the repo: still canonical, just not repo-relative
     rel = rel or "."
-    ignorecase, precompose = fold if fold is not None else _fold_flags(root)
     if precompose:
         rel = unicodedata.normalize("NFC", rel)
     if ignorecase:
@@ -438,9 +453,15 @@ def acquire_lease(
         _assert_same_refstore(holder, refstore, p)  # fail loud BEFORE trusting the lock
         held_live = (_parse_iso(holder.get("deadline", "")) or now) > now \
             if holder.get("deadline") else False
-        is_ours = holder.get("lock_id") == lock_id
+        # Ours = same lock id AND same owner identity. A lock id alone is NOT enough: it is
+        # visible (it appears in plan-gate's deny message), so matching it must not let a
+        # different agent take over, extend or rewrite a LIVE lock. An expired lock is
+        # reclaimable by anyone.
+        is_ours = holder.get("lock_id") == lock_id and holder.get("owner") == owner
         if held_live and not is_ours:
-            raise LeaseDenied(p, holder)            # first-mover wins; write nothing
+            raise LeaseDenied(p, holder, detail=(
+                "that lock id is held by a different owner" if holder.get("lock_id") == lock_id
+                else ""))                           # first-mover wins; write nothing
         token = int(holder.get("token", 0)) + 1     # ours (extend) or expired (reclaim)
         # An extend keeps the original acquire time (age = time since first taken); a
         # reclaim starts a new age.
@@ -539,6 +560,11 @@ def release_lease(
         _assert_same_refstore(blob, refstore, p)
         if blob.get("lock_id") != lock_id:
             continue  # never release a lock we don't own
+        live = bool(blob.get("deadline")) and \
+            (_parse_iso(blob.get("deadline", "")) or _utcnow()) > _utcnow()
+        if owner is not None and live and blob.get("owner") != owner:
+            # Same lock id, different owner, still live: a takeover attempt, not a release.
+            raise LeaseDenied(p, blob, detail="that lock id is held by a different owner")
         lock_owner = lock_owner or str(blob.get("owner") or "")
         owned.append((p, ref, oid))
     # Pass 2: delete.
@@ -558,6 +584,7 @@ def release_lease(
 def holder_status(
     *, root: Path, paths: list[str], lock_id: str | None = None,
     owner: str | None = None, now: datetime.datetime | None = None,
+    owner_root: Path | str | None = None, no_owner: bool = False,
 ) -> list[dict]:
     """READ-ONLY: who holds each path right now. One dict per input path (input order):
 
@@ -565,9 +592,12 @@ def holder_status(
 
     `free`  no lock ref, or the lock's deadline has passed (an expired lock is reclaimable by
             the next `acquire`; the dict then also carries "expired": true plus the old holder).
-    `mine`  a live lock whose lock_id == `lock_id` (when given) OR whose owner == `owner`
-            (when not given, resolved lazily via derive_owner, so a path nobody holds never
-            needs an owner).
+    `mine`  a live lock whose lock_id == `lock_id` (when given) OR whose owner == `owner`.
+            When `owner` is not given it is derived lazily (a path nobody holds never needs
+            one) by derive_owner: SCOPE_LEASE_OWNER, else the git branch of `owner_root`
+            (default `root`). `owner_root` is the AGENT's own worktree, which may differ
+            from the repo the looked-up path lives in. If no identity can be derived
+            (detached HEAD, no env), or `no_owner` is set, nothing is mine.
     `held`  a live lock held by someone else. Carries lock_id, owner, token, deadline,
             acquired and age_seconds (None for a lock minted before `acquired` existed).
 
@@ -590,6 +620,7 @@ def holder_status(
             held_refs[ref] = oid
     refstore: dict | None = None
     my_owner = owner
+    owner_resolved = owner is not None
     out: list[dict] = []
     for raw, key in zip(paths, keys):
         entry: dict = {"path": raw, "key": key, "status": "free"}
@@ -617,19 +648,28 @@ def holder_status(
         if lock_id and blob.get("lock_id") == lock_id:
             entry["status"] = "mine"
         else:
-            if my_owner is None:
-                my_owner = derive_owner(root)
-            entry["status"] = "mine" if blob.get("owner") == my_owner else "held"
+            if my_owner is None and not owner_resolved:
+                owner_resolved = True
+                if not no_owner:
+                    try:
+                        my_owner = derive_owner(Path(owner_root) if owner_root else root)
+                    except OwnerDeriveError:
+                        my_owner = None  # no identity: no lease is mine
+            entry["status"] = ("mine" if my_owner is not None
+                               and blob.get("owner") == my_owner else "held")
         out.append(entry)
     return out
 
 
 # ── owner resolution ─────────────────────────────────────────────────────────────────
 def derive_owner(root: Path) -> str:
-    """Owner id, resolved in order: SCOPE_LEASE_OWNER env -> the worktree's git branch ->
-    `user.email`. Raises OwnerDeriveError only if ALL fail — we refuse to silently stamp a
-    meaningless owner; an unresolvable owner is a call routed back to the caller (`--owner`),
-    not a stub. The 1-worktree:1-branch model makes the branch a stable, unique owner."""
+    """Owner id, resolved in order: SCOPE_LEASE_OWNER env -> the git branch of `root`.
+    Raises OwnerDeriveError if both fail (detached HEAD and no env) — we refuse to silently
+    stamp a meaningless owner; an unresolvable owner is a call routed back to the caller
+    (`--owner`), not a stub. There is no user.email fallback: an email names a person, not an
+    agent, and would let every agent of one user count as the same owner. The
+    1-worktree:1-branch model makes the branch a stable owner; two agents on the SAME branch
+    count as one agent (give each its own SCOPE_LEASE_OWNER to tell them apart)."""
     env_owner = os.environ.get("SCOPE_LEASE_OWNER", "").strip()
     if env_owner:
         return env_owner
@@ -643,15 +683,9 @@ def derive_owner(root: Path) -> str:
     branch = proc.stdout.strip()
     if proc.returncode == 0 and branch and branch != "HEAD":
         return branch
-    email = subprocess.run(
-        ["git", "-C", str(root), "config", "--get", "user.email"],
-        capture_output=True, text=True,
-    ).stdout.strip()
-    if email:
-        return email
     raise OwnerDeriveError(
-        f"could not derive owner at {root} (no SCOPE_LEASE_OWNER, no branch, no user.email) "
-        "— pass --owner / set SCOPE_LEASE_OWNER explicitly"
+        f"could not derive owner at {root} (no SCOPE_LEASE_OWNER, and no branch: detached "
+        "HEAD or not a repo) — pass --owner / set SCOPE_LEASE_OWNER explicitly"
     )
 
 
@@ -887,8 +921,25 @@ def _cmd_holder(args, root: Path) -> int:
     if owner is None:
         env_owner = os.environ.get("SCOPE_LEASE_OWNER", "").strip()
         owner = env_owner or None  # else derived lazily, only if some live lock is found
+    paths = list(args.paths or [])
+    if args.paths_from:
+        try:
+            if args.paths_from == "-":
+                data = sys.stdin.buffer.read()
+            else:
+                with open(args.paths_from, "rb") as fh:
+                    data = fh.read()
+        except OSError as exc:
+            print(f"scope-lease: ERROR: cannot read paths: {exc}", file=sys.stderr)
+            return 1
+        paths += [os.fsdecode(b) for b in data.split(b"\0") if b]
+    if not paths:
+        print("scope-lease: ERROR: holder needs at least one path (arguments or "
+              "--paths-from).", file=sys.stderr)
+        return 2
     try:
-        res = holder_status(root=root, paths=args.paths, lock_id=lock_id, owner=owner)
+        res = holder_status(root=root, paths=paths, lock_id=lock_id, owner=owner,
+                            owner_root=args.owner_root or None, no_owner=args.no_owner)
     except MachineBoundaryError as exc:
         print(f"scope-lease: FAIL-LOUD: {exc}", file=sys.stderr)
         return 6
@@ -935,14 +986,23 @@ def main(argv: list[str] | None = None) -> int:
     p_hold = sub.add_parser(
         "holder",
         help="Read-only: who holds each path (0 all free/mine, 5 any held by someone else).")
-    p_hold.add_argument("paths", nargs="+", metavar="PATH",
+    p_hold.add_argument("paths", nargs="*", metavar="PATH",
                         help="Paths to look up (absolute, or relative to the repo top-level).")
+    p_hold.add_argument("--paths-from", default=None, metavar="FILE|-",
+                        help="Also read NUL-separated paths from FILE, or stdin with '-' "
+                             "(no argv length limit; handles newlines in names).")
+    p_hold.add_argument("--owner-root", default=None, metavar="DIR",
+                        help="Derive MY identity (SCOPE_LEASE_OWNER, else the git branch) from "
+                             "this worktree instead of --root: the AGENT's own checkout, which "
+                             "need not be the repo the looked-up paths live in.")
+    p_hold.add_argument("--no-owner", action="store_true",
+                        help="I have no identity: no lease is mine (except by lock id).")
     p_hold.add_argument("--root", default=".", metavar="DIR",
                         help="Repo / worktree the lock store lives in (default: cwd).")
     p_hold.add_argument("--lock-id", default=None, metavar="ID",
                         help="My lock id (else SCOPE_LEASE_LOCK_ID). A lock with this id is mine.")
     p_hold.add_argument("--owner", default=None, metavar="OWNER",
-                        help="My owner (else SCOPE_LEASE_OWNER, git branch, or user.email). "
+                        help="My owner (else SCOPE_LEASE_OWNER, else the git branch). "
                              "A lock stamped with this owner is mine.")
     p_hold.add_argument("--json", action="store_true",
                         help="One JSON object per path on stdout (machine-readable).")
@@ -1024,6 +1084,9 @@ def main(argv: list[str] | None = None) -> int:
         except MachineBoundaryError as exc:
             print(f"scope-lease: FAIL-LOUD: {exc}", file=sys.stderr)
             return 6
+        except LeaseDenied as exc:
+            print(f"scope-lease: DENIED: {exc}", file=sys.stderr)
+            return 5
         except LeaseError as exc:
             print(f"scope-lease: ERROR: {exc}", file=sys.stderr)
             return 1

@@ -144,6 +144,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2617,13 +2618,32 @@ def _lease_check(targets: list[str]):
     require = _env_truthy("PLAN_GATE_REQUIRE_LEASE")
     if not SCOPE_LEASE_SCRIPT and not require:
         return None
-    uniq: list[str] = []
+    # Every target is looked up under TWO spellings when they differ: the lexical
+    # absolute path (`..` collapsed textually) and its realpath (symlinks followed),
+    # so `lnk/../x.py` and a symlink pointing at a leased file elsewhere are both
+    # seen. Held by someone else under either spelling denies. REQUIRE_LEASE judges
+    # the realpath (the file that is actually written).
+    uniq: list[str] = []          # lexical absolute paths
+    lookups: list[tuple] = []     # (lookup path, is_real_file, display target)
+    seen: set = set()
     for t in targets:
         a = t if os.path.isabs(t) else os.path.join(os.getcwd(), t)
         a = os.path.normpath(a)
-        if a not in uniq:
-            uniq.append(a)
-    if not uniq:
+        if a in uniq:
+            continue
+        uniq.append(a)
+        try:
+            real = os.path.realpath(a)
+        except (OSError, ValueError):
+            real = a
+        spellings = [(a, real == a or norm(real) == norm(a))]
+        if norm(real) != norm(a):
+            spellings = [(a, False), (real, True)]
+        for path, is_real in spellings:
+            if path not in seen:
+                seen.add(path)
+                lookups.append((path, is_real, a))
+    if not lookups:
         return None
     if not SCOPE_LEASE_SCRIPT:
         return (
@@ -2633,22 +2653,56 @@ def _lease_check(targets: list[str]):
             "PLAN_GATE_REQUIRE_LEASE off. " + _BYPASS_HOWTO
         )
     script = os.path.expanduser(SCOPE_LEASE_SCRIPT)
+    if not os.path.isabs(script):
+        return (
+            f"plan-gate: PLAN_GATE_SCOPE_LEASE must be an absolute path to scope-lease.py "
+            f"(got {SCOPE_LEASE_SCRIPT!r}); a relative one would resolve against whatever "
+            f"directory the target is in. Failing closed. " + _BYPASS_HOWTO
+        )
+    try:
+        agent_cwd = os.getcwd()
+    except OSError:
+        agent_cwd = ""
     groups: dict = {}
-    for a in uniq:
-        groups.setdefault(_lease_root_for(a), []).append(a)
-    timeout = _lease_timeout()
+    for item in lookups:
+        groups.setdefault(_lease_root_for(item[0]), []).append(item)
+    total = _lease_timeout()
+    deadline_at = time.monotonic() + total
     results: list[dict] = []
-    for root, paths in groups.items():
-        cmd = [sys.executable, script, "holder", "--root", root, "--json", "--"] + paths
+    for root, items in groups.items():
+        remaining = deadline_at - time.monotonic()
+        if remaining <= 0:
+            return (
+                f"plan-gate: the scope-lease lookups for this call used up the {total:g}s "
+                f"budget (PLAN_GATE_SCOPE_LEASE_TIMEOUT is the total across all repos), so "
+                f"lease ownership of {items[0][0]} is unknown. Failing closed. " + _BYPASS_HOWTO
+            )
+        paths = [it[0] for it in items]
+        cmd = [sys.executable, script, "holder", "--root", root, "--json",
+               "--paths-from", "-"]
+        # MY identity comes from the AGENT's own checkout (the hook's cwd), not from the
+        # repo the path lives in: SCOPE_LEASE_OWNER, else that checkout's branch.
+        if agent_cwd:
+            cmd += ["--owner-root", agent_cwd]
+        else:
+            cmd += ["--no-owner"]
+        try:
+            stdin_bytes = b"\0".join(os.fsencode(p) for p in paths) + b"\0"
+        except (UnicodeError, ValueError) as exc:
+            return (
+                f"plan-gate: a write target cannot be encoded for the lease lookup ({exc}); "
+                f"lease ownership is unknown. Failing closed. " + _BYPASS_HOWTO
+            )
         try:
             proc = subprocess.run(
-                cmd, cwd=root if os.path.isdir(root) else None, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+                cmd, cwd=root if os.path.isdir(root) else None, input=stdin_bytes,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=remaining,
             )
         except subprocess.TimeoutExpired:
             return (
-                f"plan-gate: scope-lease holder lookup timed out after {timeout:g}s, so "
-                f"lease ownership of {paths[0]} is unknown. Failing closed. " + _BYPASS_HOWTO
+                f"plan-gate: scope-lease holder lookup timed out (budget {total:g}s in "
+                f"total), so lease ownership of {paths[0]} is unknown. Failing closed. "
+                + _BYPASS_HOWTO
             )
         except OSError as exc:
             return (
@@ -2670,31 +2724,50 @@ def _lease_check(targets: list[str]):
         except ValueError:
             return (
                 f"plan-gate: scope-lease holder returned output plan-gate cannot read "
-                f"({out[:120]!r}). Failing closed. " + _BYPASS_HOWTO
+                f"(exit {proc.returncode}, {out[:120]!r}). Failing closed. " + _BYPASS_HOWTO
             )
-        for p, r in zip(paths, rows):
-            r["_target"] = p
+        if proc.returncode == 5 and not any(r.get("status") == "held" for r in rows):
+            return (
+                f"plan-gate: scope-lease holder exited 5 (held) but reported no held path; "
+                f"lease ownership of {paths[0]} is unclear. Failing closed. " + _BYPASS_HOWTO
+            )
+        for it, r in zip(items, rows):
+            r["_target"], r["_real"], r["_display"] = it[0], it[1], it[2]
+            if r.get("status") not in ("free", "mine", "held"):
+                return (
+                    f"plan-gate: scope-lease reported an unknown status "
+                    f"({str(r.get('status'))[:40]!r}) for {it[0]}. Failing closed. "
+                    + _BYPASS_HOWTO
+                )
         results.extend(rows)
     for r in results:
         if r.get("status") == "held":
+            alias = ("" if r["_target"] == r["_display"]
+                     else f" (reached as {r['_display']})")
             return (
-                f"plan-gate: {r['_target']} is leased by another agent: lock "
+                f"plan-gate: {r['_target']}{alias} is leased by another agent: lock "
                 f"{r.get('lock_id', '?')!r} (owner {r.get('owner', '?')}), lease age "
                 f"{_fmt_age(r.get('age_seconds'))}, until {r.get('deadline', '?')}. "
                 f"Pick a different file, or wait for the lease to lapse or be released."
             )
     if require:
+        # The exemption for plans / memory directories is judged on the REAL file:
+        # compare against the directories as given and as resolved.
+        always_dirs = list(ALWAYS_WRITABLE_DIRS)
+        for d in ALWAYS_WRITABLE_DIRS:
+            try:
+                always_dirs.append(Path(os.path.realpath(str(d))))
+            except (OSError, ValueError):
+                pass
         for r in results:
-            if r.get("status") == "free" and not _under_any(
-                    norm(r["_target"]), ALWAYS_WRITABLE_DIRS):
+            if (r["_real"] and r.get("status") == "free"
+                    and not _under_any(norm(r["_target"]), always_dirs)):
                 why = "its lease has expired" if r.get("expired") else "no lease is held on it"
                 return (
                     f"plan-gate: {r['_target']}: {why} (PLAN_GATE_REQUIRE_LEASE is on). "
                     f"Acquire it first: scope-lease.py acquire."
                 )
-            if r.get("status") not in ("free", "mine"):
-                return (f"plan-gate: scope-lease reported an unknown status for "
-                        f"{r['_target']}. Failing closed.")
+    return None
 
 
 # --- PowerShell segments ------------------------------------------------------
