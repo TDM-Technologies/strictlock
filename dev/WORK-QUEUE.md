@@ -11,7 +11,7 @@ All three stages were run as one PR each; merging stayed with Tim.
 |---|---|---|
 | 1 — make the public repo read true (docs) | #15 | **merged** (`720a24e`) — spec on main at `dev/CLAIMS-FIX-SPEC.md`, per-claim ledger §7 |
 | 2 — code that makes the stronger claims true | #17 | **merged** (`0e5746a`) — dispositions in CLAIMS-FIX-SPEC §8; CI 13/13 green on Windows/macOS/Ubuntu; two real Windows bugs fixed on the way |
-| 3 — Wave 4 remainder (three prose ports) | #14 | **in review** — `rituals/`, rebased onto main with the Wave 4 dev-doc close-out |
+| 3 — Wave 4 remainder (three prose ports) | #14 | **merged** (`1cd53ca`) — `rituals/`, with the Wave 4 dev-doc close-out |
 
 Not built in Stage 2 (each kept its interim wording; tracked in BACKLOG "Open after Stage 2"): PowerShell
 compound/redirect handling, scope-lease denied-acquire rows, sink-resolver no-conflict/dry-run rows,

@@ -26,14 +26,14 @@ strong wording restored where code and a test back it, merge `0e5746a`). PR #17'
 real bugs, both fixed before merge: scope-lease sent git its stdin in text mode (CRLF broke every lease
 transaction on Windows), and the externalized-memory projection CLI wrote cp1252/CRLF to Windows pipes (now
 UTF-8/LF on every OS). What was and was not built is in CLAIMS-FIX-SPEC §8; leftovers are in BACKLOG "Open
-after Stage 2". **Wave 4 remainder (the `rituals/` prose ports) is in review as PR #14.** Next harvest: Wave 2
+after Stage 2". **Wave 4 remainder (the `rituals/` prose ports) merged as PR #14 (`1cd53ca`).** Next harvest: Wave 2
 (marquee, last). Open-work inventory and its close-out: [WORK-QUEUE.md](WORK-QUEUE.md). Merge to public main
 stays with Tim.
 
 1. **Wave 3 — DONE + LIVE** (PR #6, `d17e1a9`, 2026-06-25): scope-lease + sink-resolver + liveness-scan.
 2. **Wave 4 — 4 of 4 built:** the **test-protection co-commit guard** (PR #7, 2026-06-30) plus the three prose
    items — session-ritual checklists (kickoff + close-out), WP-interaction analysis, pre-WP currency check —
-   shipped as `rituals/` in **PR #14 (in review)**. Faithful ports of the maintainer's staged `start-` /
+   shipped as `rituals/` in **PR #14 (merged, `1cd53ca`)**. Faithful ports of the maintainer's staged `start-` /
    `close-` skills (+ learnings) and two private design docs, genericized; two Opus review lenses
    (public-safety, fidelity) → 10 blocking findings fixed. The **harvest source map** also landed (PR #8).
 3. **Next:** Wave 2 (marquee IP, last) — design-heavy; needs Tim's direction before building.
@@ -97,7 +97,7 @@ HIPAAPath, exact paths, and whether each item is already safe. In brief:
   gap-fills (CLAIMS-FIX-SPEC §1, Q3) — built in PR 2 2026-10-16, apart from the leftovers in BACKLOG.
 - claims-truth-pass — **DONE 2026-10-16** — PR #15 (merge `720a24e`) + PR #17 (merge `0e5746a`);
   [CLAIMS-FIX-SPEC.md](CLAIMS-FIX-SPEC.md) §6, ledger in §7, dispositions in §8.
-- harvest-wave-4 — **4 of 4 built** — test-protection-guard (PR #7) + `rituals/` (PR #14, in review).
+- harvest-wave-4 — **4 of 4 built** — test-protection-guard (PR #7) + `rituals/` (PR #14, merged `1cd53ca`).
 - ci-os-matrix — **DONE 2026-10-16** (PR #17) — 13 CI jobs green on Windows, macOS and Ubuntu; the first
   Windows runs found and fixed two real bugs (scope-lease stdin CRLF, projection CLI encoding).
 - plans-into-repo — pending — import the historical plan files as worked examples (off-machine).
