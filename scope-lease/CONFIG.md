@@ -81,12 +81,14 @@ python3 scope-lease.py release --force [--root DIR] [<source selectors>]
 ```
 
 Releases whatever lock holds the resolved paths, whoever owns it and whatever its lock id, and
-needs no identity of its own (it works on a detached HEAD). Each forced release is written to
+needs no identity of its own (it works on a detached HEAD) and no lock id (`--source paths` does
+not ask for one with `--force`). Each forced release is written to
 the audit log as a `force_release` row (the previous lock id, owner and deadline per path, plus
 `released_by`), and printed on stderr. Use it at close-out when the owner's identity no longer
 exists (the agent's branch was switched or deleted, or the agent died). Without `--force`,
-`release` still refuses a live lock held by a different owner. `plan-gate` always denies
-`--force` to a gated agent. Set `SCOPE_LEASE_OWNER` per agent so a branch switch does not change
+`release` still refuses a live lock held by a different owner. `plan-gate` denies `--force` to
+a gated agent whenever the gate is on, whether or not it is wired to scope-lease
+(`PLAN_GATE_SCOPE_LEASE` unset). Set `SCOPE_LEASE_OWNER` per agent so a branch switch does not change
 identity.
 
 `fence-check` and `holder` need no owner: they work on a detached HEAD with no

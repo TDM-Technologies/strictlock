@@ -890,6 +890,21 @@ class LeaseTakeoverTests(unittest.TestCase):
         self.assertEqual(row["forced"][0]["was_lock_id"], "lock-a")
         self.assertEqual(row["released_by"], "carol")
 
+    def test_force_release_needs_no_lock_id_but_plain_release_does(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SCOPE_LEASE_LOCK_ID",)}
+        env["SCOPE_LEASE_OWNER"] = "carol"
+        base = ["--root", str(self.root), "--source", "paths", "--paths", "src/a.py"]
+        plain = subprocess.run([sys.executable, str(SCRIPT), "release", *base],
+                               capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(plain.returncode, 1)
+        self.assertIn("no lock id", plain.stderr)
+        forced = subprocess.run([sys.executable, str(SCRIPT), "release", "--force", *base],
+                                capture_output=True, text=True, env=env,
+                                stdin=subprocess.DEVNULL)
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(lock_refs(self.root), [])
+
     def test_force_release_works_with_no_identity_at_all(self):
         _git(self.root, "checkout", "-q", "--detach")
         env = {k: v for k, v in os.environ.items() if k != "SCOPE_LEASE_OWNER"}

@@ -883,7 +883,8 @@ def _resolve_from_paths(cli_paths: list[str] | None) -> tuple[list[str], str | N
 
 
 def resolve_path_source(
-    *, source: str, cli_paths: list[str] | None, file_path: str | None, cli_lock_id: str | None
+    *, source: str, cli_paths: list[str] | None, file_path: str | None, cli_lock_id: str | None,
+    require_lock_id: bool = True,
 ) -> tuple[list[str], str]:
     """Resolve (paths, lock_id) from the selected source. lock_id precedence: --lock-id /
     SCOPE_LEASE_LOCK_ID override > the source's own id (plan name / file name) > error. Raises
@@ -902,7 +903,7 @@ def resolve_path_source(
 
     lock_id = (cli_lock_id or os.environ.get("SCOPE_LEASE_LOCK_ID", "").strip() or src_id or "")
     lock_id = lock_id.strip()
-    if not lock_id:
+    if not lock_id and require_lock_id:
         raise PathSourceError(
             "no lock id — the source provided none (no plan `name`), so pass --lock-id or set "
             "SCOPE_LEASE_LOCK_ID. The lock id is the identity that holds the scope; it must be "
@@ -1073,6 +1074,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         paths, lock_id = resolve_path_source(
             source=source, cli_paths=args.paths, file_path=args.file, cli_lock_id=args.lock_id,
+            # A forced release works on whatever lock holds the paths: no lock id needed.
+            require_lock_id=not (args.cmd == "release" and getattr(args, "force", False)),
         )
     except PathSourceError as exc:
         print(f"scope-lease: ERROR: {exc}", file=sys.stderr)
@@ -1147,7 +1150,8 @@ def main(argv: list[str] | None = None) -> int:
         except LeaseError as exc:
             print(f"scope-lease: ERROR: {exc}", file=sys.stderr)
             return 1
-        print(f"RELEASED: {len(released)} scope(s) for lock {lock_id!r}.")
+        print(f"RELEASED: {len(released)} scope(s)"
+              + ("" if force else f" for lock {lock_id!r}") + ".")
         return 0
 
     ap.error(f"unknown command {args.cmd!r}")  # unreachable (subparser required)

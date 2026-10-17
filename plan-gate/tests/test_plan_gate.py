@@ -2404,6 +2404,29 @@ class ScopeLeaseTests(unittest.TestCase):
                          self.plans, cwd=self.repo, extra_env=self.env("bob"))
             self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
 
+    def test_force_is_denied_even_when_scope_lease_is_not_configured(self):
+        self._plan_allowing("python3", "bash", "env")
+        sl = SCOPE_LEASE.as_posix()
+        for cmd in (
+            "python3 %s release --force" % sl,
+            "python3 %s release --forc" % sl,
+            "env python3 %s release --force" % sl,
+            "python3 %s release $FLAGS" % sl,
+            "bash -c 'python3 %s release --force'" % sl,
+        ):
+            p = self.run_bash(cmd, "bob", PLAN_GATE_SCOPE_LEASE="", PLAN_GATE_REQUIRE_LEASE="")
+            self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
+            self.assertIn("--force", self.reason(p), cmd)
+        # Plain commands and the identity flags are NOT touched when unconfigured.
+        for cmd in ("python3 %s release" % sl, "python3 %s acquire --owner alice" % sl):
+            p = self.run_bash(cmd, "bob", PLAN_GATE_SCOPE_LEASE="", PLAN_GATE_REQUIRE_LEASE="")
+            self.assertEqual(decision(p), "allow", cmd + " -> " + p.stdout)
+        q = run_gate({"tool_name": "PowerShell",
+                      "tool_input": {"command": "python %s release --force" % sl}},
+                     self.plans, cwd=self.repo,
+                     extra_env=self.env("bob", PLAN_GATE_SCOPE_LEASE=""))
+        self.assertEqual(decision(q), "deny", q.stdout)
+
     def test_owner_and_abbreviations_on_release_and_acquire_are_denied(self):
         self._plan_allowing("python3")
         sl = SCOPE_LEASE.as_posix()

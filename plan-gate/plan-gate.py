@@ -2540,8 +2540,13 @@ def _is_scope_lease_script(tok: str) -> bool:
     return _basename_lc(tok) in ("scope-lease.py", "scope-lease")
 
 
-def _lease_self_check(raw_segs: list[str], shell: str):
-    """Deny reason (str) or None. Only meaningful when scope-lease is configured."""
+def _lease_self_check(raw_segs: list[str], shell: str, force_only: bool = False):
+    """Deny reason (str) or None. The full check (identity flags, SCOPE_LEASE_* env
+    assignments, refs/locks changes) runs when scope-lease is configured. With
+    force_only=True (scope-lease not configured) only the `--force` rule runs: a
+    scope-lease invocation carrying --force, an abbreviation of it, or arguments that
+    cannot be read. `release --force` is for a human at a terminal whether or not this
+    gate is wired to scope-lease."""
     why_id = (
         "plan-gate: a command may not choose its own lease identity (--owner, --lock-id, "
         "--no-owner, --owner-root, or setting SCOPE_LEASE_OWNER / SCOPE_LEASE_LOCK_ID) "
@@ -2556,15 +2561,16 @@ def _lease_self_check(raw_segs: list[str], shell: str):
         "release, run with the harness-provided identity."
     )
     for raw in raw_segs:
-        if _LEASE_ENV_ASSIGN_RE.search(raw):
+        if not force_only and _LEASE_ENV_ASSIGN_RE.search(raw):
             return why_id
         try:
             seglists = _tokenize_ps(raw) if shell == "ps" else [shlex.split(raw)]
         except ValueError:
             low = raw.lower()
-            if ("scope-lease" in low and any(f in low for f in _LEASE_IDENTITY_FLAGS)):
+            flags_here = ("--f",) if force_only else _LEASE_IDENTITY_FLAGS + ("--f",)
+            if ("scope-lease" in low and any(f in low for f in flags_here)):
                 return why_id
-            if "refs/locks" in low:
+            if not force_only and "refs/locks" in low:
                 return why_ref
             continue
         for toks in seglists:
@@ -2596,14 +2602,17 @@ def _lease_self_check(raw_segs: list[str], shell: str):
                     ch in sub for ch in _EXPANSION_CHARS)
                 if force or dynamic:
                     return why_id  # --force is for a human at a terminal, never an agent
-                if ident and sub not in ("holder", "fence-check"):
+                if ident and not force_only and sub not in ("holder", "fence-check"):
                     return why_id  # (read-only subcommands write nothing)
-            elif script is None and inv is not None and "scope-lease" in joined.lower():
-                if any(f in joined for f in _LEASE_IDENTITY_FLAGS):
+            flags_here = ("--force",) if force_only else _LEASE_IDENTITY_FLAGS
+            if script is None and inv is not None and "scope-lease" in joined.lower():
+                if any(f in joined for f in flags_here):
                     return why_id  # python -c / stdin script naming scope-lease
             if prog_b in _RUNNER_PROGS and "scope-lease" in joined.lower() and any(
-                    f in joined for f in _LEASE_IDENTITY_FLAGS):
+                    f in joined for f in flags_here):
                 return why_id
+            if force_only:
+                continue
             # (b) raw lock-ref changes through git
             if prog_b == "git":
                 sub = ""
@@ -3348,10 +3357,10 @@ def main() -> None:
         approve_reason = _approve_self_check(all_segs, "bash")
         if approve_reason:
             gated_deny(approve_reason, class_="approve_self_protect")
-        if _lease_configured():
-            lease_id_reason = _lease_self_check(all_segs, "bash")
-            if lease_id_reason:
-                gated_deny(lease_id_reason, class_="lease_identity_protect")
+        lease_id_reason = _lease_self_check(
+            all_segs, "bash", force_only=not _lease_configured())
+        if lease_id_reason:
+            gated_deny(lease_id_reason, class_="lease_identity_protect")
         has_cd = any(_is_cd_like(sg) for sg in all_segs)
         # Redirection-as-write: each target is a file write, gated like
         # Edit/Write (log self-protection -> always-writable -> allowed_paths).
@@ -3408,10 +3417,10 @@ def main() -> None:
         approve_reason = _approve_self_check([cmd], "ps")
         if approve_reason:
             gated_deny(approve_reason, class_="approve_self_protect")
-        if _lease_configured():
-            lease_id_reason = _lease_self_check([cmd], "ps")
-            if lease_id_reason:
-                gated_deny(lease_id_reason, class_="lease_identity_protect")
+        lease_id_reason = _lease_self_check(
+            [cmd], "ps", force_only=not _lease_configured())
+        if lease_id_reason:
+            gated_deny(lease_id_reason, class_="lease_identity_protect")
         # Split into simple commands (like the Bash path). Anything the splitter
         # cannot place is refused outright.
         ps_segs, ps_problem = _ps_segments(cmd)
