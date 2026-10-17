@@ -13,7 +13,7 @@ everything.
 | `PLAN_GATE_ALWAYS_WRITABLE` | no | `os.pathsep`-separated list of directories that are *always* writable regardless of plan state. Intended for the plans dir itself and any agent-memory dir that never ships. Same blast radius as plan files — keep it tight. Putting the plans dir here lets a gated agent write a plan with `status: active` and have it take effect at once; leave it out if a human should write the plans. |
 | `PLAN_GATE_LOG_DIR` | no (recommended) | Directory for the append-only, hash-chained decision log (`plan-gate-decisions.log`). This log is your audit trail and it is opt-in: if unset, no log is written. Setting it also turns on plan approval (see `PLAN_GATE_REQUIRE_APPROVAL`). |
 | `PLAN_GATE_LOG_DECISIONS` | no | `all` (default) records every decision on a gated surface, allow and deny; `deny` records denials plus emergency-bypass rows only. |
-| `PLAN_GATE_REQUIRE_APPROVAL` | no | Plan approval (see [Plan approval](#plan-approval)). Required **whenever `PLAN_GATE_LOG_DIR` is set**; only an explicit `off` / `0` / `false` / `no` (case-insensitive) turns it off. Explicit `on` / `1` / `true` / `yes` with no log dir is a configuration error (every gated call that needs a plan is denied with a message). Unset, or any other value: follows `PLAN_GATE_LOG_DIR`. |
+| `PLAN_GATE_REQUIRE_APPROVAL` | no | Plan approval (see [Plan approval](#plan-approval)). Required **whenever `PLAN_GATE_LOG_DIR` is set**; only an explicit `off` / `0` / `false` / `no` (case-insensitive) turns it off. Any other non-empty value counts as on, and with no log dir that is a configuration error (every gated call that needs a plan is denied with a message). Unset or empty: follows `PLAN_GATE_LOG_DIR`. |
 | `PLAN_GATE_MCP_WRITE_TOOLS` | no | Comma-separated MCP tools that modify external state. Each entry is `tool` (a bare name: **default-denied**, arguments never read) or `tool:arg` / `tool:arg1+arg2` (the argument(s) that hold target paths; see below). |
 | `PLAN_GATE_WRITER_SCRIPTS` | no | Extra "writer scripts", comma-separated `name.py:argpos`. A Bash/PowerShell command that runs `python`/`python3`/`py` on a listed script is treated as a file write to that script's target argument and gated like a `>` redirect target (see below). `atomic-write.py:1` is built in. A malformed value **fails closed**. |
 | `PLAN_GATE_SCOPE_LEASE` | no | Path to `scope-lease.py`. When set, every file-write target (Edit/Write/NotebookEdit `file_path`, Bash redirect targets, writer-script targets, MCP path arguments) is looked up with `scope-lease.py holder` before the plan check; a path leased by another agent is denied (see [scope-lease honored](#scope-lease-honored)). Unset: no lookup, no subprocess. |
@@ -141,14 +141,31 @@ row for that plan's name and the sha256 of its **whole file as it is now**. Any 
 approval (one byte, including the `status` line) voids it.
 
 ```
-python plan-gate.py approve <plan.md> [--no-tty-check]
+python plan-gate.py approve <plan.md> --log-dir <DIR> [--plans-dir <DIR>] [--no-tty-check]
 ```
 
-- Run it yourself, in a terminal. It reads `PLAN_GATE_LOG_DIR` (required; without it the
-  command exits nonzero). It **refuses without an interactive terminal on stdin** (exit 3)
-  unless `--no-tty-check` is given (CI / scripted approval); the flag is recorded on the row.
-- `<plan.md>` is a path, or a file name inside `PLAN_GATE_PLANS_DIR`. A plan's approval is tied
-  to its **file name** and its bytes (a renamed or copied file needs its own approval).
+- Run it yourself, in a terminal. The log directory comes from `--log-dir`, else
+  `PLAN_GATE_LOG_DIR` (your shell usually does not have the harness environment, so pass
+  `--log-dir`; without either the command exits nonzero). It **refuses without an interactive
+  terminal on stdin** (exit 3) unless `--no-tty-check` is given (CI / scripted approval); the
+  flag is recorded on the row.
+- Before recording anything it prints the plan's absolute path, size, sha256, the log it will
+  write to, and the plan's `allowed_paths` and `allowed_commands` as the gate parses them.
+  On a terminal you must then type `yes`; anything else aborts and records nothing. With
+  `--no-tty-check` it prints the same and does not prompt.
+- `<plan.md>` is a path, or a file name inside the plans directory (`--plans-dir`, else
+  `PLAN_GATE_PLANS_DIR`); a relative name is looked up there first, not in the current
+  directory. When a plans directory is known, a plan that is not directly inside it is refused.
+  A plan's approval is tied to its **file name** and its bytes (a renamed or copied file needs
+  its own approval).
+- **Latest approval wins.** For each plan name only the most recent `approve` row counts.
+  Approving a new version retires the earlier approval, and restoring older approved bytes does
+  not reactivate the plan (approve it again). There is no expiry.
+- An `approve` row counts only if it sits on an unbroken chain link (its `prev` is the hash of
+  the log line right before it) and its own hash verifies; a row copied in from another log, or
+  edited, is ignored. The gate streams the log in 1 MiB blocks and parses only approve rows
+  (bounded memory). **Rotating, truncating or archiving the log voids every approval**: plans
+  must then be approved again.
 - The row is appended to the same hash-chained log under the same lock. Fields (all strings):
   the usual `ts`, `decision` / `surface` / `class` = `approve`, `tool` = `plan-gate approve`,
   `target` (absolute plan path), `plan` (file name), `cwd`, plus `sha256`, `os_user`,
@@ -156,10 +173,14 @@ python plan-gate.py approve <plan.md> [--no-tty-check]
   unavailable), `hostname` and `no_tty_check` (`"true"` / `"false"`).
 - An unapproved `status: active` plan is **inert** (it does not count toward the one-active
   rule either) and the gate denies with: *plan X is marked active but not approved (or changed
-  since approval). Run: plan-gate.py approve X* (decision class `plan_not_approved`). Read-only
-  commands and always-writable directories stay available, so an agent can keep drafting plans.
+  since approval). Ask a human to run, in a terminal: `<python> <abs path to plan-gate.py>
+  approve <abs plan path> --log-dir <abs log dir this gate reads>`* (decision class
+  `plan_not_approved`). Read-only commands and always-writable directories stay available, so
+  an agent can keep drafting plans.
 - `plan-gate.py verify-log` still verifies the chain and also lists every approve row
-  (who, when, which plan hash). Altering an approve row fails the chain check.
+  (who, when, which plan hash), marking rows the gate would ignore (`BROKEN LINK, not
+  honoured`, `ROW ALTERED, not honoured`) and older rows replaced by a later approval
+  (`superseded by line N`). Altering an approve row fails the chain check.
 - A gated Bash/PowerShell command that runs `plan-gate.py approve` is **denied** (class
   `approve_self_protect`): interpreter + `plan-gate.py` + `approve` in any spelling the
   writer-script detection recognizes, `plan-gate.py` executed directly, a script or subcommand
@@ -170,11 +191,20 @@ python plan-gate.py approve <plan.md> [--no-tty-check]
 - **What this is, and is not.** The approver's identity is the OS user and git config the person
   themselves set. It shows approval happened outside the gated agent, at a recorded time, for
   exact plan bytes, and the chain shows whether the record was altered. It is tamper-evident,
-  not authentication: someone with a shell can approve as anyone they can configure.
+  not authentication: someone with a shell can approve as anyone they can configure. The
+  terminal check is not authentication either.
+- **Honest limits.** Spotting the `approve` command is best effort. plan-gate gates tool calls,
+  not what an allowed program does: an approved plan that admits running code the agent can
+  change (`python3`, `make`, `npm test`, a script the agent can edit) can be used to approve
+  another plan. Keep such entries out of plans you do not fully trust, or approve plans from
+  a tree the agent cannot write.
+- **Windows terminals.** On Windows a real console is required (`GetConsoleMode`); a NUL stdin
+  does not count. Git Bash / mintty without `winpty` may not present a console to Python. Then
+  run it through `winpty`, or use `--no-tty-check` (recorded on the row).
 - Upgrading: setting `PLAN_GATE_LOG_DIR` now implies approval. Existing plans stay inert
   until approved once; set `PLAN_GATE_REQUIRE_APPROVAL=off` to keep the old behavior.
-- Cost: each hook call that reaches the plan check reads the log once to find approve rows
-  (about +20 ms on a 60 MB log).
+- Cost: each hook call that reaches the plan check streams the log once to find approve rows
+  (tens of milliseconds on a log of tens of MB).
 
 ## scope-lease honored
 

@@ -95,9 +95,9 @@ mkdir -p /home/you/.agent/plans /home/you/.agent/logs
 ```
 
 Setting `PLAN_GATE_LOG_DIR` is what turns on the audit log: the hash-chained record of every
-decision. It is opt-in, so without it the gate still decides but leaves no record. A later
-release (see [Known limits](#known-limits-today)) will require the log directory for plan
-approval, so set it now.
+decision. It also turns on plan approval: with a log directory set, a plan only takes effect
+after a human approves it (step 4b). Without it the gate still decides but leaves no record and
+asks for no approval.
 
 **4. Write a plan.** Copy [`examples/sample-plan.md`](examples/sample-plan.md) into the plans
 directory and edit it. Three things matter for a first run:
@@ -111,8 +111,23 @@ directory and edit it. Three things matter for a first run:
   still work), whatever else the plan says. The sample plan's relative paths
   are for readability; replace them with absolute ones for your project. Details:
   [`CONFIG.md`](CONFIG.md#path-resolution-notes) and [`AUTHORING.md`](AUTHORING.md) section 3.
-- Set `status: active`. Today this is how a plan becomes live; nothing records who set it (see
-  [Known limits](#known-limits-today)).
+- Set `status: active`. With `PLAN_GATE_LOG_DIR` set, that alone does not make the plan live:
+  it is live once a human approves it (step 4b). Without a log directory, `status: active` is
+  all it takes.
+
+**4b. Approve the plan** (when `PLAN_GATE_LOG_DIR` is set). In a terminal of your own, not the
+agent's, run the command below; the log directory must be passed because your shell does not
+have the harness environment. It shows the plan's path, size, hash, `allowed_paths` and
+`allowed_commands`, and records your approval of those exact bytes when you type `yes`.
+
+```bash
+python3 /absolute/path/to/strictlock/plan-gate/plan-gate.py approve \
+  /home/you/.agent/plans/my-plan.md --log-dir /home/you/.agent/logs
+```
+
+Any later edit to the plan file, even one byte, voids the approval; approve again. If the gate
+denies with "marked active but not approved", its message holds this exact command. Details,
+including CI use (`--no-tty-check`), are in [`CONFIG.md`](CONFIG.md#plan-approval).
 
 **5. Wire the hook.** Put the `env` and `hooks` blocks from
 [`examples/settings.json`](examples/settings.json) into your Claude Code settings file, with your

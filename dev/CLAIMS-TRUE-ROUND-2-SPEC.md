@@ -58,6 +58,11 @@ tamper-evident-not-tamper-proof framing as the decision log.
 dir is a configuration error, and the gate denies with a clear message. This also fixes #11 for
 anyone who turns approval on.
 
+**Approval replay (Q8, 2026-10-17):** for each plan name only the most recent approval counts.
+Restoring older approved bytes does not reactivate the plan, and approving a new version retires
+the earlier approval. No expiry or TTL. An `approve` row also counts only if it sits on an
+unbroken chain link and its own hash verifies, so a row copied from another log is ignored.
+
 **Calls for the maintainer:**
 - **Q1 — default.** (a) **Recommended:** approval required whenever `PLAN_GATE_LOG_DIR` is set, and
   the example settings set it. Off only via an explicit `PLAN_GATE_REQUIRE_APPROVAL=off`. (b)
@@ -189,3 +194,5 @@ Q5 lease-held behavior · Q6 strict-lease default · Q7 writer list.
 - Q5: an edit to a path leased by another agent is denied.
 - Q6: strict lease mode (`PLAN_GATE_REQUIRE_LEASE=on`) is opt-in.
 - Q7: `atomic-write.py` is built in, extendable with `PLAN_GATE_WRITER_SCRIPTS`.
+
+**2026-10-17 (maintainer):** Q8 — approval replay: latest approval for a plan name wins; no expiry.

@@ -27,7 +27,9 @@ to the login page.
   for readability: inside a git worktree, a plan claims that worktree only through an
   absolute entry under it, so a plan with only relative paths denies every write and every
   non-read-only command there. (Example: `/absolute/path/to/project/src/components/Header.tsx`.)
-- `status: active` is, today, simply what makes the plan live; nothing records who set it.
+- `status: active` arms the plan. With `PLAN_GATE_LOG_DIR` set it is live only after a human
+  runs `plan-gate.py approve` on the file (see [`../CONFIG.md`](../CONFIG.md#plan-approval));
+  editing the file afterwards, even the `status` line, voids that approval.
 - `allowed_commands` — a Bash command is allowed only if **every segment** of it (split on
   `&&`, `||`, `;`, `|`, `&`, newlines, and including `$(...)` bodies) **starts with** one of
   these prefixes; a PowerShell command must start with one. Read-only commands like

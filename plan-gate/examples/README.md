@@ -37,6 +37,18 @@ absolute paths everywhere avoids that trap and costs nothing elsewhere.
 The edited plan lists `/absolute/path/to/project/src/components/Header.tsx` in `allowed_paths`
 and `npm test` in `allowed_commands`.
 
+**Approve it.** `PLAN_GATE_LOG_DIR` is set, so the plan takes effect only after a human approves
+its exact bytes. Run this in a terminal, review what it prints, and type `yes` (repeat it after
+every edit to the plan file):
+
+```bash
+python3 /absolute/path/to/strictlock/plan-gate/plan-gate.py approve \
+  /home/you/.agent/plans/sample-plan.md --log-dir /home/you/.agent/logs
+```
+
+Without this step every example below is denied with "marked active but not approved". (To skip
+approval in a throwaway demo, unset `PLAN_GATE_LOG_DIR` or set `PLAN_GATE_REQUIRE_APPROVAL=off`.)
+
 The gate does use your working directory: it looks there for the git repository or worktree you
 are in. Run the examples from a directory that is not inside an unrelated git worktree (a plain
 shell directory is fine, or the project itself). Run from inside a different worktree, the plan
@@ -117,7 +129,6 @@ If a hook you wired into a real session never produces rows like these, it is no
 
 ## What happens with no active plan
 
-If no plan in `PLAN_GATE_PLANS_DIR` has `status: active`, every gated tool call is **denied**
-— the deny-by-default floor. Set a plan active first. (Today `status: active` is written by
-whoever can edit the plan file; nothing records who approved it. See
-[Known limits](../README.md#known-limits-today).)
+If no plan in `PLAN_GATE_PLANS_DIR` is active, every gated tool call is **denied** — the
+deny-by-default floor. A plan is active when it says `status: active` and, with a log directory
+set, a human has approved its exact bytes (see the approve step above).

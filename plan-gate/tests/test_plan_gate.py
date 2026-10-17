@@ -2033,7 +2033,9 @@ class ScopeLeaseTests(unittest.TestCase):
     def run_bash(self, cmd, owner, **more):
         # Bash command text uses forward slashes: shlex would eat the backslashes of
         # a Windows path written unquoted.
-        cmd = cmd.replace(str(self.repo), self.repo.as_posix())
+        # (No command in this class uses a backslash on purpose, so convert them all:
+        # the tail of a path such as repo\leased.txt has one too.)
+        cmd = cmd.replace("\\", "/")
         return run_gate({"tool_name": "Bash", "tool_input": {"command": cmd}},
                         self.plans, cwd=self.repo, extra_env=self.env(owner, **more))
 
@@ -2309,7 +2311,139 @@ class ApprovalTests(unittest.TestCase):
         self.assertIn("marked active but not approved (or changed since approval)", r)
         self.assertIn("plan-gate.py approve", r)
         self.assertIn("active.md", r)
+        # Addressed to a human, with the exact command: interpreter, absolute gate
+        # path, absolute plan path and the log directory this gate is reading.
+        self.assertIn("Ask a human to run, in a terminal:", r)
+        self.assertIn(str(GATE), r.replace('"', ""))
+        self.assertIn(str(self.plan), r.replace('"', ""))
+        self.assertIn("--log-dir", r)
+        self.assertIn(str(self.logs), r.replace('"', "").replace("'", ""))
         self.assertEqual(self.rows()[-1]["class"], "plan_not_approved")
+
+    def test_the_command_in_the_deny_message_works(self):
+        import shlex
+        r = self.reason(self.edit())
+        cmd = r.split("in a terminal: ", 1)[1]
+        argv = shlex.split(cmd, posix=(os.name != "nt"))
+        env = dict(os.environ)
+        env.pop("PLAN_GATE_LOG_DIR", None)  # the human's shell has no PLAN_GATE_* vars
+        env.pop("_PLAN_GATE_TEST_PLANS_DIR", None)
+        a = subprocess.run(argv + ["--no-tty-check"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertEqual(decision(self.edit()), "allow")
+
+    # --- Q8: the latest approval for a plan name wins ---------------------------------
+    def test_latest_approval_wins_and_restoring_old_bytes_does_not_reactivate(self):
+        v1 = self.plan.read_bytes()
+        v2 = v1 + b"\nversion two\n"
+        self.assertEqual(self.approve().returncode, 0)           # approve v1
+        self.assertEqual(decision(self.edit()), "allow")
+        self.plan.write_bytes(v2)
+        self.assertEqual(self.approve().returncode, 0)           # approve v2
+        self.assertEqual(decision(self.edit()), "allow")
+        self.plan.write_bytes(v1)                                # restore v1
+        p = self.edit()
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("changed since approval", self.reason(p))
+        self.assertEqual(self.approve().returncode, 0)           # re-approve v1
+        self.assertEqual(decision(self.edit()), "allow")
+        self.plan.write_bytes(v2)                                # v2 is now the retired one
+        self.assertEqual(decision(self.edit()), "deny")
+
+    def test_verify_log_marks_superseded_approvals(self):
+        v1 = self.plan.read_bytes()
+        self.assertEqual(self.approve().returncode, 0)
+        self.plan.write_bytes(v1 + b"\nv2\n")
+        self.assertEqual(self.approve().returncode, 0)
+        v = self.cli("verify-log")
+        self.assertEqual(v.returncode, 0, v.stdout)
+        self.assertIn("2 plan approval(s) recorded", v.stdout)
+        self.assertIn("superseded by line 2", v.stdout)
+
+    # --- chain linkage at gate time ---------------------------------------------------
+    def test_a_row_transplanted_from_another_log_is_not_honored(self):
+        other = Path(self._tmp.name) / "other-logs"
+        a = self.cli("approve", str(self.plan), "--no-tty-check", "--log-dir", str(other))
+        self.assertEqual(a.returncode, 0, a.stderr)
+        stolen = (other / "plan-gate-decisions.log").read_bytes()
+        self.edit()  # real log now has a normal row (a different chain head)
+        with open(str(self.logs / "plan-gate-decisions.log"), "ab") as fh:
+            fh.write(stolen)  # self-consistent row, wrong predecessor
+        p = self.edit()
+        self.assertEqual(decision(p), "deny", p.stdout)
+        v = self.cli("verify-log")
+        self.assertEqual(v.returncode, 2)
+        self.assertIn("BROKEN LINK, not honoured", v.stdout)
+
+    def test_a_row_right_after_the_genesis_is_honored_and_blank_lines_do_not_break_links(self):
+        self.assertEqual(self.approve().returncode, 0)
+        self.assertEqual(decision(self.edit()), "allow")
+
+    def test_large_blocks_and_row_at_a_block_boundary(self):
+        # Approve rows spread across >1 MiB so the streaming scan crosses block edges.
+        log = self.logs / "plan-gate-decisions.log"
+        self.logs.mkdir()
+        prev = "0" * 64
+        fh = log.open("ab")
+        for n in range(6000):
+            row = {"class": "allowed_paths", "decision": "allow", "surface": "file",
+                   "target": "/x/%d" % n, "reason": "r" * 200, "prev": prev}
+            canon = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            row["h"] = hashlib.sha256((prev + "\n" + canon).encode("utf-8")).hexdigest()
+            prev = row["h"]
+            fh.write((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        fh.close()
+        self.assertGreater(log.stat().st_size, 1 << 20)
+        self.assertEqual(self.approve().returncode, 0)
+        self.assertEqual(decision(self.edit()), "allow")
+        self.assertEqual(self.cli("verify-log").returncode, 0)
+
+    # --- approve: --log-dir, plan resolution, what the human sees ---------------------
+    def test_log_dir_flag_overrides_the_environment(self):
+        elsewhere = Path(self._tmp.name) / "elsewhere"
+        a = self.cli("approve", str(self.plan), "--no-tty-check", "--log-dir", str(elsewhere),
+                     log_dir=str(self.logs / "ignored"))
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertTrue((elsewhere / "plan-gate-decisions.log").exists())
+        self.assertFalse((self.logs / "ignored").exists())
+
+    def test_relative_name_resolves_against_the_plans_dir_not_the_cwd(self):
+        decoy = self.work / "active.md"
+        decoy.write_text("---\nname: decoy\nstatus: active\n---\n", encoding="utf-8")
+        a = self.cli("approve", "active.md", "--no-tty-check")  # cwd = work
+        self.assertEqual(a.returncode, 0, a.stderr)
+        (row,) = [r for r in self.rows() if r["class"] == "approve"]
+        self.assertEqual(row["sha256"], hashlib.sha256(self.plan.read_bytes()).hexdigest())
+
+    def test_plan_outside_the_plans_dir_is_refused(self):
+        stray = self.work / "stray.md"
+        stray.write_text(self.plan.read_text(encoding="utf-8"), encoding="utf-8")
+        a = self.cli("approve", str(stray), "--no-tty-check")
+        self.assertEqual(a.returncode, 2)
+        self.assertIn("not in the plans directory", a.stderr)
+        self.assertFalse((self.logs / "plan-gate-decisions.log").exists())
+
+    def test_plans_dir_flag(self):
+        other = Path(self._tmp.name) / "other-plans"
+        other.mkdir()
+        (other / "p.md").write_text("---\nname: p\nstatus: active\n---\n", encoding="utf-8")
+        a = self.cli("approve", "p.md", "--no-tty-check", "--plans-dir", str(other))
+        self.assertEqual(a.returncode, 0, a.stderr)
+        b = self.cli("approve", str(self.plan), "--no-tty-check", "--plans-dir", str(other))
+        self.assertEqual(b.returncode, 2)
+
+    def test_approve_shows_what_is_being_approved(self):
+        a = self.approve()
+        out = a.stdout
+        self.assertIn(str(self.plan.resolve()), out)
+        self.assertIn("%d bytes" % len(self.plan.read_bytes()), out)
+        self.assertIn(hashlib.sha256(self.plan.read_bytes()).hexdigest(), out)
+        self.assertIn("allowed_paths (1)", out)
+        self.assertIn(str(self.allowed), out)
+        self.assertIn("allowed_commands (1)", out)
+        self.assertIn("npm test", out)
+        self.assertNotIn("Type 'yes'", out)  # --no-tty-check: no prompt
 
     def test_approve_then_allow(self):
         a = self.approve()
@@ -2377,10 +2511,15 @@ class ApprovalTests(unittest.TestCase):
         self.assertTrue(row["ts"].endswith("Z"))
 
     def test_git_identity_is_empty_when_unavailable(self):
-        self.assertEqual(self.approve().returncode, 0)
+        iso = Path(self._tmp.name) / "isolated-home"
+        iso.mkdir()
+        env = {"GIT_CONFIG_GLOBAL": str(iso / "none"), "GIT_CONFIG_NOSYSTEM": "1",
+               "HOME": str(iso), "USERPROFILE": str(iso), "XDG_CONFIG_HOME": str(iso)}
+        a = self.cli("approve", str(self.plan), "--no-tty-check", env_extra=env)
+        self.assertEqual(a.returncode, 0, a.stderr)
         (row,) = [r for r in self.rows() if r["class"] == "approve"]
-        self.assertIn("git_user_name", row)
-        self.assertIn("git_user_email", row)
+        self.assertEqual(row["git_user_name"], "")
+        self.assertEqual(row["git_user_email"], "")
 
     def test_approve_rows_share_the_chain_and_verify(self):
         self.edit()  # a normal decision row first
@@ -2402,6 +2541,8 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(v.returncode, 2, v.stdout)
         self.assertIn("row hash invalid", v.stdout)
         self.assertIn("1 plan approval(s) recorded", v.stdout)
+        self.assertIn("not honoured", v.stdout)
+        self.assertEqual(decision(self.edit()), "deny")
 
     def test_a_forged_row_with_a_bad_hash_is_not_honored(self):
         self.logs.mkdir()
@@ -2431,14 +2572,29 @@ class ApprovalTests(unittest.TestCase):
     def test_approve_succeeds_on_a_terminal_and_records_no_flag(self):
         master, slave = os.openpty()
         try:
+            os.write(master, b"yes\n")
             a = self.cli("approve", str(self.plan), stdin=slave)
         finally:
             os.close(master)
             os.close(slave)
         self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertIn("Type 'yes'", a.stdout)
         (row,) = [r for r in self.rows() if r["class"] == "approve"]
         self.assertEqual(row["no_tty_check"], "false")
         self.assertEqual(decision(self.edit()), "allow")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "openpty"), "needs a pty")
+    def test_anything_but_yes_on_a_terminal_aborts_with_no_row(self):
+        for answer in (b"no\n", b"\n", b"y\n", b"YES\n"):
+            master, slave = os.openpty()
+            try:
+                os.write(master, answer)
+                a = self.cli("approve", str(self.plan), stdin=slave)
+            finally:
+                os.close(master)
+                os.close(slave)
+            self.assertEqual(a.returncode, 1, (answer, a.stdout, a.stderr))
+            self.assertFalse((self.logs / "plan-gate-decisions.log").exists(), answer)
 
     def test_approve_needs_a_log_dir(self):
         a = self.cli("approve", str(self.plan), "--no-tty-check", log_dir="")
@@ -2582,6 +2738,17 @@ class ApprovalTests(unittest.TestCase):
             p = self.edit(extra_env={"PLAN_GATE_REQUIRE_APPROVAL": v})
             self.assertEqual(decision(p), "deny", v)
 
+    def test_unrecognised_values_without_a_log_dir_are_a_config_error(self):
+        for v in ("required", "enabled", "garbage", "on", "2"):
+            p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.allowed)}},
+                         self.plans, cwd=self.work, extra_env={"PLAN_GATE_REQUIRE_APPROVAL": v})
+            self.assertEqual(decision(p), "deny", v)
+            self.assertIn("PLAN_GATE_LOG_DIR", self.reason(p), v)
+        for v in ("off", "0", "false", "no"):  # explicit off values still work
+            p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.allowed)}},
+                         self.plans, cwd=self.work, extra_env={"PLAN_GATE_REQUIRE_APPROVAL": v})
+            self.assertEqual(decision(p), "allow", v)
+
     def test_no_log_dir_is_legacy_behavior(self):
         p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(self.allowed)}},
                      self.plans, cwd=self.work, extra_env={"PLAN_GATE_REQUIRE_APPROVAL": ""})
@@ -2604,7 +2771,8 @@ class ApprovalTests(unittest.TestCase):
                       extra_env={"PLAN_GATE_ALWAYS_WRITABLE": str(self.plans)})
         self.assertEqual(decision(p), "allow")  # agents may keep drafting plans
 
-    def test_decision_rows_stay_fast_to_scan_with_a_large_log(self):
+    def test_a_large_log_is_scanned_within_a_generous_time_bound(self):
+        import time
         self.assertEqual(self.approve().returncode, 0)
         log = self.logs / "plan-gate-decisions.log"
         # 20k chained filler rows after the approval: a scan must still find it.
@@ -2619,7 +2787,11 @@ class ApprovalTests(unittest.TestCase):
             fh.write((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
         fh.close()
         self.assertEqual(self.cli("verify-log").returncode, 0)
+        t0 = time.time()
         self.assertEqual(decision(self.edit()), "allow")
+        # ~6 MB log; a streaming scan is tens of ms. 10 s is generous enough for
+        # the slowest CI runner, tight enough to catch a quadratic regression.
+        self.assertLess(time.time() - t0, 10.0)
 
 
 if __name__ == "__main__":
