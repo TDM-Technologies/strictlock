@@ -45,8 +45,10 @@ blocks any action falling outside an explicitly approved envelope, *before* the 
 agent cannot talk its way past it, because the check executes in code the agent does not control.
 When something is unapproved, ambiguous, or unexpected, the default is *deny*. The floor holds
 even when the instructions are forgotten. [As of v0.x: the "approved envelope" is the active plan.
-Who approved a plan is a convention, not a recorded step; recorded approval is planned, not built.
-And a gate whose hook never starts does not gate.]
+With a decision-log directory set, a plan takes effect only after `plan-gate.py approve` records
+who (self-declared), when and the plan's sha256: tamper-evident, not authentication. Without a
+log directory, `status: active` alone activates a plan. And a gate whose hook never starts does
+not gate.]
 
 This is not a hypothesis. The patterns described here were extracted from a working system built
 to run agents against a HIPAA-regulated product — and that origin is the one piece of local color
@@ -126,8 +128,9 @@ argument of this paper rests on *how* that protocol is enforced.
   approved plan — not a vague intention.
 - **CONFIRM.** A human reads the plan and responds: yes, no, or modify. Approval is positive and
   specific. Nothing is approved by default, and approval names an envelope — *these* files,
-  *these* commands — not a blanket "go ahead." [As of v0.x the gate does not record this
-  approval: a plan is live when it says `status: active`. Recorded approval is planned, not built.]
+  *these* commands — not a blanket "go ahead." [As of v0.x, with a log directory set the gate
+  records this approval (`plan-gate.py approve`: who, when, plan sha256); without one, a plan is
+  live when it says `status: active`.]
 - **EXECUTE.** The agent may act on confirmed items and *only* confirmed items. An action that is
   not in the approved plan does not run.
 
@@ -144,8 +147,9 @@ not do the asking, and when it doesn't, the action still happens.
 The structural approach moves the rule out of the prompt and into a **pre-action hook at the
 tool boundary**. Every file edit, shell command, and recognized external-write tool call is
 intercepted *before it executes* and checked against the approved plan. [As of v0.x, MCP tools are seen only if the hook's matcher
-routes them to the gate, and are denied outright only if named in `PLAN_GATE_MCP_WRITE_TOOLS`;
-their arguments are not read.] If the action is in the
+routes them to the gate; those listed in `PLAN_GATE_MCP_WRITE_TOOLS` with an argument spec have
+each path checked against the plan, bare entries are denied, and unlisted MCP tools get no
+decision from the gate, so the harness's own prompt applies.] If the action is in the
 plan, it proceeds. If it is not, it is denied, and the agent is told why. The check runs in
 ordinary code, outside the model's control. The agent cannot reason its way past it, cannot
 "decide" the rule doesn't apply this time, cannot forget it under momentum. The rule is no longer
@@ -262,7 +266,7 @@ mitigation each forced, and — honestly — whether the mitigation *prevents* t
 
 | Failure mode | What happened | Mitigation | Prevents or detects? |
 |---|---|---|---|
-| **Momentum Bias** | The agent barrels from intent to action without a stop, producing changes the human never approved ("invisible agent" anxiety). | PLAN → CONFIRM → EXECUTE made *structural*: a pre-action gate blocks any recognized file edit, shell command, or configured external-write tool call outside an approved plan. | **Prevents** for Edit/Write/NotebookEdit calls and for Bash commands: every command is checked segment by segment (chains, pipes, background, newlines, `$(...)` and backtick bodies) against enumerated prefixes, and write redirections are gated like file writes; unparseable commands are denied. Caveat: PowerShell is still matched by prefix without compound parsing, and an enumerated prefix is still a wildcard over its own arguments. |
+| **Momentum Bias** | The agent barrels from intent to action without a stop, producing changes the human never approved ("invisible agent" anxiety). | PLAN → CONFIRM → EXECUTE made *structural*: a pre-action gate blocks any recognized file edit, shell command, or configured external-write tool call outside an approved plan. | **Prevents** for Edit/Write/NotebookEdit calls and for Bash commands: every command is checked segment by segment (chains, pipes, background, newlines, `$(...)` and backtick bodies) against enumerated prefixes, and write redirections are gated like file writes; unparseable commands are denied. Caveat: PowerShell is checked segment by segment but not as fully as Bash (parentheses, script blocks, backticks and file-writing cmdlets are denied rather than parsed), and an enumerated prefix is still a wildcard over its own arguments. |
 | **Prose governance ignored** | Instructions like "ask before deleting" are skipped under context pressure. | Move the rule out of the prompt and into a hook the model cannot talk its way past. | **Prevents.** |
 | **Silent drift / wrong-target writes** | An agent working in a git *worktree* wrote to the *main* repo because its plan listed main-repo paths. The write "succeeded" — at the wrong target. | Anchor path resolution at the session's worktree root; a plan counts as active only if an absolute authorized path resolves under the current worktree, otherwise gated writes and commands outside the read-only set are denied. | **Prevents** for gated writes and Bash commands (PowerShell: see the caveat in the Momentum Bias row). |
 | **Over-broad authorization** | Listing a *directory* as authorized was assumed to authorize everything inside it. | Authorization matches files by *exact* path; directory entries do not expand. The gate warns when a directory is listed. | **Prevents** (forces explicit enumeration). |
@@ -315,7 +319,7 @@ internal compliance-framework backlog, maintained separately.)
 |---|---|---|
 | **Allowlist-scoped, exact-path authorization** — an agent may touch only the specific files, and run only the commands matching the specific prefixes, an approved plan enumerates; least privilege by construction. | Per-plan record of exactly what each agent was permitted to access, scoped per unit of work and then retired. | **SOC 2 CC6** (logical access / least privilege); **ISO/IEC 42001** (controlled operation of the AI system) |
 | **Append-only, hash-chained decision log** — every decision the gate makes on a gated surface, *allow and deny*, recorded with timestamp, target, command, decision class, and the governing plan; the gate never authorizes a gated write to its own log. | A continuous monitoring trail of authorized activity and policy-violation attempts whose integrity is *verifiable*: rows are hash-chained, so edits and deletions within the record are detectable by re-running the bundled verifier. (Scope honesty: integrity-without-secret — a host-level adversary can still truncate the tail or re-forge the file wholesale; anchor the latest row hash externally where that threat matters.) | **SOC 2 CC7** (system monitoring / security logging); **ISO/IEC 42001** (AI system logging & monitoring) |
-| **PLAN → CONFIRM → EXECUTE + staging review** — no gated change runs unless the active plan lists it; human approval of the plan is the intended workflow. [As of v0.x approval is a convention and is not recorded by the gate; recorded approval is planned, not built.] | A record (when logging is on) of each action allowed or denied under which plan; an auditor can trace a modification back to the plan that scoped it, but not yet to who approved the plan. | **SOC 2 CC8** (change management); **ISO 9001 §8.5** (controlled production / service provision) |
+| **PLAN → CONFIRM → EXECUTE + staging review** — no gated change runs unless the active plan lists it, and with a log directory set a plan takes effect only after a human runs `plan-gate.py approve`. | A record (when logging is on) of each action allowed or denied under which plan, plus an `approve` row (self-declared identity, time, plan sha256) in the same hash chain; tamper-evident, not authentication. | **SOC 2 CC8** (change management); **ISO 9001 §8.5** (controlled production / service provision) |
 | **The approved plan as a documented artifact** — each unit of work is a versioned, inspectable plan stating scope, paths, and commands. | Versioned, retained documentation of intended work and its authorization. | **ISO 9001 §7.5** (documented information) |
 | **Hard-stop protocol + human-in-the-loop reviewer** — unexpected behavior halts for review; a human is the sole authorizing authority. | Demonstrated human oversight and a defined escalation path for anomalous AI behavior. | **ISO/IEC 42001** (human oversight of AI); **ISO 9001 §10.2** (nonconformity & corrective action) |
 | **Per-failure-mode register** (the §5 table) — known failure modes tracked with mitigation and an honest prevents-vs-detects status. | A live risk register tied to observed incidents and their controls. | **ISO 9001 §6.1** (risk-based thinking); **SOC 2 CC9** (risk assessment) |

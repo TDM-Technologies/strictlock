@@ -294,8 +294,8 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 
 ## Open after Stage 2 (2026-10-16)
 Built-but-narrower or deliberately not built in PR 2; each keeps its interim wording where a claim depends on it.
-- **plan-gate PowerShell segment + redirect handling** — not built. PowerShell stays prefix-match with no
-  compound parsing (`Get-Content x > f` still passes the read-only prefix). Needs its own scanner; docs name the gap.
+- **plan-gate PowerShell segment + redirect handling** — *built in round 2 (PR #22)*: segment-by-segment
+  checking, parentheses/script blocks/backticks/redirections denied, file-writing cmdlets denied even if listed.
 - **plan-gate Edit/Write always-writable check** — re-check whether a symlink inside an always-writable dir
   can escape it (paths are normalized; a `..` escape did not reproduce on 2026-10-16). Unverified; investigate before acting.
 - **plan-gate bypass-hunt, wider families** — a hand probe on 2026-10-16 (~70 payloads: chain/pipe/newline/
@@ -310,6 +310,25 @@ Built-but-narrower or deliberately not built in PR 2; each keeps its interim wor
 - **rituals follow-ups (PR #14):** (1) a lessons-file template so adopters can grow per-checklist learnings
   (HARVEST-PLAN "skill learnings siblings", still exploring); (2) a one-line COMPLIANCE.md pointer if a
   procedural-controls row is ever added (skipped: COMPLIANCE maps gate evidence; `rituals/` enforces nothing).
+
+## Open after round 2 (2026-10-17)
+Follow-ups from the claims-true round 2 build and its adversarial verification. The spec is
+[`CLAIMS-TRUE-ROUND-2-SPEC.md`](CLAIMS-TRUE-ROUND-2-SPEC.md).
+- **`allow()` skips the harness prompt** — plan-gate emits `permissionDecision: "allow"`, which skips Claude
+  Code's own permission prompt for Edit/Bash when the gate is off, on bypass, or for read-only commands.
+  Pre-existing. Consider emitting no decision there, as was done for unlisted MCP tools.
+- **Lexical `allowed_paths` matching** — a symlink plus `..` can escape for Edit, and `norm()` lowercases on
+  Linux, where paths are case-sensitive.
+- **`worktree_bypass:` accepts only `true`** — other truthy spellings are ignored.
+- **`cp` / `mv` / `tee` / `sed -i` are not lease-checked** — files written by commands admitted through
+  `allowed_commands` are not looked up, even with `PLAN_GATE_REQUIRE_LEASE=on`.
+- **Lease lookup cost** — about 65 ms added per write tool call when `PLAN_GATE_SCOPE_LEASE` is set.
+- **Rotating the decision log voids approvals** — approval rows live in the log; rotation, truncation or
+  archiving means every plan must be approved again.
+- **PowerShell quoted-exe paths** in printed commands (the approve command in deny messages) need an `&`
+  prefix to run.
+- **Pending maintainer calls:** Q10 — who may release another agent's lease; Q11 — how to retire an
+  approved plan (no revoke command exists; the docs say "see CONFIG").
 
 ## Done
 - **2026-10-16** — **Windows CI bring-up (PR #17)** — two real bugs fixed: scope-lease fed `git update-ref

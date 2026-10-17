@@ -23,14 +23,22 @@ Read the full argument in [`paper.md`](paper.md).
   only as authorized as its least-authorized segment. A redirection that writes (`>`, `>>`,
   `>|`, `&>`, `2>`) is a file write, gated like Edit/Write (`/dev/null` is always fine). A
   command the gate cannot confidently parse is denied. See [`AUTHORING.md`](AUTHORING.md) §2.
-- **PowerShell:** the command must *start with* an `allowed_commands` prefix or be a known
-  read-only cmdlet; there is no compound parsing yet (list each shape explicitly).
-- **MCP tools:** tools named in `PLAN_GATE_MCP_WRITE_TOOLS` are denied while a plan is active.
-  Their arguments are not read, so a configured tool is never allowed, even for a path the plan
-  lists. The gate only sees tool calls the hook is wired to: the example `matcher` in
-  [`examples/settings.json`](examples/settings.json) does not include MCP tools, so add them to
-  the matcher (for example `mcp__.*`) or the gate never sees them. Unconfigured MCP tools are
-  not gated.
+- **PowerShell:** the command is checked segment by segment, like Bash. Each segment must be a
+  known read-only command or start with an `allowed_commands` entry at a word boundary.
+  Parentheses, subexpressions, script blocks, backticks and redirections are denied, and
+  file-writing cmdlets (`Out-File`, `Set-Content`, `New-Item`, ...) are denied even if listed;
+  use Edit/Write for files.
+- **MCP tools:** a tool named in `PLAN_GATE_MCP_WRITE_TOOLS` with an argument spec
+  (`tool:path`) has each path in that argument checked like an Edit/Write target. A bare entry
+  is denied. An MCP tool you did not list gets no decision from plan-gate, so the harness's
+  normal permission prompt applies (a log row is kept). The hook only sees MCP calls if the
+  `matcher` routes them to it; the example matcher does (`^mcp__`). Limits: only the
+  arguments you name are checked, nested arguments cannot be named, and names are case-sensitive.
+  See [`CONFIG.md`](CONFIG.md#mcp-write-tools).
+- **Writer scripts:** `python3 atomic-write.py FILE` (and any script listed in
+  `PLAN_GATE_WRITER_SCRIPTS`) is gated as a write to FILE, like a `>` redirect. Only one target
+  per script is checked.
+- **Plan approval and leases:** see [Known limits](#known-limits-today) below.
 - Emits `{"hookSpecificOutput": {"permissionDecision": "allow"|"deny", ...}}` on **stdout**.
 - Appends every decision, allow and deny, to a hash-chained decision log (when
   `PLAN_GATE_LOG_DIR` is set) — your audit trail. `plan-gate.py verify-log` proves the
@@ -180,29 +188,33 @@ hook command, the interpreter, or the location of the code.
 
 ## Known limits today
 
-These are the places where the gate does less than a reader might assume. Planned changes are
-written up in [`../dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](../dev/CLAIMS-TRUE-ROUND-2-SPEC.md); this
-section describes what the code does now.
+These are the places where the gate does less than a reader might assume. The source of truth
+is [`CONFIG.md`](CONFIG.md).
 
-- **Plan approval is a convention.** A plan is active when its frontmatter says
-  `status: active`. Nothing records who approved it or when. With the example settings the
-  plans directory is always writable (`PLAN_GATE_ALWAYS_WRITABLE`), so a gated agent can write
-  a plan with `status: active` itself and it takes effect immediately. If you rely on a human
-  approving each plan, keep the plans directory out of `PLAN_GATE_ALWAYS_WRITABLE` and write
-  plans yourself. Recorded approval (who, when, and which exact plan bytes) is planned; it is
-  not built.
-- **MCP tools** are denied outright when named in `PLAN_GATE_MCP_WRITE_TOOLS`, and only if the
-  hook `matcher` routes them to the gate (see above). Checking their target paths against the
-  plan is planned.
-- **Scripts that write files are matched as commands, not by target.**
-  `python3 atomic-write.py STATE.md` (from [`externalized-memory`](../externalized-memory/))
-  is allowed or denied by its command prefix in `allowed_commands`. The file it writes is not
-  checked against `allowed_paths`. An `allowed_commands` entry that admits the script lets it
-  write any path the process can write, so listing a state file in `allowed_paths` does not by
-  itself limit what that script touches.
-- **Leases are not read.** plan-gate does not look at [`scope-lease`](../scope-lease/) locks.
-  Two gated agents can both be allowed to edit a file; a lease only excludes agents that call
-  `scope-lease.py acquire` themselves.
+- **Plan approval needs a log directory, and is tamper-evident, not authentication.** With a
+  log directory set, a plan takes effect only after someone runs `plan-gate.py approve` on its
+  exact bytes. The decision log records who (self-declared OS and git identity), when, and the
+  plan's sha256, in a hash chain that shows whether that record was later changed. Without
+  `PLAN_GATE_LOG_DIR`, `status: active` alone activates a plan. The latest approval for a plan
+  name wins; for retiring an approved plan, see [`CONFIG.md`](CONFIG.md#plan-approval).
+  plan-gate blocks the direct ways a gated agent could run `approve` itself, but a plan that
+  lets the agent run code it can change can be used to approve another plan. Rotating or
+  truncating the log voids every approval. Having the plans directory in
+  `PLAN_GATE_ALWAYS_WRITABLE` is fine: a draft does nothing until approved.
+- **MCP checks are only as complete as your configuration.** Only listed tools and listed
+  arguments are checked (see above); an unlisted MCP tool is left to the harness's own
+  permission prompt.
+- **Writer scripts:** only the scripts and launch forms listed in `CONFIG.md` are recognized.
+  Other launchers (`uv run`, `xargs`, `bash -c "..."`) are not.
+- **Leases.** With `PLAN_GATE_SCOPE_LEASE` set to the path of
+  [`scope-lease.py`](../scope-lease/scope-lease.py), a gated agent's write to a file another
+  agent holds a lease on is denied, on the write surfaces plan-gate parses (Edit/Write/
+  NotebookEdit, Bash redirects, writer scripts, MCP path arguments), checking both the spelled
+  path and the real path. Agents are told apart by `SCOPE_LEASE_OWNER`, else by the session's
+  git branch, so agents sharing a branch count as one. With `PLAN_GATE_REQUIRE_LEASE=on`, every
+  such write must hold a lease. Not covered: `cp`/`mv`/`tee`/`sed -i` or build tools admitted
+  through `allowed_commands`, hardlinks, nested repos or submodules, and code the agent
+  controls. A human's own edits are never blocked.
 - **A hook that does not start does not gate** (see the install section above).
 
 ## Targets & portability
