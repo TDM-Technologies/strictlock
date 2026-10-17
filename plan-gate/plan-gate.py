@@ -802,6 +802,28 @@ def _git_config_value(cwd: Path, key: str) -> str:
         return ""
 
 
+def _stdin_is_terminal() -> bool:
+    """True only for a real interactive terminal on stdin. On Windows, isatty()
+    also answers True for the NUL device (what subprocess stdin=DEVNULL hands an
+    agent tool call), so there a real console must answer GetConsoleMode. Any
+    doubt is False."""
+    try:
+        if sys.stdin is None or not sys.stdin.isatty():
+            return False
+        if os.name != "nt":
+            return True
+        import ctypes
+        import msvcrt
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        mode = ctypes.c_uint32()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetConsoleMode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        kernel32.GetConsoleMode.restype = ctypes.c_int
+        return bool(kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
+    except Exception:
+        return False
+
+
 def approve_cli(argv: list[str]) -> int:
     """`plan-gate.py approve <plan.md> [--no-tty-check]`: record that a human
     approved this plan's exact bytes. Exit 0 ok, 2 usage / config problem, 3 refused
@@ -824,10 +846,7 @@ def approve_cli(argv: list[str]) -> int:
         print("approve: PLAN_GATE_LOG_DIR is not set. Approvals are recorded in the "
               "decision log, so it must point at the log directory.", file=sys.stderr)
         return 2
-    try:
-        interactive = sys.stdin is not None and sys.stdin.isatty()
-    except Exception:
-        interactive = False
+    interactive = _stdin_is_terminal()
     if not interactive and not no_tty_check:
         print("approve: refusing to run without an interactive terminal on stdin (an "
               "agent tool call has none). Run it yourself in a terminal; for CI or "

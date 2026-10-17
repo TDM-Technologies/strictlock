@@ -187,8 +187,34 @@ def _git_run(
     return proc
 
 
+def _resolve_loose(p: Path) -> Path:
+    """Resolve symlinks and (on Windows) 8.3 short names in the longest EXISTING
+    prefix of `p`, then re-append the not-yet-existing tail. A plain Path.resolve()
+    on Windows with Python < 3.10 leaves a path whose last component does not exist
+    completely unresolved, so a short-name spelling (RUNNER~1) of a new file would
+    key differently from the same file spelled repo-relative. Same result as
+    resolve() when the whole path exists."""
+    p = Path(os.path.abspath(str(p)))
+    tail: list[str] = []
+    cur = p
+    while True:
+        try:
+            if cur.exists():
+                base = cur.resolve()
+                break
+        except OSError:
+            pass
+        if cur.parent == cur:
+            return p
+        tail.append(cur.name)
+        cur = cur.parent
+    for part in reversed(tail):
+        base = base / part
+    return base
+
+
 def _git_toplevel(root: Path) -> Path:
-    return Path(_git_run(root, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    return _resolve_loose(Path(_git_run(root, "rev-parse", "--show-toplevel").stdout.strip()))
 
 
 def _git_config_bool(root: Path, key: str) -> bool:
@@ -267,7 +293,7 @@ def _normalize_repo_relative(
     p = Path(path)
     if not p.is_absolute():
         p = top / p
-    p = p.resolve()
+    p = _resolve_loose(p)
     try:
         rel = p.relative_to(top).as_posix()
     except ValueError:

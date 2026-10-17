@@ -1538,6 +1538,8 @@ class WriterScriptTests(unittest.TestCase):
             self.skipTest("symlinks unavailable")
         return link
 
+    @unittest.skipIf(os.name == "nt", "Windows resolves `..` lexically before following "
+                     "symlinks (GetFullPathName), so there is no escape to test")
     def test_dotdot_through_symlink_cannot_reach_log_dir_via_writer(self):
         link = self._symlink_into_log_dir()
         target = link.as_posix() + "/../x.txt"  # resolves to <logs>/x.txt
@@ -1545,6 +1547,8 @@ class WriterScriptTests(unittest.TestCase):
         self.assertDenied("python3 %s %s" % (self.WRITER, target), log_dir=self.logs,
                           contains="PLAN_GATE_LOG_DIR")
 
+    @unittest.skipIf(os.name == "nt", "Windows resolves `..` lexically before following "
+                     "symlinks (GetFullPathName), so there is no escape to test")
     def test_dotdot_through_symlink_cannot_reach_log_dir_via_redirect(self):
         link = self._symlink_into_log_dir()
         target = link.as_posix() + "/../x.txt"
@@ -2027,6 +2031,9 @@ class ScopeLeaseTests(unittest.TestCase):
                         self.plans, cwd=self.repo, extra_env=self.env(owner, **more))
 
     def run_bash(self, cmd, owner, **more):
+        # Bash command text uses forward slashes: shlex would eat the backslashes of
+        # a Windows path written unquoted.
+        cmd = cmd.replace(str(self.repo), self.repo.as_posix())
         return run_gate({"tool_name": "Bash", "tool_input": {"command": cmd}},
                         self.plans, cwd=self.repo, extra_env=self.env(owner, **more))
 
@@ -2560,7 +2567,8 @@ class ApprovalTests(unittest.TestCase):
         log = self.logs / "plan-gate-decisions.log"
         p = self.edit(log)
         self.assertEqual(decision(p), "deny")
-        q = self.bash("echo x >> %s" % log)
+        q = self.bash("echo x >> %s" % log.as_posix())
+        self.assertIn("PLAN_GATE_LOG_DIR", self.reason(q))
         self.assertEqual(decision(q), "deny")
 
     # --- switches -------------------------------------------------------------------
