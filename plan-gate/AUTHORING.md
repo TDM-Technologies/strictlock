@@ -30,7 +30,14 @@ each `allowed_paths` entry with **exact, normalized equality** — not prefix, n
 "under." Normalization lower-cases, converts `\` to `/`, and strips a trailing slash; that is the
 *entire* flexibility. There is no `*`, no `**`, no `src/`-means-everything-inside.
 
-Three consequences to internalize:
+Four consequences to internalize:
+
+- **`allowed_paths` is checked against tool-call writes and shell redirections, not against what
+  an allowed command writes.** A Bash command is matched by its `allowed_commands` prefix. If
+  you allow `python3 externalized-memory/atomic-write.py`, that script can write any file the
+  process can reach; its target is not compared with `allowed_paths` today. Keep such
+  prefixes as narrow as the command allows, and do not read a state file's presence in
+  `allowed_paths` as a limit on that script.
 
 - **A directory entry authorizes nothing.** Listing `src/` does not authorize `src/foo.ts` or any
   other file — `src/` only ever matches a write whose target is literally `src/`, which never

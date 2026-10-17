@@ -5,7 +5,7 @@
 `plan-gate` is the flagship [StrictLock](../README.md) module. It's a single Python script
 wired as a **`PreToolUse` hook**: before an agent edits a file or runs a command, the gate
 reads the active *plan* and decides allow/deny. An agent may modify only the exact files and
-run only commands matching the command prefixes an approved plan enumerates. Everything else
+run only commands matching the command prefixes the active plan enumerates. Everything else
 is denied **before it runs**. When in doubt, the gate denies.
 
 Read the full argument in [`paper.md`](paper.md).
@@ -25,6 +25,12 @@ Read the full argument in [`paper.md`](paper.md).
   command the gate cannot confidently parse is denied. See [`AUTHORING.md`](AUTHORING.md) §2.
 - **PowerShell:** the command must *start with* an `allowed_commands` prefix or be a known
   read-only cmdlet; there is no compound parsing yet (list each shape explicitly).
+- **MCP tools:** tools named in `PLAN_GATE_MCP_WRITE_TOOLS` are denied while a plan is active.
+  Their arguments are not read, so a configured tool is never allowed, even for a path the plan
+  lists. The gate only sees tool calls the hook is wired to: the example `matcher` in
+  [`examples/settings.json`](examples/settings.json) does not include MCP tools, so add them to
+  the matcher (for example `mcp__.*`) or the gate never sees them. Unconfigured MCP tools are
+  not gated.
 - Emits `{"hookSpecificOutput": {"permissionDecision": "allow"|"deny", ...}}` on **stdout**.
 - Appends every decision, allow and deny, to a hash-chained decision log (when
   `PLAN_GATE_LOG_DIR` is set) — your audit trail. `plan-gate.py verify-log` proves the
@@ -33,9 +39,16 @@ Read the full argument in [`paper.md`](paper.md).
 It **fails closed** for governance *and for its own bugs*: a payload it cannot parse, or an
 unhandled exception inside the gate, produces a **deny** (JSON, exit 0) with a loud message
 saying what failed and how to bypass — never a non-zero exit, which a harness treats as
-"proceed". The escape hatch is `PLAN_GATE_BYPASS=on` set inline; it is honored even on that
+"proceed". The escape hatch is `PLAN_GATE_BYPASS=on`; it is honored even on that
 crash path, and every use is logged (`emergency_bypass`). The trade-off is accepted: if the
 harness changes its payload protocol, the gate denies until it is updated or bypassed.
+
+**Where to set the bypass.** The hook is started by the harness, not by the agent's shell, so
+`PLAN_GATE_BYPASS` (like every `PLAN_GATE_*` variable) reaches it only through the environment
+the harness gives it: the environment Claude Code was launched with, or the `env` block in its
+settings. Running `export PLAN_GATE_BYPASS=on` in the agent's Bash tool, or prefixing the
+agent's command with it, does nothing to the hook. Set it where you set the other
+`PLAN_GATE_*` variables, restart the session, and remove it afterwards.
 
 ## Migration note (plans written before segment checking)
 
@@ -53,29 +66,129 @@ matching `pytest`, `cat x; rm y` matching the read-only `cat`, `echo x > f` matc
 4. `git fetch` and mutating `git branch` / `git remote` / `find -delete` forms are no longer
    treated as read-only; grant the ones the work needs explicitly.
 
-## Quickstart (60 seconds)
+## Install plan-gate in a project (first install)
+
+This takes you from a fresh clone to a gate you have seen deny something. Use absolute paths
+throughout and do not rely on `~` or `$HOME` expanding (it does not in a settings `env` value),
+and note that a plan that lists only relative paths cannot claim a git worktree (step 4).
+
+**1. Get the code, outside the project the agent will work in.**
 
 ```bash
-# 1. Turn it on and point it at a plans directory.
-export PLAN_GATE=on
-export PLAN_GATE_PLANS_DIR="$HOME/.agent/plans"
-
-# 2. Author an approved plan with allowed_paths / allowed_commands frontmatter.
-#    See examples/sample-plan.md and SCHEMA.md.
-
-# 3. Wire plan-gate.py as a PreToolUse hook. See examples/settings.json for the
-#    Claude Code shape; adapt the stdin/stdout JSON contract to any other harness.
+git clone https://github.com/TDM-Technologies/strictlock.git /absolute/path/to/strictlock
 ```
 
-Then sanity-check the gate by hand:
+plan-gate is one file with no dependencies: `/absolute/path/to/strictlock/plan-gate/plan-gate.py`.
+
+**2. Check the interpreter you will name in the hook.** Python 3.8 or newer. On macOS and most
+Linux systems the command is `python3`; a bare `python` often does not exist.
 
 ```bash
-echo '{"tool_name":"Edit","tool_input":{"file_path":"/not/in/plan.txt"}}' \
-  | PLAN_GATE=on PLAN_GATE_PLANS_DIR="$HOME/.agent/plans" python plan-gate.py
+python3 --version
+```
+
+**3. Make a plans directory and a log directory** (outside the project, for example
+`/home/you/.agent/plans` and `/home/you/.agent/logs`).
+
+```bash
+mkdir -p /home/you/.agent/plans /home/you/.agent/logs
+```
+
+Setting `PLAN_GATE_LOG_DIR` is what turns on the audit log: the hash-chained record of every
+decision. It is opt-in, so without it the gate still decides but leaves no record. A later
+release (see [Known limits](#known-limits-today)) will require the log directory for plan
+approval, so set it now.
+
+**4. Write a plan.** Copy [`examples/sample-plan.md`](examples/sample-plan.md) into the plans
+directory and edit it. Three things matter for a first run:
+
+- List every file you want writable under `allowed_paths`, one entry per file.
+- **Use absolute paths.** In an ordinary checkout a repo-relative entry works. Inside a git
+  worktree (including the ones many agent tools create for each session), a plan claims that
+  worktree only if at least one `allowed_paths` entry is an absolute path under it. A plan with
+  only relative paths does not claim the worktree, so the gate denies every file write and every
+  command outside the read-only set there (read-only commands such as `git status` and `ls`
+  still work), whatever else the plan says. The sample plan's relative paths
+  are for readability; replace them with absolute ones for your project. Details:
+  [`CONFIG.md`](CONFIG.md#path-resolution-notes) and [`AUTHORING.md`](AUTHORING.md) section 3.
+- Set `status: active`. Today this is how a plan becomes live; nothing records who set it (see
+  [Known limits](#known-limits-today)).
+
+**5. Wire the hook.** Put the `env` and `hooks` blocks from
+[`examples/settings.json`](examples/settings.json) into your Claude Code settings file, with your
+own absolute paths, `python3` as the interpreter, and the absolute path to `plan-gate.py` from
+step 1. Restart the session so the settings load. For any other harness, adapt the
+stdin/stdout JSON contract.
+
+**6. Check that the gate is live.** Do not assume the hook is running. First by hand, with the
+same environment the settings give it. This proves the script runs and decides; it does not
+prove the harness is calling it:
+
+```bash
+echo '{"tool_name":"Edit","tool_input":{"file_path":"/absolute/path/not/in/plan.txt"}}' \
+  | PLAN_GATE=on PLAN_GATE_PLANS_DIR=/home/you/.agent/plans PLAN_GATE_LOG_DIR=/home/you/.agent/logs \
+    python3 /absolute/path/to/strictlock/plan-gate/plan-gate.py
 # -> {"hookSpecificOutput": {... "permissionDecision": "deny" ...}}
 ```
 
+Then the check that matters, inside the real session: ask the agent to edit a file that is
+**not** in the plan. You should see a deny that starts `plan-gate:`, and a new row should
+appear in `/home/you/.agent/logs/plan-gate-decisions.log`. Then confirm the chain is intact,
+passing the log path as an argument (the log directory is set in the harness settings, not in
+your shell):
+
+```bash
+python3 /absolute/path/to/strictlock/plan-gate/plan-gate.py verify-log /home/you/.agent/logs/plan-gate-decisions.log
+```
+
+If the out-of-plan edit goes through, or the log gets no new row, the hook is not running (see
+the next section).
+
 A full allowed-vs-denied walkthrough is in [`examples/README.md`](examples/README.md).
+
+### The gate fails closed once it runs, but it cannot protect you if it never starts
+
+Everything above about failing closed describes a gate that is running. A hook command that
+cannot launch fails in one of two ways, depending on what is wrong:
+
+- **The interpreter is missing** (for example `python` on a system that only has `python3`).
+  The shell reports "command not found" (exit 127), which Claude Code treats as a non-blocking
+  error, so the agent's action proceeds. The symptoms: an out-of-plan action is not blocked,
+  and the decision log gets no rows. This is a silent fail-open.
+- **The script path is wrong** (a mistyped or relative path that does not resolve). Python
+  reports "can't open file" and exits 2, which Claude Code treats as a blocking error for a
+  `PreToolUse` hook, so **every** tool call is blocked with a "can't open file" message. This
+  is loud, not silent, but it is not the gate deciding anything.
+
+This is why step 6 is part of the install, and why it is worth repeating whenever you change the
+hook command, the interpreter, or the location of the code.
+
+## Known limits today
+
+These are the places where the gate does less than a reader might assume. Planned changes are
+written up in [`../dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](../dev/CLAIMS-TRUE-ROUND-2-SPEC.md); this
+section describes what the code does now.
+
+- **Plan approval is a convention.** A plan is active when its frontmatter says
+  `status: active`. Nothing records who approved it or when. With the example settings the
+  plans directory is always writable (`PLAN_GATE_ALWAYS_WRITABLE`), so a gated agent can write
+  a plan with `status: active` itself and it takes effect immediately. If you rely on a human
+  approving each plan, keep the plans directory out of `PLAN_GATE_ALWAYS_WRITABLE` and write
+  plans yourself. Recorded approval (who, when, and which exact plan bytes) is planned; it is
+  not built.
+- **MCP tools** are denied outright when named in `PLAN_GATE_MCP_WRITE_TOOLS`, and only if the
+  hook `matcher` routes them to the gate (see above). Checking their target paths against the
+  plan is planned.
+- **Scripts that write files are matched as commands, not by target.**
+  `python3 atomic-write.py STATE.md` (from [`externalized-memory`](../externalized-memory/))
+  is allowed or denied by its command prefix in `allowed_commands`. The file it writes is not
+  checked against `allowed_paths`. An `allowed_commands` entry that admits the script lets it
+  write any path the process can write, so listing a state file in `allowed_paths` does not by
+  itself limit what that script touches.
+- **Leases are not read.** plan-gate does not look at [`scope-lease`](../scope-lease/) locks.
+  Two gated agents can both be allowed to edit a file; a lease only excludes agents that call
+  `scope-lease.py acquire` themselves.
+- **A hook that does not start does not gate** (see the install section above).
 
 ## Targets & portability
 

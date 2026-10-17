@@ -46,9 +46,8 @@ concrete to look at.
 Each row answers three questions:
 
 1. **Mechanism** — what the gate actually does, and which shipped module it lives in.
-2. **Evidence it emits** — the artifact the mechanism produces *as a byproduct* of doing
-   its job. Nobody wrote an "audit logging feature"; the trail is the exhaust of the gate
-   keeping the agent inside an approved envelope.
+2. **Evidence it emits** — the artifact the mechanism produces as it does its job, where
+   the relevant logging is switched on (for plan-gate, `PLAN_GATE_LOG_DIR`; logging is opt-in).
 3. **What an auditor can trace** — the concrete path from an observed event back to its
    authorization, which is what most controls are really asking you to demonstrate.
 
@@ -74,13 +73,16 @@ command is split into segments (`&&`, `||`, `;`, `|`, a lone `&`, newlines, and 
 `$(...)`, backticks and `<(...)`) and *each segment* must independently match, so a compound
 command is only as authorized as its least-authorized segment; a redirection that writes
 (`>`, `>>`, `2>`, ...) is a file write gated like `Edit`/`Write`, and a command the gate cannot
-confidently parse is denied. (`PowerShell` commands are still matched by prefix only, with no
+confidently parse is denied. (A script admitted by an `allowed_commands` prefix, such as
+`python3 atomic-write.py STATE.md`, is matched as a command: the file it writes is not checked
+against `allowed_paths` today. MCP tools named in `PLAN_GATE_MCP_WRITE_TOOLS` are denied outright
+while a plan is active, and the hook only sees MCP tools if its matcher routes them.) (`PowerShell` commands are still matched by prefix only, with no
 compound parsing or redirection handling yet, and that includes the read-only cmdlet set, so
 `Get-Content x; Remove-Item y` passes with or without a plan; route agent shell work through Bash
 where that matters.) The envelope is
-approved per unit of work, then retired. This is least privilege by construction: the agent can
-touch only what an approved plan names, scoped to the session, bounded by enumerated paths and
-command prefixes.
+scoped per unit of work, then retired. This is least privilege by construction: the agent can
+touch only what the active plan names, scoped to the session, bounded by enumerated paths and
+command prefixes (who approved that plan is a convention today; see row C).
 
 **Evidence it emits.** A per-plan record of exactly which files and commands each agent
 was permitted to use, for one specific unit of work, with explicit start and retirement.
@@ -103,8 +105,8 @@ and deny alike — with timestamp, target, command, decision class, and the gove
 (`PLAN_GATE_LOG_DECISIONS=deny` opts down to denials plus emergency-bypass rows). Each row
 is hash-chained to the previous one and a bundled verifier (`plan-gate.py verify-log`)
 re-proves the chain; the gate refuses to authorize gated file-writes into its own log
-directory, no matter what a plan enumerates. The log is the *exhaust* of the gate doing its
-job; no separate logging feature was built. Durability of that record across stateless
+directory, no matter what a plan enumerates. The log is written by the gate as it decides, and it is
+opt-in: with no log directory set, no record is kept. Durability of that record across stateless
 sessions is what [`externalized-memory`](externalized-memory/) provides for the surrounding
 state (see row E): decisions stop being ephemeral chat and become an on-disk trace.
 
@@ -128,10 +130,15 @@ was written.
 ### C. PLAN → CONFIRM → EXECUTE + staging review → SOC 2 CC8 / ISO 9001 §8.5
 
 **Mechanism** ([`plan-gate`](plan-gate/), with [`commit-msg-gate`](commit-msg-gate/) at
-the version-control boundary). No change reaches the working system without an explicit,
-recorded human approval of a specific plan. The agent **proposes** (PLAN); a human reads
-it and approves an envelope of specific files and commands (CONFIRM); the agent may act on
-confirmed items and *only* confirmed items (EXECUTE). The earliest form of the control
+the version-control boundary). No gated action runs unless the active plan lists it. The
+intended workflow is: the agent **proposes** a plan (PLAN); a human reads it and approves an
+envelope of specific files and commands (CONFIRM); the agent may act on confirmed items and
+*only* confirmed items (EXECUTE). **Today the approval step is a convention, not something the
+gate records.** A plan is active when its frontmatter says `status: active`; nothing records who
+set that or when, and with the example settings (which make the plans directory writable by the
+agent) a gated agent could write an active plan itself. Recorded approval (who approved, when,
+and which exact plan bytes) is planned; see
+[`dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](dev/CLAIMS-TRUE-ROUND-2-SPEC.md). The earliest form of the control
 staged all agent output to a review directory before it merged — *nothing the agent
 produces reaches the real system unreviewed.* [`commit-msg-gate`](commit-msg-gate/) closes
 the loop at commit time: a `commit-msg` git hook rejects any commit that does not either
@@ -144,13 +151,16 @@ it; the module's `examples/` include a CI job (one adopters add to their own wor
 runs the same check over every non-merge commit on the PR head, with the bypass variable
 ignored, which is the check that does not depend on the committer's hook.
 
-**Evidence it emits.** A documented approve → act → record cycle for every change, plus a
-git history in which each functional commit names the plan that authorized it.
+**Evidence it emits.** With `PLAN_GATE_LOG_DIR` set, a record of each action allowed or
+denied and the plan that governed it, plus a git history in which each functional commit names
+the plan it was made under. The approval itself is not in the gate's record today; the plan
+file's own history in version control, or a separate sign-off, is where an auditor would look
+for it.
 
-**What an auditor can trace.** *Any modification back to the approval that authorized it* —
-from a committed change, to the plan referenced in its commit message, to the approved
-allowlist that scoped it, to the human confirmation that opened the envelope. The chain is
-mechanical, not reconstructed after the fact.
+**What an auditor can trace.** *A modification back to the plan that scoped it* — from a
+committed change, to the plan referenced in its commit message, to the allowlist in that plan.
+What the gate cannot show today is *who* turned that plan on and *when*; that link is a
+convention until recorded approval ships.
 
 **Maps to:** **SOC 2 CC8** (change management); **ISO 9001 §8.5** (controlled production /
 service provision).
@@ -169,8 +179,8 @@ too is documented information rather than a memory of a memory.
 **Evidence it emits.** Versioned, retained documentation of intended work, its scope, and
 its authorization — and a durable state record of the work's progress.
 
-**What an auditor can trace.** *The intended scope of a unit of work, who authorized it, and
-the state of record at any handoff* — by reading the plan file and the blackboard, both of
+**What an auditor can trace.** *The intended scope of a unit of work and the state of record at
+any handoff* (who authorized the plan is not recorded by the gate today; see row C) — by reading the plan file and the blackboard, both of
 which are real, diffable artifacts under version control, not testimony.
 
 **Maps to:** **ISO 9001 §7.5** (documented information). Relevant also to **SOC 2 CC8** (the
@@ -224,12 +234,12 @@ worktree the deny names that drift. A plan misaligned with where the session is 
 therefore fails closed loudly on the first gated action.
 
 **Evidence it emits.** Demonstrated human oversight of the AI system and a defined escalation path
-for anomalous behavior — every authorization carries a human signature, and every surprise produces
-a halt rather than an unreviewed action.
+for anomalous behavior — every surprise produces a halt rather than an unreviewed action. The
+human-authorization half is a convention today: the gate does not record who approved a plan (row C).
 
-**What an auditor can trace.** *That a human authorized each envelope, and that anomalies halted for
-review* — the human approval is in the record (rows C/D), and a denied/halted action in the log (row
-B) evidences the escalation path engaging.
+**What an auditor can trace.** *That anomalies halted for review* — a denied/halted action in the
+log (row B) evidences the escalation path engaging. *That a human authorized each envelope* is not
+evidenced by the gate's own record today (see row C); it depends on how you run plan approval.
 
 **Maps to:** **ISO/IEC 42001** (human oversight of the AI system); **ISO 9001 §10.2** (nonconformity
 & corrective action — the halt-for-review on unexpected behavior).
@@ -263,8 +273,10 @@ denying at the boundary before the bad write lands — the same fail-closed post
 suite, applied to a different resource (bounded per-session context cost). Its bypass variable is
 *distinct* (`MEMORY_CAP_BYPASS`), deliberately **not** shared with `plan-gate` or `commit-msg-gate`, so
 a narrow, deliberate escape from one cap can never silently disable the others. The bypass is
-single-use by convention (set inline per command; every use is logged, on stderr, so a lingering bypass
-is visible in the trail). An *invalid* path-matching regex falls back to the default rather than
+single-use by convention (every use is logged, on stderr, so a lingering bypass is visible in the
+trail). The hook is started by the harness, so the variable must be in the environment the harness
+was launched with (or its settings `env` block); an `export` in the agent's own Bash tool does not
+reach it, and only the value `1` is accepted today. An *invalid* path-matching regex falls back to the default rather than
 disabling the cap; a valid-but-wrong pattern still matches the wrong file, which the code cannot detect.
 An opt-in, hash-chained decision log (`MEMORY_CAP_DECISION_LOG=1` + `MEMORY_CAP_LOG_DIR`, verified with
 `memory-cap.py verify-log`) records allow, deny and bypass decisions on the capped index.
@@ -305,7 +317,7 @@ one never weakens the other.
 **Evidence it emits.** Proof that a derived artifact of record matches its source by
 construction at the moment it enters version control, plus — when a decision-log directory is
 configured — a per-decision append-only trail of each freshness check and every refusal (the
-same exhaust pattern as row B).
+same opt-in logging as row B).
 
 **What an auditor can trace.** *That a committed/pushed generated artifact that passed through
 the hooks corresponds to the sources it claims to derive from*, and, from the log, *when a stale
@@ -323,10 +335,12 @@ independent bypasses and fail-toward-on misconfiguration also *support* configur
 **Mechanism** ([`scope-lease`](scope-lease/)). [`plan-gate`](plan-gate/) (row A) enumerates the paths a unit
 of work *may* touch; `scope-lease` makes that hold **exclusive** across concurrent agents. A git-native,
 zero-service lock claims one ref per repo-relative path (`refs/locks/<sha1(path)>`, off-branch) via a
-transactional compare-and-swap — so two autonomous agents can never hold the same file at once. Enumerated →
-enumerated **and exclusive.** It closes the two failures human supervision used to cover: deadlock-on-crash
+transactional compare-and-swap — so two agents that each call `acquire` can never hold the same file at
+once. **The exclusion is voluntary today:** plan-gate does not read lock refs, so an agent that does not
+call `acquire` is not excluded, and any merge-time `fence-check` is a step you add yourself. Making
+plan-gate honor leases is planned (see [`dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](dev/CLAIMS-TRUE-ROUND-2-SPEC.md)). It closes the two failures human supervision used to cover: deadlock-on-crash
 (a past-deadline holder is reclaimed with a monotonic fencing token, never silently) and stale-holder-write
-(a reclaimed-away holder's `fence-check` fails at the merge gate). A binding boundary keeps it honest: the
+(a reclaimed-away holder's `fence-check` fails when you run it at your merge step). A binding boundary keeps it honest: the
 lock coordinates **agents only** and never walls a human's manual merge or edits; from a non-shared ref store
 it fails *loud* rather than silently degrading exclusion.
 
@@ -336,9 +350,9 @@ that acquire row (evicted holder, deadline and the new token) and surfaced on st
 least one scope are logged with the lock id, the lock's owner, the releasing owner and released paths; denied acquires are not logged. Exclusive
 access becomes an observable, after-the-fact artifact rather than a coordination convention.
 
-**What an auditor can trace.** *That concurrent automated actors operated under enforced segregation* — no two
-agents authorized to write the same file at the same time — *and* that contested access resolved
-deterministically (first-mover holds; the loser is denied and writes nothing) rather than by chance or
+**What an auditor can trace.** *That concurrent automated actors that use the lease operated under
+segregation* — no two lease-using agents holding the same file at the same time — *and* that contested
+access resolved deterministically (first-mover holds; the loser is denied and writes nothing) rather than by chance or
 last-writer-wins.
 
 **Maps to:** **SOC 2 CC6** (least privilege / segregation of duties, extended to concurrent exclusivity).
@@ -424,9 +438,9 @@ detective control, by design advisory so a false positive never wedges legitimat
 
 ## Two things to notice
 
-**First, every "evidence" column is exhaust.** Nobody wrote an "audit logging feature" or a
-"least-privilege module." The evidence is what the gates produce while simply doing their job of
-keeping the agent inside an approved envelope. The failure-handling machinery and the compliance
+**First, the evidence comes from the gates themselves.** There is no separate "audit logging
+feature" or "least-privilege module": the gates write the records as they decide, wherever you
+have switched logging on (it is opt-in). The failure-handling machinery and the compliance
 machinery are the same machinery.
 
 **Second, the same handful of mechanisms satisfies criteria across three different frameworks at
@@ -435,7 +449,9 @@ once** — a security framework (SOC 2), a quality framework (ISO 9001), and an 
 
 > *Can you show that this system only did what it was authorized to do, and prove it after the fact?*
 
-A fail-closed gate answers **yes by construction**. This document is a mapping, not a full closure log;
+A fail-closed gate that is running, with its logging switched on, answers **yes for the actions it
+sees**, within the limits listed in each row (for example, plan approval is not recorded today).
+This document is a mapping, not a full closure log;
 its only job is to show **where the evidence already lives** so that, when a real compliance program
 needs it, it is already being produced.
 

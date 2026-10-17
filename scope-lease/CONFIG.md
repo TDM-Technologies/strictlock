@@ -85,6 +85,6 @@ it.
 When `SCOPE_LEASE_LOG_DIR` is set, every successful acquire and every release that drops at
 least one scope appends a JSON line to `scope-lease.log` with a UTC timestamp, the event, the
 lock id, the owner, and the leased / reclaimed / released paths (a reclaiming acquire row also
-carries `reclaimed_detail`: evicted lock id / owner / deadline and the new token per path). A denied acquire writes no row. That append-only trail is the concurrency-side audit exhaust —
-produced as a byproduct of the lock doing its job, the same posture as `plan-gate`'s decision
+carries `reclaimed_detail`: evicted lock id / owner / deadline and the new token per path). A denied acquire writes no row. That append-only trail is the concurrency-side audit record, written by the lock as it
+acts and only when you set the log directory, the same posture as `plan-gate`'s decision
 log. Logging is best-effort: a log-write failure never changes a lock outcome.

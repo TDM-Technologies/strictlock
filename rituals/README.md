@@ -22,8 +22,8 @@ around a stale premise. These checklists exist for that gap: they turn the loop
 > that the steps which *can* be made structural are handed to the gates that do enforce them
 > (see "How it composes" below). Where a step is only prose, the checklist says so.
 
-A **work package (WP)** throughout this module means one bounded unit of work with its own plan:
-a feature, a fix, a doc pass. "Unit of work" and "WP" are interchangeable.
+A **unit of work** throughout this module means one bounded piece of work with its own plan:
+a feature, a fix, a doc pass.
 
 ## What ships
 

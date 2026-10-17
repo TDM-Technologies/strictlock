@@ -49,7 +49,7 @@ still looks authoritative. Stage the new content and let
 
 ```bash
 # Build the new STATE.md however you like, then commit it atomically:
-your_state_generator | python ../atomic-write.py ~/project/.state/STATE.md
+your_state_generator | python3 ../atomic-write.py ~/project/.state/STATE.md
 ```
 
 The write either lands completely or fails loudly with a non-zero exit — there is
@@ -64,7 +64,7 @@ the sentinel line so the stale package can't be re-run:
 ```bash
 # After both sides are done with the package:
 printf 'MAILBOX EMPTY — no work package in flight.\n' \
-  | python ../atomic-write.py ~/project/.state/MAILBOX.md
+  | python3 ../atomic-write.py ~/project/.state/MAILBOX.md
 ```
 
 ## Better together: pair it with the gate

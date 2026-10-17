@@ -96,7 +96,7 @@ Present your sinks via the same spelling git uses (and the same one in `.gitattr
 | **When it acts** | after the merge stops on the sink | before the merge completes |
 | **Default mode** | `resolve` acts (with `--dry-run` to preview) | dry-run by default; `--apply` to act |
 | **Extras** | — | circuit breakers (a ceiling on repeated re-resolution), `--rebase` onto the base first |
-| **Reference** | `sink-resolver.py` (the git-native core) | HIPAAPath `conductor-resolve.py` |
+| **Reference** | `sink-resolver.py` (the git-native core) | not shipped here; a pre-merge wrapper you build around `resolve` |
 
 **Why two.** `merge=binary` and local hooks are **inert on a web-UI merge** — git ignores
 user-defined merge drivers there and fires no local `post-merge` hook. The default covers that
