@@ -4,7 +4,7 @@
 and what do the units running beside me collide with?**
 
 A [rituals](README.md) checklist. It is the companion to the
-[pre-WP currency check](pre-wp-currency-check.md). Where currency asks "is this backlog item
+[pre-work currency check](pre-wp-currency-check.md). Where currency asks "is this backlog item
 still relevant?", interaction analysis asks two structural questions about how units of work
 relate to each other. Both fire **before the plan is locked**, because that is the last cheap
 moment: once the plan is active, every discovery costs a stop-and-replan.

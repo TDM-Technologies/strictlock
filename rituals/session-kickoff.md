@@ -15,7 +15,7 @@ Conventions: `<state-file>` is your [externalized-memory](../externalized-memory
 `<plans-dir>` is your plan-gate plans directory; `<main>` is your trunk branch. Replace them
 with your project's names.
 
-A **work package (WP)** is one bounded unit of work with its own plan.
+A **unit of work** is one bounded piece of work with its own plan.
 
 ---
 

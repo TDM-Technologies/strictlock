@@ -130,11 +130,12 @@ evidence with a timestamp and a hash. An approval that lived in a context window
 **testimony from a witness who no longer exists.**
 
 StrictLock moves agent governance out of prose and into a fail-closed gate at the
-tool boundary; the gate checks every file edit, shell command, and recognized external-write call against an approved plan.
-But "approved" only means something because the plan, the state, and the close-out
+tool boundary; the gate checks every file edit and shell command (and denies configured MCP
+tools) against the active plan. Who approved a plan is a convention today, not a recorded step.
+But a plan only means something because the plan, the state, and the close-out
 all live on disk, in git, where an auditor — or just you, three weeks later — can
-trace what was authorized, what ran, and what changed. The audit trail isn't a
-feature you build; it's exhaust from the pattern working. Externalized memory is what
+trace what was authorized, what ran, and what changed. The decision log is written by the gate
+as it decides, but only when you switch it on. Externalized memory is what
 the gate stands on.
 
 ## The takeaway

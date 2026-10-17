@@ -91,6 +91,6 @@ a JSON line (every `check` outcome — `check-fresh`, `check-stale`, `error` —
 are logged too; a no-conflict `resolve` and a dry-run that would auto-resolve write no row, while a
 dry-run that escalates or errors does log) to
 `sink-resolver.log` with a UTC timestamp, the decision, the reason, the oracle mode, and the
-resolved sinks. That append-only trail is the merge-resolution audit exhaust — produced as a
-byproduct of the resolver doing its job, the same posture as the rest of the suite. Logging is
+resolved sinks. That append-only trail is the merge-resolution audit record, written by the
+resolver as it acts and only when you set the log directory, the same posture as the rest of the suite. Logging is
 best-effort: a log-write failure never changes a resolve outcome.

@@ -25,8 +25,8 @@ sources**. So the resolution is mechanical and provable:
 
 > take the merged sources → run the generator → byte-check the result → stage it.
 
-No guessing, because the sink encodes none. This is the same recipe the vault's conflict-free
-work-registry uses to keep its generated index merge-proof across concurrent agents.
+No guessing, because the sink encodes none. The same recipe works for any generated index or
+registry that several concurrent agents' branches all regenerate from their own sources.
 
 ## ⚠ The loud precondition (on the tin, not a footnote)
 
@@ -64,7 +64,10 @@ Two pieces, layered:
      rather than trust that your generator regenerates every configured sink.
 
 For the non-conflicting case (sources merged cleanly, the sink merely went stale), a plain
-`post-merge` hook regenerates it — see [`examples/`](examples/).
+`post-merge` hook regenerates it — see [`examples/`](examples/). That hook runs inside whatever
+process called `git merge` or `git pull`, so the `SINK_RESOLVER_*` variables must be set in the
+environment of every tool that merges (other terminals, GUI git clients and IDEs included), or the
+hook runs without them.
 
 ## Why the merge gate isn't enough on its own
 
@@ -119,9 +122,9 @@ merges primarily through a web UI and you want the merged commit to land **alrea
 (rather than caught after the fact in CI), the alternative placement is a **pre-merge worktree
 resolver**: run the regenerate-and-stage recipe *before* the merge completes, so a server-side
 fast-forward lands an already-correct tree. That shape — with a dry-run default and circuit
-breakers for runaway re-resolution — is heavier but workflow-agnostic. The reference
-implementation for it is HIPAAPath's `conductor-resolve.py`; `sink-resolver`'s `resolve` is the
-git-native core of the same recipe. See [SCHEMA.md](SCHEMA.md) "Placement variants".
+breakers for runaway re-resolution — is heavier but workflow-agnostic. This repository does not
+ship that variant; `sink-resolver`'s `resolve` is the git-native core of the same recipe, and you
+can build the pre-merge wrapper around it. See [SCHEMA.md](SCHEMA.md) "Placement variants".
 
 ## Files
 

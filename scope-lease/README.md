@@ -1,12 +1,19 @@
 # scope-lease
 
-**A git-native, zero-service exclusive lock over a path set — so N autonomous agents never
-edit the same source file at once.**
+**A git-native, zero-service exclusive lock over a path set. Agents that call `acquire` cannot
+hold the same file at the same time.**
 
 The Concurrency flagship of the [StrictLock](../README.md) suite. [`plan-gate`](../plan-gate/)
-enumerates the paths a unit of work *may* touch; `scope-lease` makes that hold **exclusive**
-across concurrent agents. plan-gate says "only these paths"; scope-lease adds "…and you hold
-them exclusively, against every other agent." Enumerated → enumerated **+ exclusive**.
+enumerates the paths a unit of work *may* touch; `scope-lease` lets agents claim those paths
+**exclusively** against each other. plan-gate says "only these paths"; scope-lease adds "…and
+no other lease-using agent holds them while you do."
+
+**Today the exclusion is voluntary.** A lease excludes only agents that themselves call
+`scope-lease.py acquire`. plan-gate does not read the lock refs, so a gated agent that never
+calls `acquire` can still edit a leased file, and nothing in the suite blocks it. Likewise,
+`fence-check` is a command you run at your own merge step; no merge gate ships with the suite.
+Having plan-gate honor leases is planned (see
+[`../dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](../dev/CLAIMS-TRUE-ROUND-2-SPEC.md)).
 
 It exists to close the two failures human supervision used to cover when you run one agent at a
 time and let two agents run at once:
@@ -14,8 +21,8 @@ time and let two agents run at once:
 - **deadlock-on-crash** — an agent dies mid-work still "holding" its files, and nothing frees
   them. scope-lease leases expire by deadline and the next agent reclaims them (logged).
 - **stale-holder-write** — an agent loses its claim (its lease was reclaimed while it slept)
-  and then wakes up and writes anyway. scope-lease catches this at the merge gate with a fence
-  check that refuses the write.
+  and then wakes up and writes anyway. A `fence-check` run at your merge step detects this and
+  refuses the write.
 
 There's no daemon, no server, no lock service to run. The only coordination point is git: a
 lock is an atomic `git update-ref` compare-and-swap on a ref that lives **off** every branch,
@@ -27,8 +34,9 @@ The instinct is "two agents both edited a file, git will flag the conflict." It 
 **silently auto-merges** two edits to the same file on *different lines* — no conflict, no
 marker, no signal. Two agents that each "cleanly" hold the same file produce a corrupt blend
 that no review of either diff would catch. The only reliable fix is to **stop both agents from
-holding the file at once**. That is what acquire-time exclusion does. The fence check is the
-backstop for the narrow window where a holder lost its lease but kept writing.
+holding the file at once**. That is what acquire-time exclusion does, for agents that use it.
+The fence check is the backstop for the narrow window where a holder lost its lease but kept
+writing.
 
 ## What it does
 
@@ -37,7 +45,7 @@ backstop for the narrow window where a holder lost its lease but kept writing.
   (all-or-nothing). A path held by a **live** holder → a structured **DENY** naming the
   conflicting path and holder (exit 5, writes nothing — first-mover wins). A path held by an
   **expired** holder → reclaimed with `token + 1`, **logged to stderr** (never a silent reaper).
-- **`fence-check`** — run at the merge gate: asserts this lock still holds every one of its
+- **`fence-check`** — run at your merge step (the suite does not ship a merge gate): asserts this lock still holds every one of its
   path-refs. A missing or foreign ref means it was reclaimed away → **exit 4, write nothing**.
 - **`release`** — drops only the locks this lock id owns. Idempotent.
 
@@ -48,15 +56,16 @@ default, or a standalone fallback.
 
 Same honesty the rest of StrictLock ships with — know exactly what guarantee you're buying:
 
-- **Prevents** (at `acquire`): two agents *concurrently holding the same file* on **one
-  machine sharing one `.git`**. This is the load-bearing guarantee. With correct repo-relative
+- **Prevents** (at `acquire`): two agents *that each call `acquire`* concurrently holding the
+  same file on **one machine sharing one `.git`**. This is the load-bearing guarantee; it does
+  not reach an agent that never calls `acquire`. With correct repo-relative
   normalization, the same file under any spelling — absolute vs. relative, `./` prefix, a
   trailing slash, and (on a case-insensitive or unicode-normalizing filesystem) a casing or
   NFD/NFC difference — collapses to one ref key, so the second claim is denied, not silently
   granted.
 - **Detects** (at `fence-check`): the **stale-holder-write** — an agent whose lease was
   reclaimed (it ran past its deadline) and then tries to finalize a write. The fence refuses it
-  at the merge gate. It does not *prevent* the agent from having edited its working tree; it
+  at your merge step. It does not *prevent* the agent from having edited its working tree; it
   prevents that stale edit from landing.
 - **Can't address**: (1) **cross-machine** exclusion. Acquire-time exclusion is only real when
   all worktrees share one `.git` ref store. A lock minted by a foreign store is a hard
@@ -106,7 +115,7 @@ small own-frontmatter file (`--source file --file scope.md`). See [SCHEMA.md](SC
 
 The mechanism is **pure git** — `update-ref` CAS on an off-branch ref, a JSON blob, a
 hash-object pin. There's nothing Claude-specific or harness-specific about it: any agent
-runtime that can shell out at session start and at the merge gate can adopt it. Configured
+runtime that can shell out at session start and at your merge step can adopt it. Configured
 entirely by environment variables; no machine-specific defaults are baked in.
 
 ## Files

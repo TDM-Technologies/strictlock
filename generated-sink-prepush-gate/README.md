@@ -73,10 +73,17 @@ defaults are baked in. If `GENERATED_SINK_PREPUSH_GATE` is not `on`, the hook is
 | `GENERATED_SINK_PREPUSH_GATE_GENERATOR_CWD` | no | Directory to run the generator from (absolute, or repo-root-relative). Default: the repo root. Useful when the generator lives in a subproject (e.g. `app`). |
 | `GENERATED_SINK_PREPUSH_GATE_TIMEOUT` | no | Seconds before the generator is treated as a fail-closed timeout. Default `120`. A non-integer or non-positive value falls back to the default **loudly** — a misconfiguration can't silently disable the gate. |
 | `GENERATED_SINK_PREPUSH_GATE_LOG_DIR` | no | Directory for the append-only decision log (`sink-prepush-gate.log`, one JSON line per decision). Your audit trail; if unset, no log is written. |
-| `GENERATED_SINK_PREPUSH_GATE_BYPASS` | no | `1` skips the gate. Single-use by convention: set it inline per push; every use is logged, so a lingering bypass is visible in the trail. A distinct bypass per gate is deliberate — see below. |
+| `GENERATED_SINK_PREPUSH_GATE_BYPASS` | no | Exactly `1` skips the gate (`on`, `true` do nothing today). Single-use by convention: set it inline per push; every use is logged, so a lingering bypass is visible in the trail. A distinct bypass per gate is deliberate — see below. |
 
 Note there is **no** `SOURCE_PATHS` here: the backstop always validates the terminal state,
 so it needs no trigger.
+
+**These variables must reach every git process that runs the hook.** The hook sees the
+environment of the process that calls `git push`. Exported in one terminal, they do not apply to
+a push made from another terminal, a GUI git client, an IDE, or a script. Where
+`GENERATED_SINK_PREPUSH_GATE=on` is missing the gate is inert for that push, and a bypass
+variable has no effect either way. Set them in the environment of every tool that pushes.
+`git push --no-verify` skips the hook entirely.
 
 ### Example
 
