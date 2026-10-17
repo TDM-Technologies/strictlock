@@ -181,7 +181,19 @@ python plan-gate.py approve <plan.md> --log-dir <DIR> [--plans-dir <DIR>] [--no-
   (who, when, which plan hash), marking rows the gate would ignore (`BROKEN LINK, not
   honoured`, `ROW ALTERED, not honoured`) and older rows replaced by a later approval
   (`superseded by line N`). Altering an approve row fails the chain check.
-- A gated Bash/PowerShell command that runs `plan-gate.py approve` is **denied** (class
+- **Retiring a plan: archive the file, then revoke (Q11, 2026-10-17).**
+  `plan-gate.py revoke <plan> [--log-dir DIR] [--plans-dir DIR] [--no-tty-check]` is human-only
+  on the same terms as `approve` (a terminal and a typed `yes`; denied to a gated agent in every
+  spelling `approve` is denied in). It appends a chain-linked `revoke` row with the same
+  identity fields as an approve row (`sha256` is that of the file if it still exists, else
+  empty; the file may already be archived away or deleted). For each plan name the latest
+  honoured row, approve or revoke, wins: after a revoke nothing under that name is active until
+  it is approved again, so writing the old approved bytes back does not reactivate it. A revoke
+  row that is not linked into the chain is ignored, and so is an approve row replayed or
+  transplanted after a revoke, so neither can un-revoke. `verify-log` lists revoke rows.
+- On Windows the printed approve command starts with PowerShell's call operator (`& `) when the
+  interpreter path needed quoting; in `cmd.exe`, drop the leading `& `.
+- A gated Bash/PowerShell command that runs `plan-gate.py approve` or `revoke` is **denied** (class
   `approve_self_protect`): interpreter + `plan-gate.py` + `approve` in any spelling the
   writer-script detection recognizes, `plan-gate.py` executed directly, a script or subcommand
   hidden behind a variable expansion, and shell / `eval` / `-c` style runners whose words
@@ -259,7 +271,16 @@ the command line is agent-controlled, a gated Bash/PowerShell command is **denie
   `push` / `fetch` / `pull` / `branch` / `tag` with a `refs/locks` argument, or any such git
   command whose arguments contain a variable expansion (a plain `git push` stays allowed);
 - writes `.git/refs/locks/...` or `packed-refs` through Edit / Write / a redirect / a writer
-  script.
+  script;
+- passes `--force` to scope-lease (Q10, 2026-10-17), in any spelling or abbreviation
+  (`--forc`), through an interpreter, wrapper, chain, `bash -c` or PowerShell, or passes
+  arguments plan-gate cannot read (`$`, backticks). `release --force` releases any lease
+  whoever owns it and is for a human at a terminal, e.g. at close-out.
+
+Set `SCOPE_LEASE_OWNER` per agent in the harness environment, so a branch switch (or two agents
+on one branch) does not change or merge identities; a lease acquired under the old branch name
+otherwise stays owned by that name, and only that owner (or a human with `release --force`)
+can release it before it expires.
 
 Plain `scope-lease.py acquire` / `release` (identity from the harness environment) stay
 allowed, subject to `allowed_commands`; `holder` and `fence-check` are read-only and are not
@@ -347,7 +368,8 @@ Windows, `NUL` always fine; `>&N` fd dups and `<` input are not writes; a target
 glob or brace is denied). Anything the parser cannot confidently place is denied — including a
 heredoc with a `$`-form or unterminated delimiter. A `#` starts a comment only at the start of a
 word, as in the shell. An empty `allowed_commands` entry matches nothing (Bash and PowerShell).
-PowerShell is unchanged (prefix match, no compound parsing). Details and the migration note:
+PowerShell is checked segment by segment too, with its own splitter and refusals: see the
+**PowerShell** paragraph above (under Writer scripts). Details and the migration note:
 [`AUTHORING.md`](AUTHORING.md) §2 and [`README.md`](README.md).
 
 ## Fault posture

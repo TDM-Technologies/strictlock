@@ -2376,6 +2376,44 @@ class ScopeLeaseTests(unittest.TestCase):
             self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
             self.assertIn("lease identity", self.reason(p), cmd)
 
+    def test_force_is_always_denied_to_a_gated_agent(self):
+        self._plan_allowing("python3", "py", "env", "bash", "echo", "cd")
+        sl = SCOPE_LEASE.as_posix()
+        for cmd in (
+            "python3 %s release --force" % sl,
+            "python3 %s release --force --paths x" % sl,
+            "python3 %s release --forc" % sl,
+            "python3 %s release --fo=1" % sl,
+            "python3 -u %s release --force" % sl,
+            "py -3 %s release --force" % sl,
+            "env python3 %s release --force" % sl,
+            "echo ok; python3 %s release --force" % sl,
+            "cd /tmp && python3 %s release --force" % sl,
+            "%s release --force" % sl,
+            "python3 %s release $FLAGS" % sl,
+            "python3 %s release `echo --force`" % sl,
+            "python3 %s holder --force" % sl,
+            "bash -c 'python3 %s release --force'" % sl,
+        ):
+            p = self.run_bash(cmd, "bob")
+            self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
+            self.assertIn("--force", self.reason(p), cmd)
+        for cmd in ("python %s release --force" % sl, "& python %s release --force" % sl,
+                    "Get-ChildItem; python %s release --force" % sl):
+            p = run_gate({"tool_name": "PowerShell", "tool_input": {"command": cmd}},
+                         self.plans, cwd=self.repo, extra_env=self.env("bob"))
+            self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
+
+    def test_owner_and_abbreviations_on_release_and_acquire_are_denied(self):
+        self._plan_allowing("python3")
+        sl = SCOPE_LEASE.as_posix()
+        for cmd in ("python3 %s release --owner alice" % sl,
+                    "python3 %s release --own alice" % sl,
+                    "python3 %s acquire --lock alice" % sl,
+                    "python3 %s acquire --owner=alice" % sl):
+            p = self.run_bash(cmd, "bob")
+            self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
+
     def test_plain_scope_lease_commands_and_reads_are_not_blocked(self):
         self._plan_allowing("python3", "git", "echo")
         sl = SCOPE_LEASE.as_posix()
@@ -2667,6 +2705,8 @@ class ApprovalTests(unittest.TestCase):
         import shlex
         r = self.reason(self.edit())
         cmd = r.split("in a terminal: ", 1)[1]
+        if cmd.startswith("& "):  # PowerShell call operator, printed on Windows
+            cmd = cmd[2:]
         argv = shlex.split(cmd, posix=(os.name != "nt"))
         env = dict(os.environ)
         env.pop("PLAN_GATE_LOG_DIR", None)  # the human's shell has no PLAN_GATE_* vars
@@ -2938,6 +2978,140 @@ class ApprovalTests(unittest.TestCase):
                 os.close(slave)
             self.assertEqual(a.returncode, 1, (answer, a.stdout, a.stderr))
             self.assertFalse((self.logs / "plan-gate-decisions.log").exists(), answer)
+
+    # --- Q11: revoke retires a plan name ------------------------------------------------
+    def revoke(self, *extra):
+        return self.cli("revoke", str(self.plan), "--no-tty-check", *extra)
+
+    def test_approve_revoke_then_old_bytes_back_is_not_active(self):
+        old = self.plan.read_bytes()
+        self.assertEqual(self.approve().returncode, 0)
+        self.assertEqual(decision(self.edit()), "allow")
+        r = self.revoke()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        p = self.edit()
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("not approved", self.reason(p))
+        self.plan.write_text("---\nname: x\nstatus: archived\n---\n", encoding="utf-8")
+        self.plan.write_bytes(old)  # the exact approved bytes written back
+        self.assertEqual(decision(self.edit()), "deny")
+
+    def test_reapprove_after_revoke_activates_again(self):
+        self.assertEqual(self.approve().returncode, 0)
+        self.assertEqual(self.revoke().returncode, 0)
+        self.assertEqual(decision(self.edit()), "deny")
+        self.assertEqual(self.approve().returncode, 0)
+        self.assertEqual(decision(self.edit()), "allow")
+
+    def test_revoke_row_fields_and_verify_log_lists_it(self):
+        self.assertEqual(self.approve().returncode, 0)
+        self.assertEqual(self.revoke().returncode, 0)
+        rows = [r for r in self.rows() if r["class"] == "revoke"]
+        self.assertEqual(len(rows), 1)
+        for key in ("ts", "plan", "os_user", "hostname", "git_user_name", "git_user_email",
+                    "no_tty_check", "sha256", "prev", "h"):
+            self.assertIn(key, rows[0])
+        self.assertEqual(rows[0]["plan"], "active.md")
+        v = self.cli("verify-log")
+        self.assertEqual(v.returncode, 0, v.stdout)
+        self.assertIn("1 plan revocation(s) recorded", v.stdout)
+        self.assertIn("REVOKED active.md", v.stdout)
+        self.assertIn("superseded by line 2", v.stdout)  # the approval is replaced
+
+    def test_revoke_works_after_the_file_is_gone(self):
+        self.assertEqual(self.approve().returncode, 0)
+        self.plan.unlink()
+        r = self.revoke()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.plan.write_text(PLAN_TEMPLATE.format(allowed=str(self.allowed)), encoding="utf-8")
+        self.assertEqual(decision(self.edit()), "deny")
+
+    def test_revoke_refuses_without_a_terminal(self):
+        self.assertEqual(self.approve().returncode, 0)
+        r = self.cli("revoke", str(self.plan))
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(decision(self.edit()), "allow")  # nothing was recorded
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "openpty"), "needs a pty")
+    def test_revoke_on_a_terminal_needs_yes(self):
+        self.assertEqual(self.approve().returncode, 0)
+        for answer, code in ((b"no\n", 1), (b"yes\n", 0)):
+            master, slave = os.openpty()
+            try:
+                os.write(master, answer)
+                r = self.cli("revoke", str(self.plan), stdin=slave)
+            finally:
+                os.close(master)
+                os.close(slave)
+            self.assertEqual(r.returncode, code, (answer, r.stdout, r.stderr))
+        self.assertEqual(decision(self.edit()), "deny")
+
+    def test_a_transplanted_revoke_row_is_not_honoured(self):
+        other = Path(self._tmp.name) / "other-logs"
+        self.assertEqual(self.cli("revoke", str(self.plan), "--no-tty-check", "--log-dir",
+                                  str(other)).returncode, 0)
+        stolen = (other / "plan-gate-decisions.log").read_bytes()
+        self.assertEqual(self.approve().returncode, 0)
+        with open(str(self.logs / "plan-gate-decisions.log"), "ab") as fh:
+            fh.write(stolen)
+        self.assertEqual(decision(self.edit()), "allow")  # the unlinked revoke did nothing
+        v = self.cli("verify-log")
+        self.assertIn("BROKEN LINK, not honoured", v.stdout)
+
+    def test_an_unlinked_approve_after_a_revoke_cannot_unrevoke(self):
+        other = Path(self._tmp.name) / "other-logs"
+        self.assertEqual(self.cli("approve", str(self.plan), "--no-tty-check", "--log-dir",
+                                  str(other)).returncode, 0)
+        stolen = (other / "plan-gate-decisions.log").read_bytes()
+        self.assertEqual(self.approve().returncode, 0)
+        self.assertEqual(self.revoke().returncode, 0)
+        self.assertEqual(decision(self.edit()), "deny")
+        with open(str(self.logs / "plan-gate-decisions.log"), "ab") as fh:
+            fh.write(stolen)  # a self-consistent approve row with the wrong predecessor
+        self.assertEqual(decision(self.edit()), "deny")
+
+    def test_a_row_replayed_from_this_log_does_not_unrevoke(self):
+        # Copy the original approve line to the end: its prev no longer matches.
+        self.assertEqual(self.approve().returncode, 0)
+        log = self.logs / "plan-gate-decisions.log"
+        approve_line = log.read_bytes()
+        self.assertEqual(self.revoke().returncode, 0)
+        with open(str(log), "ab") as fh:
+            fh.write(approve_line)
+        self.assertEqual(decision(self.edit()), "deny")
+
+    def test_gated_agent_cannot_run_revoke(self):
+        plan = self.plan.read_text(encoding="utf-8").replace(
+            "  - npm test", "  - npm test\n  - python3 \n  - bash \n  - env \n  - /opt")
+        self.plan.write_text(plan, encoding="utf-8")
+        self.assertEqual(self.approve().returncode, 0)
+        gate = "/opt/strictlock/plan-gate/plan-gate.py"
+        for cmd in (
+            "%s revoke p.md" % gate,
+            "python3 %s revoke p.md" % gate,
+            "PYTHONUTF8=1 python %s revoke p.md --no-tty-check" % gate,
+            "echo ok; python3 %s revoke p.md" % gate,
+            "cd /opt && python3 plan-gate.py revoke p.md",
+            "python3 $GATE revoke p.md",
+            "bash -c 'python3 %s revoke p.md'" % gate,
+            "env python3 %s revoke p.md" % gate,
+        ):
+            p = self.bash(cmd)
+            self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
+            self.assertEqual(self.rows()[-1]["class"], "approve_self_protect", cmd)
+        for cmd in ("python C:\\tools\\plan-gate.py revoke p.md",
+                    "& python C:\\tools\\plan-gate.py revoke p.md",
+                    "Get-ChildItem; python plan-gate.py revoke p.md"):
+            p = run_gate({"tool_name": "PowerShell", "tool_input": {"command": cmd}},
+                         self.plans, cwd=self.work, log_dir=self.logs,
+                         extra_env={"PLAN_GATE_REQUIRE_APPROVAL": ""})
+            self.assertEqual(decision(p), "deny", cmd)
+
+    def test_approve_command_with_spaces_gets_the_call_operator_only_on_windows(self):
+        r = self.reason(self.edit())
+        cmd = r.split("in a terminal: ", 1)[1]
+        if os.name != "nt":
+            self.assertFalse(cmd.startswith("& "))
 
     def test_approve_needs_a_log_dir(self):
         a = self.cli("approve", str(self.plan), "--no-tty-check", log_dir="")

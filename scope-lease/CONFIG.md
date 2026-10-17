@@ -74,6 +74,24 @@ The contract a calling script branches on:
 | `5` (`holder`) | At least one queried path is held by a live lock that is not mine. |
 | `6` | **Machine-boundary fail-loud** — a lock from a non-shared ref store. Cross-machine exclusion is not real here; refusing rather than degrading silently. |
 
+## `release --force` — for a human at a terminal (Q10, 2026-10-17)
+
+```
+python3 scope-lease.py release --force [--root DIR] [<source selectors>]
+```
+
+Releases whatever lock holds the resolved paths, whoever owns it and whatever its lock id, and
+needs no identity of its own (it works on a detached HEAD). Each forced release is written to
+the audit log as a `force_release` row (the previous lock id, owner and deadline per path, plus
+`released_by`), and printed on stderr. Use it at close-out when the owner's identity no longer
+exists (the agent's branch was switched or deleted, or the agent died). Without `--force`,
+`release` still refuses a live lock held by a different owner. `plan-gate` always denies
+`--force` to a gated agent. Set `SCOPE_LEASE_OWNER` per agent so a branch switch does not change
+identity.
+
+`fence-check` and `holder` need no owner: they work on a detached HEAD with no
+`SCOPE_LEASE_OWNER`. Only `acquire` and a plain `release` derive one.
+
 ## `holder` — read-only lookup
 
 ```

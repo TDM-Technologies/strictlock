@@ -203,5 +203,11 @@ Q5 lease-held behavior · Q6 strict-lease default · Q7 writer list.
 - Q7: `atomic-write.py` is built in, extendable with `PLAN_GATE_WRITER_SCRIPTS`.
 
 **2026-10-17 (maintainer):** Q8 — approval replay: latest approval for a plan name wins; no expiry.
+Q10 — `scope-lease.py release --force` releases any lease whoever owns it (logged as
+`force_release` with the previous owner); plan-gate always denies `--force` to a gated agent;
+owner-only refusal stays for everyone else; set `SCOPE_LEASE_OWNER` per agent.
+Q11 — retiring a plan: a human-only `plan-gate.py revoke` (terminal + typed `yes`, chain-linked
+row, latest row per plan name wins); the lifecycle's Retire step is "archive the file, then
+revoke".
 Q9 — lease identity: `SCOPE_LEASE_OWNER` if set, else the branch of the agent's own worktree;
 no `user.email` fallback; no identity means no lease is mine.

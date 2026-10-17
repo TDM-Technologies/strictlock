@@ -873,6 +873,52 @@ class LeaseTakeoverTests(unittest.TestCase):
         self.assertEqual(self._cli("release", "alice").returncode, 0)
         self.assertEqual(lock_refs(self.root), [])
 
+    # --- Q10: release --force is for a human at a terminal -----------------------------
+    def test_force_release_drops_a_live_lock_of_another_owner_and_logs_it(self):
+        logdir = self.root / "forcelogs"
+        env = dict(os.environ, SCOPE_LEASE_OWNER="carol", SCOPE_LEASE_LOG_DIR=str(logdir))
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT), "release", "--force", "--root", str(self.root),
+             "--source", "paths", "--paths", "src/a.py", "--lock-id", "whatever"],
+            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(lock_refs(self.root), [])
+        self.assertIn("FORCE-RELEASED", p.stderr)
+        row = json.loads((logdir / "scope-lease.log").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["event"], "force_release")
+        self.assertEqual(row["forced"][0]["was_owner"], "alice")
+        self.assertEqual(row["forced"][0]["was_lock_id"], "lock-a")
+        self.assertEqual(row["released_by"], "carol")
+
+    def test_force_release_works_with_no_identity_at_all(self):
+        _git(self.root, "checkout", "-q", "--detach")
+        env = {k: v for k, v in os.environ.items() if k != "SCOPE_LEASE_OWNER"}
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT), "release", "--force", "--root", str(self.root),
+             "--source", "paths", "--paths", "src/a.py", "--lock-id", "x"],
+            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(lock_refs(self.root), [])
+
+    def test_without_force_an_owner_only_refusal_still_holds(self):
+        self.assertEqual(self._cli("release", "bob").returncode, 5)
+        self.assertEqual(len(lock_refs(self.root)), 1)
+
+    def test_fence_check_needs_no_owner(self):
+        _git(self.root, "checkout", "-q", "--detach")
+        env = {k: v for k, v in os.environ.items() if k != "SCOPE_LEASE_OWNER"}
+        base = ["--root", str(self.root), "--source", "paths", "--paths", "src/a.py",
+                "--lock-id", "lock-a"]
+        p = subprocess.run([sys.executable, str(SCRIPT), "fence-check", *base],
+                           capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("FENCE OK", p.stdout)
+        # ... but acquire and a plain release still need one.
+        for verb in ("acquire", "release"):
+            q = subprocess.run([sys.executable, str(SCRIPT), verb, *base],
+                               capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+            self.assertEqual(q.returncode, 1, (verb, q.stderr))
+
     def test_expired_lock_can_be_reclaimed_by_anyone_even_by_lock_id(self):
         sl.acquire_lease(root=self.root, lock_id="lock-x", owner="alice",
                          paths=["src/x.py"], deadline=past())

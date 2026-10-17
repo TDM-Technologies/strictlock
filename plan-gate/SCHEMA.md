@@ -79,9 +79,14 @@ strings). Two behaviors worth committing to memory:
 
 1. **Author** a plan describing exactly the files and commands the work needs; set
    `status: active`. (An agent may draft it; a draft does nothing until approved.)
-1b. **Approve** — with `PLAN_GATE_LOG_DIR` set, a human runs
-   `plan-gate.py approve <plan.md>` in a terminal. Any later edit to the file (even one byte,
-   including the `status` line) voids the approval; approve again.
+1b. **Approve** — with `PLAN_GATE_LOG_DIR` set, a human runs, in a terminal,
+   `python3 /abs/path/to/plan-gate.py approve /abs/path/to/plan.md --log-dir /abs/log/dir
+   [--plans-dir /abs/plans/dir]` (the gate's deny message prints this exact command). Any later
+   edit to the file (even one byte, including the `status` line) voids the approval; approve
+   again.
 2. **Work** — the gate confines the agent to that envelope.
-3. **Retire** — set `status: archived` (or move/delete the file) at close-out, so the next
-   unit of work starts from a clean, deny-by-default state.
+3. **Retire** — at close-out, archive the file (set `status: archived`, or move/delete it),
+   **then** a human runs `plan-gate.py revoke <plan.md> --log-dir ...` in a terminal. Revoking
+   records that nothing under that plan name is active until it is approved again, so
+   writing the old approved bytes back does not reactivate it. The next unit of work starts
+   from a clean, deny-by-default state.

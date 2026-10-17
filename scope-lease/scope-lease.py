@@ -67,7 +67,9 @@ Usage:
                                      [--source plan-gate|paths|file] [--paths P ...] \
                                      [--file FILE] [--lock-id ID] [--owner OWNER]
   python3 scope-lease.py fence-check [--root DIR] [<source selectors as above>]
-  python3 scope-lease.py release     [--root DIR] [<source selectors as above>]
+  python3 scope-lease.py release     [--root DIR] [--force] [<source selectors as above>]
+                                     (--force: a human at a terminal releases any lease,
+                                      whoever owns it; logged as force_release)
   python3 scope-lease.py holder      [--root DIR] [--lock-id ID] [--owner OWNER] [--json] PATH ...
                                      (READ-ONLY: 0 = every path free or mine, 5 = at least one
                                       held by someone else; plan-gate's PLAN_GATE_SCOPE_LEASE
@@ -558,9 +560,13 @@ def fence_check(
 
 def release_lease(
     *, root: Path, lock_id: str, paths: list[str] | None, log_dir: Path | None = None,
-    owner: str | None = None,
+    owner: str | None = None, force: bool = False,
 ) -> list[str]:
-    """Delete only the locks THIS lock_id owns (blob.lock_id == lock_id), CAS-pinned to the exact
+    """`force=True` (a human at a terminal; plan-gate always denies it to a gated agent)
+    deletes whatever lock holds each path, whoever owns it and whatever its lock id, and logs
+    each forced release with the previous lock id and owner. Otherwise:
+
+    Delete only the locks THIS lock_id owns (blob.lock_id == lock_id), CAS-pinned to the exact
     oid so a concurrent reclaim is never clobbered. Idempotent: an absent or foreign lock is a
     no-op success. Returns the list of released paths.
 
@@ -576,6 +582,7 @@ def release_lease(
     # unlogged and leave later owned locks held. Foreign STORE is not a silent no-op.
     owned: list[tuple[str, str, str]] = []
     lock_owner = ""  # the owner stamped in the lock blob (one lock_id => one acquiring owner)
+    forced: list[dict] = []
     for p in norm:
         ref = _lease_ref(p)
         oid = _ref_oid(root, ref)
@@ -583,6 +590,12 @@ def release_lease(
             continue
         blob = _read_lease_blob(root, oid)
         _assert_same_refstore(blob, refstore, p)
+        if force:
+            forced.append({"path": p, "was_lock_id": blob.get("lock_id", ""),
+                           "was_owner": blob.get("owner", ""),
+                           "was_deadline": blob.get("deadline", "")})
+            owned.append((p, ref, oid))
+            continue
         if blob.get("lock_id") != lock_id:
             continue  # never release a lock we don't own
         live = bool(blob.get("deadline")) and \
@@ -600,9 +613,15 @@ def release_lease(
         if proc.returncode == 0:
             released.append(p)
     if released:
-        _log_decision(log_dir, {"event": "release", "lock_id": lock_id,
-                                "owner": lock_owner, "released_by": owner or "",
-                                "released": released})
+        row = {"event": "release", "lock_id": lock_id, "owner": lock_owner,
+               "released_by": owner or "", "released": released}
+        if force:
+            row["event"] = "force_release"
+            row["forced"] = [f for f in forced if f["path"] in released]
+            print("scope-lease: FORCE-RELEASED " + ", ".join(
+                f"{f['path']!r} (was lock {f['was_lock_id']!r}, owner {f['was_owner']})"
+                for f in row["forced"]), file=sys.stderr)
+        _log_decision(log_dir, row)
     return released
 
 
@@ -1007,6 +1026,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_rel = sub.add_parser("release", help="Drop the locks this lock_id owns (idempotent).")
     _add_source_args(p_rel)
+    p_rel.add_argument("--force", action="store_true",
+                       help="Release whatever lock holds these paths, whoever owns it (for a human "
+                            "at a terminal, e.g. close-out after a branch switch or a dead agent). "
+                            "Logged as force_release with the previous lock id and owner. "
+                            "plan-gate always denies this flag to a gated agent.")
 
     p_hold = sub.add_parser(
         "holder",
@@ -1050,13 +1074,21 @@ def main(argv: list[str] | None = None) -> int:
         paths, lock_id = resolve_path_source(
             source=source, cli_paths=args.paths, file_path=args.file, cli_lock_id=args.lock_id,
         )
-        owner = args.owner or derive_owner(root)
     except PathSourceError as exc:
         print(f"scope-lease: ERROR: {exc}", file=sys.stderr)
         return 1
-    except OwnerDeriveError as exc:
-        print(f"scope-lease: ERROR: {exc}", file=sys.stderr)
-        return 1
+    # The owner is needed only by commands that write or compare it. fence-check asks "do I
+    # still hold this lock id" and must work on a detached HEAD with no SCOPE_LEASE_OWNER.
+    owner = args.owner
+    force = bool(getattr(args, "force", False))
+    if owner is None and args.cmd in ("acquire", "release"):
+        try:
+            owner = derive_owner(root)
+        except OwnerDeriveError as exc:
+            if not (args.cmd == "release" and force):
+                print(f"scope-lease: ERROR: {exc}", file=sys.stderr)
+                return 1
+            owner = None  # a forced release needs no identity of its own
 
     log_dir = _log_dir()
 
@@ -1105,7 +1137,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "release":
         try:
             released = release_lease(root=root, lock_id=lock_id, paths=paths, log_dir=log_dir,
-                                     owner=owner)
+                                     owner=owner, force=force)
         except MachineBoundaryError as exc:
             print(f"scope-lease: FAIL-LOUD: {exc}", file=sys.stderr)
             return 6

@@ -678,7 +678,7 @@ def verify_log(path_arg: str | None) -> int:
         rows += 1
         prev = row.get("prev")
         h = row.get("h")
-        if row.get("class") == _APPROVE_CLASS and row.get("surface") == _APPROVE_CLASS:
+        if row.get("class") in _GATE_ROW_CLASSES and row.get("surface") == row.get("class"):
             # Same test the gate applies: right link, and the row's own hash holds.
             bad = None
             if prev != expected:
@@ -707,9 +707,12 @@ def verify_log(path_arg: str | None) -> int:
             print("  " + msg)
     else:
         print(f"verify-log: {p}: chain intact — {rows} row(s) verified.")
-    print(f"verify-log: {len(approvals)} plan approval(s) recorded"
+    n_rev = sum(1 for _i, r, _b in approvals if r.get("class") == _REVOKE_CLASS)
+    print(f"verify-log: {len(approvals) - n_rev} plan approval(s) recorded"
           + (":" if approvals else "."))
-    last_ok: dict = {}  # plan name -> line of its latest honoured approval
+    if n_rev:
+        print(f"verify-log: {n_rev} plan revocation(s) recorded (listed below).")
+    last_ok: dict = {}  # plan name -> line of its latest honoured approval or revocation
     for i, row, bad in approvals:
         if bad is None:
             last_ok[str(row.get("plan", ""))] = i
@@ -718,7 +721,8 @@ def verify_log(path_arg: str | None) -> int:
         gname, gmail = row.get("git_user_name", ""), row.get("git_user_email", "")
         if gname or gmail:
             who += f" (git: {gname} <{gmail}>)"
-        print(f"  line {i}: {row.get('ts', '?')} {row.get('plan', '?')} "
+        print(f"  line {i}: {row.get('ts', '?')} "
+              f"{'REVOKED ' if row.get('class') == _REVOKE_CLASS else ''}{row.get('plan', '?')} "
               f"sha256 {str(row.get('sha256', ''))[:16]}… by {who} on "
               f"{row.get('hostname', '?')}"
               + (" [--no-tty-check]" if row.get("no_tty_check") == "true" else "")
@@ -738,6 +742,8 @@ def verify_log(path_arg: str | None) -> int:
 # without a log dir is a configuration error (the gate denies).
 _APPROVAL_OFF = ("off", "0", "false", "no")
 _APPROVE_CLASS = "approve"
+_REVOKE_CLASS = "revoke"
+_GATE_ROW_CLASSES = (_APPROVE_CLASS, _REVOKE_CLASS)
 
 
 def _approval_mode():
@@ -817,16 +823,17 @@ def _last_nonblank(body: bytes):
 
 
 def _check_approve_line(line: bytes, prev_line):
-    """(plan, sha256, problem) for one approve-marked log line. problem is None
-    when the row counts: its `prev` equals the anchor of the line right before it
-    (the genesis value for the first line) and its own `h` verifies."""
+    """(plan, sha256, problem, class) for one approve- or revoke-marked log line.
+    problem is None when the row counts: its `prev` equals the anchor of the line
+    right before it (the genesis value for the first line) and its own `h`
+    verifies."""
     try:
         row = json.loads(line.decode("utf-8"))
     except Exception:
         return None
     if not isinstance(row, dict):
         return None
-    if row.get("class") != _APPROVE_CLASS or row.get("surface") != _APPROVE_CLASS:
+    if row.get("class") not in _GATE_ROW_CLASSES or row.get("surface") != row.get("class"):
         return None
     expected = _line_anchor(prev_line) if prev_line is not None else _GENESIS
     body = {k: v for k, v in row.items() if k != "h"}
@@ -835,11 +842,13 @@ def _check_approve_line(line: bytes, prev_line):
         problem = "BROKEN LINK"
     elif _canonical_row_hash(str(row.get("prev")), body) != row.get("h"):
         problem = "ROW ALTERED"
-    return str(row.get("plan", "")), str(row.get("sha256", "")), problem
+    return str(row.get("plan", "")), str(row.get("sha256", "")), problem, row.get("class")
 
 
 def _approved_set() -> dict:
-    """{plan file name: sha256 of the bytes most recently approved}. Streams the
+    """{plan file name: sha256 of the bytes most recently approved}; a plan whose
+    latest honoured row is a REVOKE is absent (nothing under that name is active until
+    it is approved again). Streams the
     decision log in 1 MiB blocks (bounded memory), parsing only lines that carry
     the approve marker. A row counts only if it sits on an unbroken link (its
     `prev` is the anchor of the line right before it) and its own hash verifies;
@@ -852,7 +861,7 @@ def _approved_set() -> dict:
     _APPROVED_CACHE.append(latest)
     if DECISIONS_LOG is None:
         return latest
-    needle = b'"class":"' + _APPROVE_CLASS.encode() + b'"'
+    needle_re = re.compile(rb'"class":"(?:approve|revoke)"')
     try:
         fh = open(str(DECISIONS_LOG), "rb")
     except OSError:
@@ -873,9 +882,10 @@ def _approved_set() -> dict:
                 body, carry = data, b""
             pos = 0
             while True:
-                i = body.find(needle, pos)
-                if i < 0:
+                m = needle_re.search(body, pos)
+                if m is None:
                     break
+                i = m.start()
                 s = body.rfind(b"\n", 0, i) + 1
                 e = body.find(b"\n", i)
                 if e < 0:
@@ -883,7 +893,10 @@ def _approved_set() -> dict:
                 pos = e + 1
                 res = _check_approve_line(body[s:e], _prev_nonblank(body, s, prev_line))
                 if res is not None and res[2] is None:
-                    latest[res[0]] = res[1]
+                    if res[3] == _REVOKE_CLASS:
+                        latest.pop(res[0], None)
+                    else:
+                        latest[res[0]] = res[1]
             tail = _last_nonblank(body)
             if tail is not None:
                 prev_line = tail
@@ -906,7 +919,12 @@ def approve_command_for(plan_path) -> str:
              os.path.abspath(str(LOGS_DIR)) if LOGS_DIR is not None else ""]
     if PLANS_DIR is not None:
         parts += ["--plans-dir", os.path.abspath(str(PLANS_DIR))]
-    return " ".join(_quote_arg(p) for p in parts)
+    cmd = " ".join(_quote_arg(p) for p in parts)
+    if os.name == "nt" and _quote_arg(parts[0]) != parts[0]:
+        # PowerShell rejects a command that starts with a quoted path unless it is
+        # called with the call operator. (cmd.exe: drop the leading "& ".)
+        cmd = "& " + cmd
+    return cmd
 
 
 def _git_config_value(cwd: Path, key: str) -> str:
@@ -947,8 +965,20 @@ def approve_cli(argv: list[str]) -> int:
     """`plan-gate.py approve <plan.md> [--no-tty-check]`: record that a human
     approved this plan's exact bytes. Exit 0 ok, 2 usage / config problem, 3 refused
     (no terminal), 1 failure."""
+    return _gate_record_cli(_APPROVE_CLASS, argv)
+
+
+def revoke_cli(argv: list[str]) -> int:
+    """`plan-gate.py revoke <plan> [--no-tty-check]`: record that a human retired
+    this plan name. After it, nothing under that name is active until it is approved
+    again, whatever bytes the file holds. Same terms as approve (terminal + `yes`)."""
+    return _gate_record_cli(_REVOKE_CLASS, argv)
+
+
+def _gate_record_cli(kind: str, argv: list[str]) -> int:
     global LOGS_DIR, DECISIONS_LOG, PLANS_DIR
-    usage = ("Usage: plan-gate.py approve <plan.md> [--log-dir DIR] [--plans-dir DIR] "
+    revoke = kind == _REVOKE_CLASS
+    usage = (f"Usage: plan-gate.py {kind} <plan.md> [--log-dir DIR] [--plans-dir DIR] "
              "[--no-tty-check]")
     no_tty_check = False
     positional: list[str] = []
@@ -962,11 +992,11 @@ def approve_cli(argv: list[str]) -> int:
             if not eq:
                 val = next(it, "")
             if not val:
-                print(f"approve: {name} needs a directory. {usage}", file=sys.stderr)
+                print(f"{kind}: {name} needs a directory. {usage}", file=sys.stderr)
                 return 2
             opts[name] = val
         elif a.startswith("-") and a != "-":
-            print(f"approve: unknown option {a!r}. {usage}", file=sys.stderr)
+            print(f"{kind}: unknown option {a!r}. {usage}", file=sys.stderr)
             return 2
         else:
             positional.append(a)
@@ -979,14 +1009,14 @@ def approve_cli(argv: list[str]) -> int:
     if "--plans-dir" in opts:
         PLANS_DIR = Path(opts["--plans-dir"]).expanduser()
     if LOGS_DIR is None or DECISIONS_LOG is None:
-        print("approve: no log directory. Approvals are recorded in the decision log: "
-              "pass --log-dir DIR or set PLAN_GATE_LOG_DIR.", file=sys.stderr)
+        print(f"{kind}: no log directory. Approvals and revocations are recorded in the "
+              f"decision log: pass --log-dir DIR or set PLAN_GATE_LOG_DIR.", file=sys.stderr)
         return 2
     interactive = _stdin_is_terminal()
     if not interactive and not no_tty_check:
-        print("approve: refusing to run without an interactive terminal on stdin (an "
-              "agent tool call has none). Run it yourself in a terminal; for CI or "
-              "scripted approval pass --no-tty-check (the row records that you did).",
+        print(f"{kind}: refusing to run without an interactive terminal on stdin (an "
+              f"agent tool call has none). Run it yourself in a terminal; for CI or "
+              f"scripted use pass --no-tty-check (the row records that you did).",
               file=sys.stderr)
         return 3
     # Resolve the plan: a relative name is looked up in the plans dir first, then the
@@ -1000,26 +1030,33 @@ def approve_cli(argv: list[str]) -> int:
         have = norm(os.path.realpath(str(plan.parent if plan.is_absolute()
                                          else Path(os.path.abspath(str(plan))).parent)))
         if want != have:
-            print(f"approve: {plan} is not in the plans directory {PLANS_DIR}; the gate "
+            print(f"{kind}: {plan} is not in the plans directory {PLANS_DIR}; the gate "
                   f"only reads plans from there. Refusing.", file=sys.stderr)
             return 2
     try:
         raw = plan.read_bytes()
     except OSError as exc:
-        print(f"approve: cannot read {plan}: {exc}", file=sys.stderr)
-        return 1
+        if not revoke:
+            print(f"approve: cannot read {plan}: {exc}", file=sys.stderr)
+            return 1
+        raw = b""  # a retired plan's file may already be archived away or deleted
+        print(f"note: {plan} cannot be read ({exc}); revoking the name {plan.name!r} anyway.")
     plan_name = plan.name  # the name the plans-dir scan will see, even for a symlink
-    plan = plan.resolve()
+    if raw or not revoke:
+        plan = plan.resolve()
     text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
     fm = parse_frontmatter(text)
     status = str(fm.get("status", "")).strip().lower()
-    digest = _plan_sha256(raw)
-    # Show what is being approved before anything is recorded.
+    digest = _plan_sha256(raw) if raw else ""
+    # Show what is being approved (or revoked) before anything is recorded.
     print(f"Plan:   {plan}")
     print(f"Size:   {len(raw)} bytes")
     print(f"sha256: {digest}")
     print(f"Log:    {DECISIONS_LOG}")
-    for key in ("allowed_paths", "allowed_commands"):
+    if revoke:
+        print(f"This retires the plan name {plan_name!r}: nothing under that name is active "
+              f"until it is approved again, whatever the file holds.")
+    for key in (() if revoke else ("allowed_paths", "allowed_commands")):
         vals = fm.get(key) or []
         if not isinstance(vals, list):
             vals = [vals]
@@ -1029,14 +1066,15 @@ def approve_cli(argv: list[str]) -> int:
         if len(vals) > 50:
             print(f"  ... and {len(vals) - 50} more")
     if not no_tty_check:
-        sys.stdout.write("Type 'yes' to approve exactly these bytes: ")
+        sys.stdout.write("Type 'yes' to revoke this plan: " if revoke
+                         else "Type 'yes' to approve exactly these bytes: ")
         sys.stdout.flush()
         try:
             answer = sys.stdin.readline().strip()
         except Exception:
             answer = ""
         if answer != "yes":
-            print("\napprove: not approved; nothing was recorded.", file=sys.stderr)
+            print(f"\n{kind}: not {kind}d; nothing was recorded.", file=sys.stderr)
             return 1
     try:
         import getpass
@@ -1050,13 +1088,13 @@ def approve_cli(argv: list[str]) -> int:
         host = ""
     row = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "decision": _APPROVE_CLASS,
-        "surface": _APPROVE_CLASS,
-        "tool": "plan-gate approve",
+        "decision": kind,
+        "surface": kind,
+        "tool": f"plan-gate {kind}",
         "target": _safe_str(str(plan), 2048),
         "command": "",
-        "class": _APPROVE_CLASS,
-        "reason": _safe_str(f"approved {plan_name}", 300),
+        "class": kind,
+        "reason": _safe_str(f"{kind}d {plan_name}", 300),
         "plan": _safe_str(plan_name, 300),
         "cwd": _safe_str(os.getcwd(), 1024),
         "sha256": digest,
@@ -1070,10 +1108,12 @@ def approve_cli(argv: list[str]) -> int:
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         _append_row(row, durable=True)
     except Exception as exc:
-        print(f"approve: could not write the approval to {DECISIONS_LOG}: {exc}",
-              file=sys.stderr)
+        print(f"{kind}: could not write the row to {DECISIONS_LOG}: {exc}", file=sys.stderr)
         return 1
-    print(f"approved {plan_name} (sha256 {digest}) as {row['os_user']} on {row['hostname']}.")
+    print(f"{kind}d {plan_name}" + (f" (sha256 {digest})" if digest else "")
+          + f" as {row['os_user']} on {row['hostname']}.")
+    if revoke:
+        return 0
     if status != "active":
         print(f"note: the plan's status is {status or '(none)'!r}, not 'active'. Changing "
               f"it later edits the file and voids this approval; approve again after the "
@@ -2388,7 +2428,9 @@ _RUNNER_PROGS = (
     "iex", "invoke-command", "icm",
 )
 _EXPANSION_CHARS = "$`*?[{"
-_APPROVE_WORD_RE = re.compile(r"(?<![A-Za-z0-9_-])approve(?![A-Za-z0-9_-])", re.IGNORECASE)
+_GATE_VERBS = ("approve", "revoke")  # human-only subcommands of plan-gate.py
+_APPROVE_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:approve|revoke)(?![A-Za-z0-9_-])", re.IGNORECASE)
 
 
 def _mentions_gate_approve(text: str) -> bool:
@@ -2411,9 +2453,9 @@ def _approve_self_check(raw_segs: list[str], shell: str):
     pass, and the log guard depends on parsing paths. This is a barrier against the
     direct routes, not authentication."""
     why = (
-        "plan-gate: this command would run `plan-gate.py approve` (or could not be "
-        "ruled out). Approving a plan is a human act: run it yourself in a terminal; "
-        "an agent may not approve its own plan."
+        "plan-gate: this command would run `plan-gate.py approve` or `revoke` (or could "
+        "not be ruled out). Approving or revoking a plan is a human act: run it yourself "
+        "in a terminal; an agent may not approve its own plan or revoke one."
     )
     for raw in raw_segs:
         try:
@@ -2436,7 +2478,7 @@ def _approve_self_check(raw_segs: list[str], shell: str):
                 continue
             prog = toks[i]
             rest = toks[i + 1:]
-            has_approve = any(a.lower() == "approve" for a in rest)
+            has_approve = any(a.lower() in _GATE_VERBS for a in rest)
             prog_b = _basename_lc(prog)
             if prog_b.endswith(".exe"):
                 prog_b = prog_b[:-4]
@@ -2445,13 +2487,13 @@ def _approve_self_check(raw_segs: list[str], shell: str):
                 script, sargs = inv
                 if script is None:
                     # -c / -m / stdin script: text we cannot read.
-                    if any(a.lower() == "approve" for a in sargs) and (
+                    if any(a.lower() in _GATE_VERBS for a in sargs) and (
                             any(t == "-" for t in toks[i + 1:i + 6])):
                         return why
                     if _mentions_gate_approve(" ".join(toks)):
                         return why
                     continue
-                s_unsure = any(a.lower() == "approve" for a in sargs) or any(
+                s_unsure = any(a.lower() in _GATE_VERBS for a in sargs) or any(
                     ch in a for a in sargs for ch in "$`")
                 if s_unsure and (_is_gate_script(script)
                                  or any(ch in script for ch in _EXPANSION_CHARS)):
@@ -2475,7 +2517,16 @@ def _approve_self_check(raw_segs: list[str], shell: str):
 # or (b) change refs/locks/ with git. Best effort, like the approve check: a plan that
 # lets the agent run code it can change can still edit lock refs.
 _LEASE_ENV_ASSIGN_RE = re.compile(r"SCOPE_LEASE_(OWNER|LOCK_ID)\s*=", re.IGNORECASE)
-_LEASE_IDENTITY_FLAGS = ("--owner", "--lock-id", "--no-owner", "--owner-root")
+_LEASE_IDENTITY_FLAGS = ("--owner", "--lock-id", "--no-owner", "--owner-root", "--force")
+
+
+def _lease_flag_matches(arg: str, flags) -> bool:
+    """True if `arg` is one of `flags` or an argparse-style abbreviation of one
+    (`--forc`, `--own=x`): at least `--` plus one letter, a prefix of the flag."""
+    if not arg.startswith("--"):
+        return False
+    name = arg.split("=", 1)[0]
+    return len(name) >= 3 and any(f.startswith(name) for f in flags)
 _GIT_READ_ONLY_SUBS = (
     "for-each-ref", "show-ref", "rev-parse", "cat-file", "log", "show", "ls-remote",
     "rev-list", "describe", "name-rev", "diff", "status", "ls-tree", "ls-files",
@@ -2494,8 +2545,10 @@ def _lease_self_check(raw_segs: list[str], shell: str):
     why_id = (
         "plan-gate: a command may not choose its own lease identity (--owner, --lock-id, "
         "--no-owner, --owner-root, or setting SCOPE_LEASE_OWNER / SCOPE_LEASE_LOCK_ID) "
-        "when it acquires or releases a lease. Identity comes only from the harness "
-        "environment. Run the plain command (scope-lease.py acquire / release) instead."
+        "when it acquires or releases a lease, may not use --force, and may not pass "
+        "arguments plan-gate cannot read. Identity comes only from the harness "
+        "environment; `release --force` is for a human at a terminal. Run the plain "
+        "command (scope-lease.py acquire / release) instead."
     )
     why_ref = (
         "plan-gate: this command would change refs/locks/ (the scope-lease lock refs), or "
@@ -2535,14 +2588,16 @@ def _lease_self_check(raw_segs: list[str], shell: str):
             if script is not None and (_is_scope_lease_script(script)
                                        or any(ch in script for ch in _EXPANSION_CHARS)):
                 sub = sargs[0] if sargs else ""
-                flags = any(a == f or a.startswith(f + "=") for a in sargs
-                            for f in _LEASE_IDENTITY_FLAGS)
+                # argparse accepts unambiguous prefixes (`--forc`, `--own`), so match
+                # prefixes of the flag names, not just the exact spellings.
+                force = any(_lease_flag_matches(a, ("--force",)) for a in sargs)
+                ident = any(_lease_flag_matches(a, _LEASE_IDENTITY_FLAGS) for a in sargs)
                 dynamic = any(ch in a for a in sargs for ch in "$`") or any(
                     ch in sub for ch in _EXPANSION_CHARS)
-                if sub in ("holder", "fence-check"):
-                    pass  # read-only: identity flags change nothing that is written
-                elif flags or dynamic:
-                    return why_id
+                if force or dynamic:
+                    return why_id  # --force is for a human at a terminal, never an agent
+                if ident and sub not in ("holder", "fence-check"):
+                    return why_id  # (read-only subcommands write nothing)
             elif script is None and inv is not None and "scope-lease" in joined.lower():
                 if any(f in joined for f in _LEASE_IDENTITY_FLAGS):
                     return why_id  # python -c / stdin script naming scope-lease
@@ -3699,6 +3754,8 @@ if __name__ == "__main__":
     # of the plan's exact bytes in the decision log (see approve_cli).
     if len(sys.argv) >= 2 and sys.argv[1] == "approve":
         sys.exit(approve_cli(sys.argv[2:]))
+    if len(sys.argv) >= 2 and sys.argv[1] == "revoke":
+        sys.exit(revoke_cli(sys.argv[2:]))
     try:
         main()
     except SystemExit:
