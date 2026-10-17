@@ -8,16 +8,24 @@
     "url": "https://downsmullen.com"
   },
   "type": "module",
-  "main": "./index.mjs",
+  "main": "./index.cjs",
   "exports": {
-    ".": "./index.mjs",
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "index.mjs",
+    "index.cjs",
+    "rules/_shared.cjs",
     "rules/_shared.mjs",
+    "rules/no-smoke-only-assertions.cjs",
     "rules/no-smoke-only-assertions.mjs",
+    "rules/no-tautological-assertions.cjs",
     "rules/no-tautological-assertions.mjs",
+    "rules/no-unasserted-result.cjs",
     "rules/no-unasserted-result.mjs",
     "README.md",
     "LICENSE",

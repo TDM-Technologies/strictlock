@@ -4,9 +4,20 @@
  */
 import test from 'node:test';
 
-import { RuleTester } from 'eslint';
+import { createRequire } from 'node:module';
+
+import * as eslint from 'eslint';
 
 import rule from './no-unasserted-result.mjs';
+
+// ESLint 8's classic RuleTester is eslintrc-style; its flat-config tester lives
+// at eslint/use-at-your-own-risk. ESLint >= 9's RuleTester is flat-config.
+const require = createRequire(import.meta.url);
+const eslintMajor = Number(require('eslint/package.json').version.split('.')[0]);
+const RuleTester =
+  eslintMajor < 9
+    ? require('eslint/use-at-your-own-risk').FlatRuleTester
+    : eslint.RuleTester;
 
 RuleTester.afterAll = (fn) => fn();
 RuleTester.describe = (name, fn) => fn();
@@ -72,8 +83,11 @@ ruleTester.run('no-unasserted-result', rule, {
       filename: FN,
       options: [{ extraMockRoots: ['td'] }],
     },
-    // `using` / `await using` bindings are disposed → their use.
-    { code: t(`using handle = open();`), filename: FN, languageOptions: { ecmaVersion: 'latest', sourceType: 'module' } },
+    // `using` / `await using` bindings are disposed → their use. ESLint 8's
+    // parser predates `using`, so this case runs on ESLint >= 9 only.
+    ...(eslintMajor >= 9
+      ? [{ code: t(`using handle = open();`), filename: FN, languageOptions: { ecmaVersion: 'latest', sourceType: 'module' } }]
+      : []),
     // each-table test bodies are analyzed (and clean ones stay clean).
     { code: `it.each([1, 2])('x %i', (n) => { const r = f(n); expect(r).toBe(n); });`, filename: FN },
     // Not a test block: test.describe bodies are not analyzed.

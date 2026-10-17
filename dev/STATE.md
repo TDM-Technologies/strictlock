@@ -39,6 +39,9 @@ stays with Tim.
 3. **Next:** Wave 2 (marquee IP, last) — design-heavy; needs Tim's direction before building.
 4. **(Done)** `eslint-plugin-strictlock` PUBLISHED to npm — `0.1.0` (2026-06-25) + `0.1.1` (2026-07-05),
    acct `downsmullen`: <https://www.npmjs.com/package/eslint-plugin-strictlock>.
+   2026-10-16: PR #19 merged two new rules (`no-tautological-assertions`, `no-unasserted-result`; `warn` in
+   `recommended`), version `0.2.0`. PR #20 (open, not merged) adds the CommonJS entry so the legacy
+   `.eslintrc` config works on ESLint 8. npm publish of `0.2.0` waits on PR #20 — Tim's step.
 
 Run any build via the proven build → adversarial-verify → consistency workflow harness. **NOTE:** the
 `harvest-merge-guard.sh` referenced earlier was an ephemeral helper, not committed — this session applied the
