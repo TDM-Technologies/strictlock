@@ -81,15 +81,15 @@ gate then decides each direct edit (Edit / Write tool call) to them against that
 can log it, when `PLAN_GATE_LOG_DIR` is set. [`DESIGN.md`](DESIGN.md) makes the argument for
 state as evidence in full.
 
-**What this does not cover today.** Writes made with `atomic-write.py` go through Bash.
-plan-gate matches `python3 atomic-write.py STATE.md` as a command, by its prefix in
-`allowed_commands`, and does not check the file the script writes against `allowed_paths`.
-So listing a state file in `allowed_paths` does not stop a session that is allowed to run
-the script from writing another path with it, and the gate's log records the command rather
-than a file-write decision. Checking the script's target against the plan is planned (see
-[`../dev/CLAIMS-TRUE-ROUND-2-SPEC.md`](../dev/CLAIMS-TRUE-ROUND-2-SPEC.md)). Also note that
-whether only an *approved* session can write is only as strong as plan approval itself, which
-is currently a convention (see the plan-gate README, "Known limits today").
+**Writes through `atomic-write.py`.** Those go through Bash, and plan-gate checks
+`python3 atomic-write.py STATE.md` as a write to `STATE.md`, exactly like a `>` redirect: the
+target must be in `allowed_paths` (or an always-writable directory), and the command must also
+be admitted by `allowed_commands`. Limits: only one target per writer script is checked,
+launchers such as `uv run` or `bash -c "..."` are not recognized, and a plan that lets the agent
+run code it can change can write anywhere that code can. "Only an approved session may write
+them" holds to the extent plan approval does: with a log directory set, a plan takes effect only
+after a human runs `plan-gate.py approve`, which is tamper-evident but not authentication (see
+the plan-gate README, "Known limits today").
 
 ## The atomic write
 

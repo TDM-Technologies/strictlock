@@ -75,7 +75,7 @@ The repo root is resolved with `git rev-parse --show-toplevel`. Full reference: 
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TEST_PROTECTION_GUARD` | — | `on` (case-insensitive) enables the guard. Anything else is inert. |
+| `TEST_PROTECTION_GUARD` | — | `on`, `1`, `true` or `yes` (case-insensitive) enables the guard. Anything else is inert. |
 | `TEST_PROTECTION_GUARD_MODE` | `auto` | `auto` detects the door from stdin; `pretooluse` / `precommit` force it. |
 | `TEST_PROTECTION_GUARD_TEST_GLOBS` | JS/TS/py/Go/Rust/… test patterns | `os.pathsep` globs that identify **test** files. A glob without `/` matches the basename; with `/`, the repo-relative path. |
 | `TEST_PROTECTION_GUARD_SOURCE_GLOBS` | common code extensions | `os.pathsep` globs that identify **non-test source**. A staged file matching this and *not* a test glob is "source". |

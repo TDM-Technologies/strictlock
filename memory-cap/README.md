@@ -53,13 +53,13 @@ export MEMORY_CAP=on
 
 | Variable | Meaning |
 |---|---|
-| `MEMORY_CAP` | `on` enables the hook. Anything else makes it inert (allow-all). |
+| `MEMORY_CAP` | `on`, `1`, `true` or `yes` (any case) enables the hook. Anything else makes it inert (allow-all). |
 | `MEMORY_CAP_CHARS` | Integer cap on a `- ` line (whole line, excluding trailing whitespace). Default `200`. |
 | `MEMORY_CAP_PATH_RE` | Regex (matched case-insensitively against the forward-slash form of the target path) identifying the index file to cap. Default matches a Claude Code per-project memory index: `/.claude/projects/<project>/memory/memory.md`. An invalid regex falls back to the default; a valid-but-wrong pattern still matches the wrong file, so check yours. |
-| `MEMORY_CAP_BYPASS` | Exactly `1` bypasses the cap (`on`, `true` do nothing today). Single-use by convention; every use is logged (on stderr), so a lingering bypass is visible in the trail. The hook is started by the harness, so the variable must be in the environment the harness was launched with, or its settings `env` block; `export` in the agent's own Bash tool, or an inline prefix on the agent's command, does not reach it. A distinct bypass per gate is deliberate. |
+| `MEMORY_CAP_BYPASS` | `on`, `1`, `true` or `yes` (any case) bypasses the cap. Single-use by convention; every use is logged (on stderr), so a lingering bypass is visible in the trail. The hook is started by the harness, so the variable must be in the environment the harness was launched with, or its settings `env` block; `export` in the agent's own Bash tool, or an inline prefix on the agent's command, does not reach it. A distinct bypass per gate is deliberate. |
 | `MEMORY_CAP_MAX_ENTRIES` | Opt-in. Positive integer cap on the number of `- ` entries. Unset = off; non-numeric / `<= 0` = off, announced on stderr. |
 | `MEMORY_CAP_TOTAL_CHARS` | Opt-in. Positive integer cap on the summed length of all `- ` entries. Unset = off; non-numeric / `<= 0` = off, announced on stderr. |
-| `MEMORY_CAP_DECISION_LOG` | Opt-in. `1` records every decision on the capped index (allow, deny, bypass) to a hash-chained decision log. Needs `MEMORY_CAP_LOG_DIR`. |
+| `MEMORY_CAP_DECISION_LOG` | Opt-in. `on`/`1`/`true`/`yes` records every decision on the capped index (allow, deny, bypass) to a hash-chained decision log. Needs `MEMORY_CAP_LOG_DIR`. |
 | `MEMORY_CAP_LOG_DIR` | Directory holding `memory-cap-decisions.log`. Logging is on only when this is set **and** `MEMORY_CAP_DECISION_LOG=1`. |
 
 ## Decision log (opt-in)

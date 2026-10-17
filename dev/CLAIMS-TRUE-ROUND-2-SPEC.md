@@ -58,6 +58,11 @@ tamper-evident-not-tamper-proof framing as the decision log.
 dir is a configuration error, and the gate denies with a clear message. This also fixes #11 for
 anyone who turns approval on.
 
+**Approval replay (Q8, 2026-10-17):** for each plan name only the most recent approval counts.
+Restoring older approved bytes does not reactivate the plan, and approving a new version retires
+the earlier approval. No expiry or TTL. An `approve` row also counts only if it sits on an
+unbroken chain link and its own hash verifies, so a row copied from another log is ignored.
+
 **Calls for the maintainer:**
 - **Q1 — default.** (a) **Recommended:** approval required whenever `PLAN_GATE_LOG_DIR` is set, and
   the example settings set it. Off only via an explicit `PLAN_GATE_REQUIRE_APPROVAL=off`. (b)
@@ -124,6 +129,13 @@ plan-gate never reads these refs, so a lease only excludes agents that themselve
 - **Q6 — strict mode default.** **Recommended:** opt-in. The README then states both levels:
   "leases are honored by every gated agent; with REQUIRE_LEASE, every gated write must hold one."
 
+**Identity (Q9, 2026-10-17):** "me" is `SCOPE_LEASE_OWNER` if set, else the git branch of the
+AGENT's own worktree (the hook's cwd, not the target's repo). No `user.email` fallback. An agent
+with no identity (detached HEAD, no variable) can claim no lease: leased files deny for it. Two
+agents sharing a branch count as one agent; the fix is a per-agent `SCOPE_LEASE_OWNER` (subagents
+of one session share the hook's environment). A live lock can only be extended or released by
+the same owner and lock id; a lock id alone is not enough.
+
 ## §4 Writer scripts write where the plan allows (#12)
 
 **Today (verified):** `python3 atomic-write.py STATE.md` is a Bash command. plan-gate matches it
@@ -189,3 +201,13 @@ Q5 lease-held behavior · Q6 strict-lease default · Q7 writer list.
 - Q5: an edit to a path leased by another agent is denied.
 - Q6: strict lease mode (`PLAN_GATE_REQUIRE_LEASE=on`) is opt-in.
 - Q7: `atomic-write.py` is built in, extendable with `PLAN_GATE_WRITER_SCRIPTS`.
+
+**2026-10-17 (maintainer):** Q8 — approval replay: latest approval for a plan name wins; no expiry.
+Q10 — `scope-lease.py release --force` releases any lease whoever owns it (logged as
+`force_release` with the previous owner); plan-gate always denies `--force` to a gated agent;
+owner-only refusal stays for everyone else; set `SCOPE_LEASE_OWNER` per agent.
+Q11 — retiring a plan: a human-only `plan-gate.py revoke` (terminal + typed `yes`, chain-linked
+row, latest row per plan name wins); the lifecycle's Retire step is "archive the file, then
+revoke".
+Q9 — lease identity: `SCOPE_LEASE_OWNER` if set, else the branch of the agent's own worktree;
+no `user.email` fallback; no identity means no lease is mine.

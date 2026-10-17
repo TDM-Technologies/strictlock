@@ -7,7 +7,7 @@ language; the repo root is discovered with `git rev-parse --show-toplevel` at ru
 ## Enablement & mode
 
 ### `TEST_PROTECTION_GUARD`
-`on` (case-insensitive) enables the guard. Anything else — unset, `off`, `0` — makes it inert.
+`on` / `1` / `true` / `yes` (case-insensitive) enables the guard. Anything else — unset, `off`, `0` — makes it inert.
 This is the module's own switch; it is deliberately **not** shared with the other gates, so
 enabling/disabling one gate never collaterally moves another.
 

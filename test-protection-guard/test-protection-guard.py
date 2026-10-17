@@ -63,7 +63,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # --- environment variable names (consistently TEST_PROTECTION_GUARD_*-prefixed) -----
-ENV_ENABLE = "TEST_PROTECTION_GUARD"                    # "on" enables; else inert.
+ENV_ENABLE = "TEST_PROTECTION_GUARD"                    # on/1/true/yes enables; else inert.
 ENV_MODE = "TEST_PROTECTION_GUARD_MODE"                 # auto (default) | pretooluse | precommit
 ENV_TEST_GLOBS = "TEST_PROTECTION_GUARD_TEST_GLOBS"     # os.pathsep globs identifying test files.
 ENV_SOURCE_GLOBS = "TEST_PROTECTION_GUARD_SOURCE_GLOBS"  # os.pathsep globs identifying non-test source.
@@ -113,8 +113,18 @@ DEFAULT_ASSERTION_RE = (
 # ------------------------------------------------------------------------------
 # Mode + enablement
 # ------------------------------------------------------------------------------
+_TRUTHY = ("on", "1", "true", "yes")
+
+
+def _env_truthy(name: str) -> bool:
+    """True when the env var is on/1/true/yes (case-insensitive, whitespace-trimmed).
+    Every other value, including unset and empty, is off. (Copied per module on
+    purpose: each module is a standalone single file.)"""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
+
+
 def _enabled() -> bool:
-    return os.environ.get(ENV_ENABLE, "").strip().lower() == "on"
+    return _env_truthy(ENV_ENABLE)
 
 
 def _read_stdin() -> str:
@@ -540,7 +550,7 @@ def main():
 
     if not _enabled():
         if _CURRENT_MODE == "pretooluse":
-            _emit_allow(f"test-protection-guard: {ENV_ENABLE} != 'on' — inert.")
+            _emit_allow(f"test-protection-guard: {ENV_ENABLE} is not on/1/true/yes — inert.")
         sys.exit(0)  # pre-commit: silent allow.
 
     if _CURRENT_MODE == "pretooluse":

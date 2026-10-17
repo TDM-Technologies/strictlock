@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -609,6 +610,29 @@ class SplitCommandTests(unittest.TestCase):
 
     def test_posix_unchanged(self):
         self.assertEqual(sr._split_command("'a b' c", posix=True), ["a b", "c"])
+
+
+class EnabledSwitchValueTests(unittest.TestCase):
+    """SINK_RESOLVER opt-out switch: unset runs; on/1/true/yes (any case, trimmed) run;
+    any other value disables."""
+
+    def _enabled(self, value):
+        env = {k: v for k, v in os.environ.items() if k != "SINK_RESOLVER"}
+        if value is not None:
+            env["SINK_RESOLVER"] = value
+        with mock.patch.dict(os.environ, env, clear=True):
+            return sr._enabled()
+
+    def test_unset_runs(self):
+        self.assertTrue(self._enabled(None))
+
+    def test_truthy_values_run(self):
+        for v in ("on", "1", "true", "yes", "ON", "True", " yes "):
+            self.assertTrue(self._enabled(v), msg=repr(v))
+
+    def test_other_values_disable(self):
+        for v in ("0", "off", "false", "", "garbage"):
+            self.assertFalse(self._enabled(v), msg=repr(v))
 
 
 if __name__ == "__main__":

@@ -37,8 +37,9 @@ FAULT POSTURE (fail closed, deliberately)
     safe failure; a silent allow is not.
 
 CONFIGURATION (all via environment; no machine-specific defaults are baked in)
-  PLAN_GATE                 "on" to enable; anything else makes the hook inert.
-  PLAN_GATE_BYPASS          "on" is an emergency escape hatch.
+  PLAN_GATE                 on/1/true/yes (case-insensitive) to enable; anything
+                            else makes the hook inert.
+  PLAN_GATE_BYPASS          on/1/true/yes is an emergency escape hatch.
   PLAN_GATE_PLANS_DIR       directory holding plan files (one active at a time).
   PLAN_GATE_ALWAYS_WRITABLE optional os.pathsep-separated list of directories
                             that are always writable regardless of plan state
@@ -49,12 +50,38 @@ CONFIGURATION (all via environment; no machine-specific defaults are baked in)
   PLAN_GATE_LOG_DECISIONS   "all" (default) records every decision on a gated
                             surface, allow and deny; "deny" records denials plus
                             emergency-bypass rows only (volume opt-down).
+  PLAN_GATE_WRITER_SCRIPTS  optional comma-separated name.py:argpos list of
+                            writer scripts (built in: atomic-write.py:1). A
+                            python/python3/py segment running one is a file write
+                            to its argpos-th (1-based) positional argument, gated
+                            like a `>` target. Malformed value fails closed.
+  PLAN_GATE_REQUIRE_APPROVAL  a plan is active only if `status: active` AND a
+                            human ran `plan-gate.py approve <plan.md>` on its exact
+                            bytes (an `approve` row in the decision log). Required
+                            whenever PLAN_GATE_LOG_DIR is set unless this is an
+                            explicit off/0/false/no; any other value is on, and
+                            without a log dir is a configuration error (deny).
+                            `approve <plan> --log-dir DIR` shows the plan, needs a
+                            TTY and a typed `yes` (or --no-tty-check); the latest
+                            approval per plan name wins; a gated command running it
+                            is denied.
+  PLAN_GATE_SCOPE_LEASE     optional path to scope-lease.py: every file-write
+                            target is looked up with `scope-lease.py holder`
+                            before the plan check; a path held by another agent
+                            is denied; a lookup failure denies. Unset = no lookup.
+  PLAN_GATE_REQUIRE_LEASE   on/1/true/yes: a write to a path with no lease is
+                            denied too. PLAN_GATE_SCOPE_LEASE_TIMEOUT: seconds
+                            for the lookup (default 10).
   PLAN_GATE_MCP_WRITE_TOOLS optional comma-separated list of MCP tool names that
                             modify external state (e.g. a cloud-drive create/copy
-                            tool). Default-denied when set; see the MCP section.
+                            tool). A bare name is default-denied. `tool:arg` or
+                            `tool:arg1+arg2` names the argument(s) holding target
+                            paths (a list of strings = every string a target):
+                            each is checked like an Edit/Write file_path. A
+                            missing/empty/non-string argument denies.
 
 RULES
-  - If PLAN_GATE != "on" (case-insensitive), allow everything.
+  - If PLAN_GATE is not on/1/true/yes (case-insensitive), allow everything.
   - Exactly one plan file must have `status: active` in its YAML frontmatter
     (scoped per worktree — see find_active_plans).
   - Edit / Write / NotebookEdit:
@@ -70,10 +97,13 @@ RULES
       exactly like Edit/Write (/dev/null is always fine; >&N fd dups and
       input redirection are not writes). Anything the splitter cannot
       confidently parse is denied (class unparseable_command).
+      A segment running a writer script (python atomic-write.py TARGET, see
+      PLAN_GATE_WRITER_SCRIPTS) is a file write to TARGET, gated the same way.
   - PowerShell:
-      command must start with an entry in allowed_commands, OR be a known
-      read-only command (prefix-matched, NO compound parsing — list each shape
-      in allowed_commands; segment checking for PowerShell is a follow-up).
+      split on ; | || & && and newlines; EACH segment must be a known read-only
+      command or start (at a word boundary) with an allowed_commands entry.
+      Subexpressions, script blocks, backticks, redirection and file-writing
+      cmdlets (Out-File, Set-Content, ...) are refused (fail closed).
   - Bypass ordering: for Edit/Write the always-writable bypass runs BEFORE the
     active-plan check; for Bash/PowerShell the read-only bypass also runs BEFORE
     the active-plan check (so a session with no active plan can still inspect
@@ -112,10 +142,22 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+_TRUTHY = ("on", "1", "true", "yes")
+
+
+def _env_truthy(name: str) -> bool:
+    """True when the env var is on/1/true/yes (case-insensitive, whitespace-trimmed).
+    Every other value, including unset and empty, is off. (Copied per module on
+    purpose: each module is a standalone single file.)"""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
 
 
 def _env_path(name: str) -> Path | None:
@@ -209,10 +251,8 @@ READ_ONLY_BASH_PREFIXES = (
 )
 
 # Conservative PowerShell read-only bypass. PS commands that don't mutate state.
-# NO compound parsing for PS: if you need `Get-Foo; Get-Bar`, either use Bash or
-# list both shapes in the plan's allowed_commands explicitly. (PS has its own
-# compound semantics — `;` chains, `&&`/`||` in PS7+, the `Set-Location` alias,
-# here-strings, backtick escapes — that the Bash splitter below does not model.)
+# Matched per SEGMENT at a word boundary (see _ps_segments): a compound is
+# read-only only if every segment is.
 READ_ONLY_PS_PREFIXES = (
     "Get-ChildItem",
     "Get-Content",
@@ -231,11 +271,67 @@ READ_ONLY_PS_PREFIXES = (
 # is that no external-state writes happen during a gated unit of work by design.
 # Telemetry to the MCP log falsifies that premise — if legitimate usage appears,
 # add an `allowed_mcp_tools` opt-in surface (left as a v2 exercise here).
-MCP_FILE_WRITE_TOOLS = tuple(
-    t.strip()
-    for t in os.environ.get("PLAN_GATE_MCP_WRITE_TOOLS", "").split(",")
-    if t.strip()
+#
+# An entry may name the argument(s) that hold the target path: `tool:arg` or
+# `tool:arg1+arg2`. A tool WITH an argument spec has every target (a string
+# argument, or every string of a list-of-strings argument) checked exactly like
+# an Edit/Write file_path: log self-protection, always-writable dirs, then the
+# plan's allowed_paths; a missing/empty/non-string argument denies. A tool
+# WITHOUT a spec (a bare name) stays default-denied. A bare entry wins over a
+# spec entry for the same tool (the stricter reading).
+def _parse_mcp_write_tools(raw: str):
+    """(tool_names, {tool: (arg, ...)}) from PLAN_GATE_MCP_WRITE_TOOLS."""
+    names: list[str] = []
+    specs: dict = {}
+    bare: set = set()
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, sep, spec = entry.partition(":")
+        name = name.strip()
+        if not name:
+            continue
+        if name not in names:
+            names.append(name)
+        args = tuple(a.strip() for a in spec.split("+") if a.strip()) if sep else ()
+        if not args:
+            bare.add(name)  # no (usable) spec: default-deny, as before
+            continue
+        merged = specs.get(name, ())
+        specs[name] = merged + tuple(a for a in args if a not in merged)
+    for name in bare:
+        specs.pop(name, None)
+    return tuple(names), specs
+
+
+MCP_FILE_WRITE_TOOLS, MCP_TOOL_ARGS = _parse_mcp_write_tools(
+    os.environ.get("PLAN_GATE_MCP_WRITE_TOOLS", "")
 )
+
+
+def _mcp_targets(tool: str, tool_input: dict):
+    """(targets, problem) for an MCP tool that has an argument spec. Each named
+    argument must be a non-empty string, or a non-empty list of non-empty
+    strings (every string is a target). Anything else is a problem (deny)."""
+    targets: list[str] = []
+    for arg in MCP_TOOL_ARGS.get(tool, ()):
+        val = tool_input.get(arg)
+        if isinstance(val, str):
+            vals = [val]
+        elif isinstance(val, list) and val:
+            vals = val
+        else:
+            return targets, (
+                f"argument {arg!r} is missing, empty or not a string / list of strings"
+            )
+        for v in vals:
+            if not isinstance(v, str) or not v.strip():
+                return targets, (
+                    f"argument {arg!r} holds an empty or non-string path"
+                )
+            targets.append(v)
+    return targets, None
 
 
 def _emit(decision: str, reason: str) -> None:
@@ -255,6 +351,35 @@ def allow(reason: str) -> None:
 
 def deny(reason: str) -> None:
     _emit("deny", reason)
+
+
+def no_decision() -> None:
+    """Exit 0 with NO stdout JSON: the hook has no opinion, so the harness runs
+    its normal permission flow (an "allow" decision would SKIP the user's
+    permission prompt). Used for MCP tools plan-gate does not affirmatively
+    check: unconfigured ones, and any MCP call while the gate is off or bypassed."""
+    sys.exit(0)
+
+
+def _peek_tool_name() -> str:
+    """Best-effort tool_name from the stdin payload (used only where the gate is
+    inert or bypassed and just needs to know whether the call is an MCP tool).
+    Never raises; an interactive TTY stdin is not consumed."""
+    try:
+        if sys.stdin is not None and not sys.stdin.isatty():
+            payload = json.load(sys.stdin)
+            name = payload.get("tool_name", "") if isinstance(payload, dict) else ""
+            return name if isinstance(name, str) else ""
+    except Exception:
+        pass
+    return ""
+
+
+def _allow_or_defer(reason: str, tool: str) -> None:
+    """allow(), except an MCP tool gets no decision (see no_decision)."""
+    if tool.startswith("mcp__"):
+        no_decision()
+    allow(reason)
 
 
 def _canonical_row_hash(prev: str, row_without_h: dict) -> str:
@@ -350,14 +475,59 @@ def _safe_str(v, cap: int) -> str:
     """Length-cap + strip un-encodable code points (lone surrogates arriving
     via \\uXXXX escapes in the stdin JSON) so a row ALWAYS serializes — the
     record must never lose a decision to its own input. Every string field
-    goes through this: the caps also bound total row size (worst case well
-    under 32KiB) so a row can never outgrow _read_prev_hash's tail window.
+    goes through this: the caps bound each field, and _fit_row enforces the
+    total serialized-row budget (MAX_ROW_BYTES) so a row can never outgrow
+    _read_prev_hash's tail window.
     """
     s = str(v)[:cap]
     try:
         return s.encode("utf-8", "replace").decode("utf-8")
     except Exception:
         return s.encode("ascii", "replace").decode("ascii")
+
+
+MAX_ROW_BYTES = 32 * 1024  # serialized row (incl. prev + h) is kept at or under this
+
+
+def _row_bytes(row: dict) -> int:
+    probe = dict(row)
+    probe["prev"] = "0" * 64
+    probe["h"] = "0" * 64
+    return len(json.dumps(
+        probe, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8"))
+
+
+def _fit_row(row: dict) -> None:
+    """Shrink `row` in place until its serialized size is <= MAX_ROW_BYTES, so a
+    crafted payload (many long, control-character-heavy targets whose JSON
+    escaping inflates 6x) can never outgrow the tail window _read_prev_hash
+    reads — which would break the hash chain. Extra targets are dropped (with a
+    count), then the longest string is halved with a marker."""
+    marker = "...[truncated]"
+    for _ in range(200):
+        if _row_bytes(row) <= MAX_ROW_BYTES:
+            return
+        extra = row.get("extra")
+        tl = extra.get("targets") if isinstance(extra, dict) else None
+        if isinstance(tl, list) and len(tl) > 1:
+            extra.setdefault("targets_n", len(tl))
+            extra["targets_truncated"] = True
+            del tl[len(tl) // 2:]
+            continue
+        # Halve the longest remaining string (a row field or the first target).
+        cands = [(len(v), k) for k, v in row.items() if isinstance(v, str)]
+        if isinstance(tl, list) and tl:
+            cands.append((len(tl[0]), None))
+        if not cands:
+            break
+        ln, key = max(cands, key=lambda c: c[0])
+        if ln <= len(marker) + 1:
+            break
+        if key is None:
+            tl[0] = tl[0][:ln // 2] + marker
+        else:
+            row[key] = row[key][:ln // 2] + marker
 
 
 def _log_decision(
@@ -396,15 +566,20 @@ def _log_decision(
         elif surface in ("bash", "ps"):
             command = _safe_str(tin.get("command") or "", 500)
         elif surface == "mcp":
-            summary_fields = ("title", "parentId", "fileId", "mimeType", "newTitle")
-            try:
-                for key in summary_fields:
-                    if key in tin:
-                        val = tin.get(key)
-                        extra[key] = _safe_str(val, 80) if val is not None else None
-                extra["_keys"] = sorted(_safe_str(k, 64) for k in tin.keys())[:20]
-            except Exception:
-                extra = {"_keys_error": True}
+            # Tool name only (already in the row). Argument VALUES and names are
+            # never logged for MCP calls (they can carry mail, chat, document
+            # content); the one exception is the configured path argument(s) of a
+            # tool with an argument spec, recorded as targets.
+            if tool in MCP_TOOL_ARGS:
+                try:
+                    mt, _prob = _mcp_targets(tool, tin)
+                    if mt:
+                        target = _safe_str(mt[0], 2048)
+                        extra["targets"] = [_safe_str(t, 2048) for t in mt[:20]]
+                        if len(mt) > 20:
+                            extra["targets_n"] = len(mt)
+                except Exception:
+                    extra["targets_error"] = True
         elif surface == "gate":
             # Gate-level rows (emergency bypass): best-effort context from
             # whatever payload shape was captured.
@@ -428,25 +603,38 @@ def _log_decision(
         }
         if extra:
             row["extra"] = extra
-        with open(DECISIONS_LOG, "a+b") as fh:
-            with _Flock(fh):
-                row["prev"] = _read_prev_hash(fh)
-                row["h"] = _canonical_row_hash(row["prev"], row)
-                fh.seek(0, os.SEEK_END)
-                fh.write(
-                    (
-                        json.dumps(
-                            row,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            ensure_ascii=False,
-                        )
-                        + "\n"
-                    ).encode("utf-8")
-                )
-                fh.flush()
+        _fit_row(row)
+        _append_row(row)
     except Exception:
         pass  # Never let logging failure break the gate.
+
+
+def _append_row(row: dict, durable: bool = False) -> None:
+    """Chain `row` onto the decision log under the advisory lock: sets `prev` and
+    `h`, appends one canonical JSON line. Raises on I/O failure (the decision
+    logger swallows that; `approve` must not). Caller has created LOGS_DIR."""
+    with open(DECISIONS_LOG, "a+b") as fh:
+        with _Flock(fh):
+            row["prev"] = _read_prev_hash(fh)
+            row["h"] = _canonical_row_hash(row["prev"], row)
+            fh.seek(0, os.SEEK_END)
+            fh.write(
+                (
+                    json.dumps(
+                        row,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            fh.flush()
+            if durable:
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
 
 
 def verify_log(path_arg: str | None) -> int:
@@ -472,6 +660,7 @@ def verify_log(path_arg: str | None) -> int:
     expected = _GENESIS
     problems: list[str] = []
     rows = 0
+    approvals: list = []
     for i, raw in enumerate(raw_lines, start=1):
         if not raw.strip():
             problems.append(f"line {i}: blank line (never written by the gate)")
@@ -489,6 +678,15 @@ def verify_log(path_arg: str | None) -> int:
         rows += 1
         prev = row.get("prev")
         h = row.get("h")
+        if row.get("class") in _GATE_ROW_CLASSES and row.get("surface") == row.get("class"):
+            # Same test the gate applies: right link, and the row's own hash holds.
+            bad = None
+            if prev != expected:
+                bad = "BROKEN LINK, not honoured"
+            elif _canonical_row_hash(
+                    str(prev), {k: v for k, v in row.items() if k != "h"}) != h:
+                bad = "ROW ALTERED, not honoured"
+            approvals.append((i, row, bad))
         if prev != expected:
             problems.append(
                 f"line {i}: prev-hash mismatch (expected {expected[:12]}…, "
@@ -507,8 +705,419 @@ def verify_log(path_arg: str | None) -> int:
         print(f"verify-log: {p}: {len(problems)} problem(s) across {rows} row(s):")
         for msg in problems[:50]:
             print("  " + msg)
+    else:
+        print(f"verify-log: {p}: chain intact — {rows} row(s) verified.")
+    n_rev = sum(1 for _i, r, _b in approvals if r.get("class") == _REVOKE_CLASS)
+    print(f"verify-log: {len(approvals) - n_rev} plan approval(s) recorded"
+          + (":" if approvals else "."))
+    if n_rev:
+        print(f"verify-log: {n_rev} plan revocation(s) recorded (listed below).")
+    last_ok: dict = {}  # plan name -> line of its latest honoured approval or revocation
+    for i, row, bad in approvals:
+        if bad is None:
+            last_ok[str(row.get("plan", ""))] = i
+    for i, row, bad in approvals[:200]:
+        who = f"{row.get('os_user', '?')}"
+        gname, gmail = row.get("git_user_name", ""), row.get("git_user_email", "")
+        if gname or gmail:
+            who += f" (git: {gname} <{gmail}>)"
+        print(f"  line {i}: {row.get('ts', '?')} "
+              f"{'REVOKED ' if row.get('class') == _REVOKE_CLASS else ''}{row.get('plan', '?')} "
+              f"sha256 {str(row.get('sha256', ''))[:16]}… by {who} on "
+              f"{row.get('hostname', '?')}"
+              + (" [--no-tty-check]" if row.get("no_tty_check") == "true" else "")
+              + (f" [{bad}]" if bad else "")
+              + (f" [superseded by line {last_ok[str(row.get('plan', ''))]}]"
+                 if bad is None and last_ok.get(str(row.get("plan", ""))) != i else ""))
+    return 2 if problems else 0
+
+
+# --- plan approval ------------------------------------------------------------------
+# A plan is active only if it says `status: active` AND a human approved the exact
+# bytes: `plan-gate.py approve <plan.md>` (run in a terminal, never by a gated agent)
+# appends an `approve` row to the hash-chained decision log holding the plan name and
+# the sha256 of the whole file. Any later edit changes the hash and voids the approval.
+# Approval is required whenever PLAN_GATE_LOG_DIR is set, unless
+# PLAN_GATE_REQUIRE_APPROVAL is explicitly off/0/false/no; PLAN_GATE_REQUIRE_APPROVAL=on
+# without a log dir is a configuration error (the gate denies).
+_APPROVAL_OFF = ("off", "0", "false", "no")
+_APPROVE_CLASS = "approve"
+_REVOKE_CLASS = "revoke"
+_GATE_ROW_CLASSES = (_APPROVE_CLASS, _REVOKE_CLASS)
+
+
+def _approval_mode():
+    """(required, config_error). Only an explicit off value disables approval; any
+    other non-empty value is on, and is a configuration error without
+    PLAN_GATE_LOG_DIR; unset or empty follows PLAN_GATE_LOG_DIR."""
+    v = os.environ.get("PLAN_GATE_REQUIRE_APPROVAL", "").strip().lower()
+    if v in _APPROVAL_OFF:
+        return False, None
+    if v:
+        # Any non-empty value that is not an off value means "on" (an unrecognised
+        # value must not silently weaken the gate).
+        if LOGS_DIR is None:
+            return True, (
+                f"plan-gate: PLAN_GATE_REQUIRE_APPROVAL is set ({v[:40]!r}, which counts "
+                f"as on) but PLAN_GATE_LOG_DIR is not set. Approvals are recorded in the "
+                f"decision log, so approval mode needs a log directory. Set "
+                f"PLAN_GATE_LOG_DIR, or set PLAN_GATE_REQUIRE_APPROVAL=off. " + _BYPASS_HOWTO
+            )
+        return True, None
+    return LOGS_DIR is not None, None
+
+
+def _plan_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+_APPROVED_CACHE: list = []  # one-element cache, per process (one hook call)
+_H_MARKER = b'"h":"'
+_HEX = frozenset(b"0123456789abcdef")
+
+
+def _line_anchor(raw: bytes) -> str:
+    """The chain anchor a log line gives the NEXT row, by the writer's rule: a
+    parseable row's 64-char `h`, else sha256 of the raw line bytes. Fast path:
+    read `h` straight out of a well-formed row line without parsing the JSON."""
+    if raw.endswith(b"}"):
+        i = raw.find(_H_MARKER)
+        if i >= 0:
+            cand = raw[i + 5:i + 69]
+            if len(cand) == 64 and raw[i + 69:i + 70] == b'"' and all(c in _HEX for c in cand):
+                return cand.decode("ascii")
+    try:
+        row = json.loads(raw.decode("utf-8"))
+        h = row.get("h") if isinstance(row, dict) else None
+        if isinstance(h, str) and len(h) == 64:
+            return h
+    except Exception:
+        pass
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _prev_nonblank(body: bytes, s: int, fallback):
+    """The non-blank line ending just before offset `s` in `body` (a block that
+    starts on a line boundary), else `fallback` (the last line of earlier blocks)."""
+    end = s - 1
+    while end >= 0:
+        ls = body.rfind(b"\n", 0, end) + 1
+        line = body[ls:end]
+        if line.strip():
+            return line
+        end = ls - 1
+    return fallback
+
+
+def _last_nonblank(body: bytes):
+    end = len(body)
+    if body.endswith(b"\n"):
+        end -= 1
+    while end >= 0:
+        ls = body.rfind(b"\n", 0, end) + 1
+        line = body[ls:end]
+        if line.strip():
+            return line
+        end = ls - 1
+    return None
+
+
+def _check_approve_line(line: bytes, prev_line):
+    """(plan, sha256, problem, class) for one approve- or revoke-marked log line.
+    problem is None when the row counts: its `prev` equals the anchor of the line
+    right before it (the genesis value for the first line) and its own `h`
+    verifies."""
+    try:
+        row = json.loads(line.decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(row, dict):
+        return None
+    if row.get("class") not in _GATE_ROW_CLASSES or row.get("surface") != row.get("class"):
+        return None
+    expected = _line_anchor(prev_line) if prev_line is not None else _GENESIS
+    body = {k: v for k, v in row.items() if k != "h"}
+    problem = None
+    if row.get("prev") != expected:
+        problem = "BROKEN LINK"
+    elif _canonical_row_hash(str(row.get("prev")), body) != row.get("h"):
+        problem = "ROW ALTERED"
+    return str(row.get("plan", "")), str(row.get("sha256", "")), problem, row.get("class")
+
+
+def _approved_set() -> dict:
+    """{plan file name: sha256 of the bytes most recently approved}; a plan whose
+    latest honoured row is a REVOKE is absent (nothing under that name is active until
+    it is approved again). Streams the
+    decision log in 1 MiB blocks (bounded memory), parsing only lines that carry
+    the approve marker. A row counts only if it sits on an unbroken link (its
+    `prev` is the anchor of the line right before it) and its own hash verifies;
+    for each plan name only the LATEST such row counts, so restoring older bytes
+    does not reactivate a plan and a new approval retires the previous one.
+    Rotating or archiving the log therefore voids every approval."""
+    if _APPROVED_CACHE:
+        return _APPROVED_CACHE[0]
+    latest: dict = {}
+    _APPROVED_CACHE.append(latest)
+    if DECISIONS_LOG is None:
+        return latest
+    needle_re = re.compile(rb'"class":"(?:approve|revoke)"')
+    try:
+        fh = open(str(DECISIONS_LOG), "rb")
+    except OSError:
+        return latest
+    with fh:
+        carry = b""
+        prev_line = None
+        while True:
+            chunk = fh.read(1 << 20)
+            data = carry + chunk
+            if chunk:
+                cut = data.rfind(b"\n")
+                if cut < 0:
+                    carry = data
+                    continue
+                body, carry = data[:cut + 1], data[cut + 1:]
+            else:
+                body, carry = data, b""
+            pos = 0
+            while True:
+                m = needle_re.search(body, pos)
+                if m is None:
+                    break
+                i = m.start()
+                s = body.rfind(b"\n", 0, i) + 1
+                e = body.find(b"\n", i)
+                if e < 0:
+                    e = len(body)
+                pos = e + 1
+                res = _check_approve_line(body[s:e], _prev_nonblank(body, s, prev_line))
+                if res is not None and res[2] is None:
+                    if res[3] == _REVOKE_CLASS:
+                        latest.pop(res[0], None)
+                    else:
+                        latest[res[0]] = res[1]
+            tail = _last_nonblank(body)
+            if tail is not None:
+                prev_line = tail
+            if not chunk:
+                break
+    return latest
+
+
+def _quote_arg(a: str) -> str:
+    if os.name == "nt":
+        return '"%s"' % a if (" " in a or "\t" in a) else a
+    return shlex.quote(a)
+
+
+def approve_command_for(plan_path) -> str:
+    """The exact command a human runs in a terminal to approve `plan_path`, with
+    every path absolute and the log directory this gate is reading."""
+    parts = [sys.executable or "python3", os.path.abspath(__file__), "approve",
+             os.path.abspath(str(plan_path)), "--log-dir",
+             os.path.abspath(str(LOGS_DIR)) if LOGS_DIR is not None else ""]
+    if PLANS_DIR is not None:
+        parts += ["--plans-dir", os.path.abspath(str(PLANS_DIR))]
+    cmd = " ".join(_quote_arg(p) for p in parts)
+    if os.name == "nt" and _quote_arg(parts[0]) != parts[0]:
+        # PowerShell rejects a command that starts with a quoted path unless it is
+        # called with the call operator. (cmd.exe: drop the leading "& ".)
+        cmd = "& " + cmd
+    return cmd
+
+
+def _git_config_value(cwd: Path, key: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "config", "--get", key],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+        return proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _stdin_is_terminal() -> bool:
+    """True only for a real interactive terminal on stdin. On Windows, isatty()
+    also answers True for the NUL device (what subprocess stdin=DEVNULL hands an
+    agent tool call), so there a real console must answer GetConsoleMode. Any
+    doubt is False."""
+    try:
+        if sys.stdin is None or not sys.stdin.isatty():
+            return False
+        if os.name != "nt":
+            return True
+        import ctypes
+        import msvcrt
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        mode = ctypes.c_uint32()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetConsoleMode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        kernel32.GetConsoleMode.restype = ctypes.c_int
+        return bool(kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
+    except Exception:
+        return False
+
+
+def approve_cli(argv: list[str]) -> int:
+    """`plan-gate.py approve <plan.md> [--no-tty-check]`: record that a human
+    approved this plan's exact bytes. Exit 0 ok, 2 usage / config problem, 3 refused
+    (no terminal), 1 failure."""
+    return _gate_record_cli(_APPROVE_CLASS, argv)
+
+
+def revoke_cli(argv: list[str]) -> int:
+    """`plan-gate.py revoke <plan> [--no-tty-check]`: record that a human retired
+    this plan name. After it, nothing under that name is active until it is approved
+    again, whatever bytes the file holds. Same terms as approve (terminal + `yes`)."""
+    return _gate_record_cli(_REVOKE_CLASS, argv)
+
+
+def _gate_record_cli(kind: str, argv: list[str]) -> int:
+    global LOGS_DIR, DECISIONS_LOG, PLANS_DIR
+    revoke = kind == _REVOKE_CLASS
+    usage = (f"Usage: plan-gate.py {kind} <plan.md> [--log-dir DIR] [--plans-dir DIR] "
+             "[--no-tty-check]")
+    no_tty_check = False
+    positional: list[str] = []
+    opts: dict = {}
+    it = iter(argv)
+    for a in it:
+        if a == "--no-tty-check":
+            no_tty_check = True
+        elif a in ("--log-dir", "--plans-dir") or a.startswith(("--log-dir=", "--plans-dir=")):
+            name, eq, val = a.partition("=")
+            if not eq:
+                val = next(it, "")
+            if not val:
+                print(f"{kind}: {name} needs a directory. {usage}", file=sys.stderr)
+                return 2
+            opts[name] = val
+        elif a.startswith("-") and a != "-":
+            print(f"{kind}: unknown option {a!r}. {usage}", file=sys.stderr)
+            return 2
+        else:
+            positional.append(a)
+    if len(positional) != 1:
+        print(usage, file=sys.stderr)
         return 2
-    print(f"verify-log: {p}: chain intact — {rows} row(s) verified.")
+    if "--log-dir" in opts:  # overrides PLAN_GATE_LOG_DIR (the human's shell rarely has it)
+        LOGS_DIR = Path(opts["--log-dir"]).expanduser()
+        DECISIONS_LOG = LOGS_DIR / "plan-gate-decisions.log"
+    if "--plans-dir" in opts:
+        PLANS_DIR = Path(opts["--plans-dir"]).expanduser()
+    if LOGS_DIR is None or DECISIONS_LOG is None:
+        print(f"{kind}: no log directory. Approvals and revocations are recorded in the "
+              f"decision log: pass --log-dir DIR or set PLAN_GATE_LOG_DIR.", file=sys.stderr)
+        return 2
+    interactive = _stdin_is_terminal()
+    if not interactive and not no_tty_check:
+        print(f"{kind}: refusing to run without an interactive terminal on stdin (an "
+              f"agent tool call has none). Run it yourself in a terminal; for CI or "
+              f"scripted use pass --no-tty-check (the row records that you did).",
+              file=sys.stderr)
+        return 3
+    # Resolve the plan: a relative name is looked up in the plans dir first, then the
+    # current directory; when a plans dir is known the plan must sit directly in it.
+    given = Path(positional[0]).expanduser()
+    plan = given
+    if not given.is_absolute() and PLANS_DIR is not None and (PLANS_DIR / given).is_file():
+        plan = PLANS_DIR / given
+    if PLANS_DIR is not None and plan.is_file():
+        want = norm(os.path.realpath(str(PLANS_DIR)))
+        have = norm(os.path.realpath(str(plan.parent if plan.is_absolute()
+                                         else Path(os.path.abspath(str(plan))).parent)))
+        if want != have:
+            print(f"{kind}: {plan} is not in the plans directory {PLANS_DIR}; the gate "
+                  f"only reads plans from there. Refusing.", file=sys.stderr)
+            return 2
+    try:
+        raw = plan.read_bytes()
+    except OSError as exc:
+        if not revoke:
+            print(f"approve: cannot read {plan}: {exc}", file=sys.stderr)
+            return 1
+        raw = b""  # a retired plan's file may already be archived away or deleted
+        print(f"note: {plan} cannot be read ({exc}); revoking the name {plan.name!r} anyway.")
+    plan_name = plan.name  # the name the plans-dir scan will see, even for a symlink
+    if raw or not revoke:
+        plan = plan.resolve()
+    text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+    fm = parse_frontmatter(text)
+    status = str(fm.get("status", "")).strip().lower()
+    digest = _plan_sha256(raw) if raw else ""
+    # Show what is being approved (or revoked) before anything is recorded.
+    print(f"Plan:   {plan}")
+    print(f"Size:   {len(raw)} bytes")
+    print(f"sha256: {digest}")
+    print(f"Log:    {DECISIONS_LOG}")
+    if revoke:
+        print(f"This retires the plan name {plan_name!r}: nothing under that name is active "
+              f"until it is approved again, whatever the file holds.")
+    for key in (() if revoke else ("allowed_paths", "allowed_commands")):
+        vals = fm.get(key) or []
+        if not isinstance(vals, list):
+            vals = [vals]
+        print(f"{key} ({len(vals)}):")
+        for v in vals[:50]:
+            print(f"  - {v}")
+        if len(vals) > 50:
+            print(f"  ... and {len(vals) - 50} more")
+    if not no_tty_check:
+        sys.stdout.write("Type 'yes' to revoke this plan: " if revoke
+                         else "Type 'yes' to approve exactly these bytes: ")
+        sys.stdout.flush()
+        try:
+            answer = sys.stdin.readline().strip()
+        except Exception:
+            answer = ""
+        if answer != "yes":
+            print(f"\n{kind}: not {kind}d; nothing was recorded.", file=sys.stderr)
+            return 1
+    try:
+        import getpass
+        os_user = getpass.getuser()
+    except Exception:
+        os_user = os.environ.get("USER") or os.environ.get("USERNAME") or ""
+    try:
+        import socket
+        host = socket.gethostname()
+    except Exception:
+        host = ""
+    row = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "decision": kind,
+        "surface": kind,
+        "tool": f"plan-gate {kind}",
+        "target": _safe_str(str(plan), 2048),
+        "command": "",
+        "class": kind,
+        "reason": _safe_str(f"{kind}d {plan_name}", 300),
+        "plan": _safe_str(plan_name, 300),
+        "cwd": _safe_str(os.getcwd(), 1024),
+        "sha256": digest,
+        "os_user": _safe_str(os_user, 200),
+        "git_user_name": _safe_str(_git_config_value(plan.parent, "user.name"), 200),
+        "git_user_email": _safe_str(_git_config_value(plan.parent, "user.email"), 200),
+        "hostname": _safe_str(host, 200),
+        "no_tty_check": "true" if no_tty_check else "false",
+    }
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        _append_row(row, durable=True)
+    except Exception as exc:
+        print(f"{kind}: could not write the row to {DECISIONS_LOG}: {exc}", file=sys.stderr)
+        return 1
+    print(f"{kind}d {plan_name}" + (f" (sha256 {digest})" if digest else "")
+          + f" as {row['os_user']} on {row['hostname']}.")
+    if revoke:
+        return 0
+    if status != "active":
+        print(f"note: the plan's status is {status or '(none)'!r}, not 'active'. Changing "
+              f"it later edits the file and voids this approval; approve again after the "
+              f"edit.", file=sys.stderr)
     return 0
 
 
@@ -1333,8 +1942,17 @@ def parse_frontmatter(text: str) -> dict:
     return result
 
 
-def find_active_plans(worktree_root: Path | None = None) -> list[tuple[Path, dict]]:
+def find_active_plans(
+    worktree_root: Path | None = None, approval: str = "enforce"
+) -> list[tuple[Path, dict]]:
     """Return active plans, optionally filtered by which sit under worktree_root.
+
+    Approval (approval mode on, see _approval_mode): a plan counts as active only
+    if it says `status: active` AND the decision log holds an `approve` row for
+    this plan name and the plan file's current bytes. approval="enforce" (default)
+    returns only those; approval="unapproved" returns the `status: active` plans
+    that FAIL that test (for the deny message); approval="ignore" skips the test.
+    With approval mode off every status-active plan counts, as before.
 
     Per-worktree active invariant: "exactly one active plan per worktree" instead
     of "globally." This unblocks N concurrent agent sessions in different
@@ -1362,31 +1980,49 @@ def find_active_plans(worktree_root: Path | None = None) -> list[tuple[Path, dic
     """
     if PLANS_DIR is None or not PLANS_DIR.is_dir():
         return []
+    approval_required, _cfg_err = _approval_mode()
+    if approval == "ignore":
+        approval_required = False
     actives: list[tuple[Path, dict]] = []
     wt_norm = (norm(str(worktree_root)) + "/") if worktree_root is not None else None
     for md in PLANS_DIR.glob("*.md"):
         try:
-            text = md.read_text(encoding="utf-8", errors="replace")
+            raw = md.read_bytes()
         except OSError:
             continue
+        # One read feeds both the parse and the approval hash, so the bytes that
+        # were approved are the bytes that are parsed. Newlines are normalized the
+        # way text mode would (CRLF / CR -> LF); the hash uses the raw bytes.
+        text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
         fm = parse_frontmatter(text)
         status = str(fm.get("status", "")).strip().lower()
         if status != "active":
             continue
+        claimed = False
         if worktree_root is None:
-            actives.append((md, fm))
+            claimed = True
+        elif str(fm.get("worktree_bypass", "")).strip().lower() == "true":
+            claimed = True
+        else:
+            for ap in fm.get("allowed_paths") or []:
+                if not Path(str(ap)).is_absolute():
+                    continue
+                resolved = resolve_allowed_path(
+                    str(ap), repo_root=None, worktree_root=worktree_root)
+                if norm(resolved).startswith(wt_norm):
+                    claimed = True
+                    break
+        if not claimed:
             continue
-        if str(fm.get("worktree_bypass", "")).strip().lower() == "true":
-            actives.append((md, fm))
-            continue
-        allowed_paths = fm.get("allowed_paths") or []
-        for ap in allowed_paths:
-            if not Path(str(ap)).is_absolute():
+        if approval_required or approval == "unapproved":
+            is_approved = _approved_set().get(md.name) == hashlib.sha256(raw).hexdigest()
+            if approval == "unapproved":
+                if not is_approved and _approval_mode()[0]:
+                    actives.append((md, fm))
                 continue
-            resolved = resolve_allowed_path(str(ap), repo_root=None, worktree_root=worktree_root)
-            if norm(resolved).startswith(wt_norm):
-                actives.append((md, fm))
-                break
+            if not is_approved:
+                continue
+        actives.append((md, fm))
     return actives
 
 
@@ -1533,14 +2169,14 @@ def _is_under_log_dir(target: str) -> bool:
     return _under_any(target_n, log_dirs) or _under_any(target_resolved_n, log_dirs)
 
 
-def _classify_redirect(target: str, has_cd: bool):
+def _classify_redirect(target: str, has_cd: bool, what: str = "redirection target"):
     """Classify one write-redirection target of a Bash command, mirroring the
     Edit/Write sequence (log self-protection, then always-writable dirs, then
     the plan's allowed_paths). Returns (kind, value):
       ("null", None)    /dev/null (NUL on Windows) — never a real write
       ("error", msg)    cannot be resolved safely -> deny
       ("log", msg)      under PLAN_GATE_LOG_DIR -> deny (log_self_protect)
-      ("always", None)  under an always-writable directory -> allowed
+      ("always", path)  under an always-writable directory -> allowed
       ("plan", path)    absolute path that must match an allowed_paths entry
     A RELATIVE target resolves against the session CWD — but not after a
     `cd`/`pushd`/`popd` in the same command, whose destination is not known
@@ -1554,7 +2190,7 @@ def _classify_redirect(target: str, has_cd: bool):
     if not os.path.isabs(t):
         if has_cd:
             return "error", (
-                f"plan-gate: redirection target {target!r} is relative, but the "
+                f"plan-gate: {what} {target!r} is relative, but the "
                 f"command also changes directory, so where it lands cannot be "
                 f"resolved statically. Use an absolute path."
             )
@@ -1562,19 +2198,952 @@ def _classify_redirect(target: str, has_cd: bool):
             base = os.getcwd()
         except OSError:
             return "error", (
-                f"plan-gate: redirection target {target!r} is relative and the "
+                f"plan-gate: {what} {target!r} is relative and the "
                 f"working directory cannot be determined."
             )
         t = os.path.join(base, t)
+    t_raw = t
     t = os.path.normpath(t)
-    if _is_under_log_dir(t):
+    # Check BOTH the raw and the lexically normalized form (each is also checked
+    # resolved by _is_under_log_dir): normalizing first would erase a `..` that,
+    # after a symlink in front of it, leads into the log directory.
+    if _is_under_log_dir(t_raw) or _is_under_log_dir(t):
         return "log", (
-            f"plan-gate: redirection target {t} is under PLAN_GATE_LOG_DIR; the "
+            f"plan-gate: {what} {t} is under PLAN_GATE_LOG_DIR; the "
             f"gate never authorizes gated writes to its own decision log."
         )
     if _under_any(norm(t), ALWAYS_WRITABLE_DIRS):
-        return "always", None
+        return "always", t
     return "plan", t
+
+
+# --- writer scripts (a script whose job is to write a file) -----------------------
+# `python3 atomic-write.py STATE.md` is a Bash command, and allowed_commands matches
+# it by prefix, so without more it would let the script write ANYWHERE. A segment
+# whose program is python/python3/py (or a path ending in one, `py -3`, python3.12,
+# python.exe, behind env assignments / env / nohup / time / ...) running a script on
+# the writer list is treated as a file write to the script's target argument, gated
+# like a `>` redirect target: log self-protection, always-writable dirs, then
+# allowed_paths. The segment must STILL be admitted by allowed_commands.
+#
+# Built-in list: atomic-write.py, target = its 1st (only) positional argument.
+# Extend with PLAN_GATE_WRITER_SCRIPTS=name.py:argpos[,name2.py:argpos2...] where
+# argpos is the 1-BASED position among the script's positional arguments (words that
+# do not start with '-'; everything after a bare `--` is positional). A flag's value
+# counts as a positional, so prefer the `--flag=value` form. A malformed value fails
+# CLOSED (see _WRITER_CFG_ERROR). Script names match by lowercased basename.
+_BUILTIN_WRITER_SCRIPTS = {"atomic-write.py": 1}
+
+
+_MAX_ARGPOS = 64
+_WRITER_NAME_RE = re.compile(r"^[^\s:;/\\,]+\.py$", re.IGNORECASE)
+
+
+def _parse_writer_scripts(raw: str):
+    """(writers, error). `writers` maps lowercased script basename -> 1-based
+    positional index of its target; `error` is a message when `raw` is malformed
+    (writers is then just the built-ins). A name must be a bare file name ending
+    in .py (no ':', ';', whitespace or path separators), so a separator typo such
+    as `a.py:1 b.py:2` or `a.py:2;b.py:1` is malformed rather than silently
+    leaving a writer ungated."""
+    writers = dict(_BUILTIN_WRITER_SCRIPTS)
+    if not raw.strip():
+        return writers, None
+    extra: dict = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, sep, pos = entry.rpartition(":")
+        name = name.strip()
+        pos = pos.strip()
+        if not sep or not name:
+            return dict(_BUILTIN_WRITER_SCRIPTS), (
+                f"entry {entry[:80]!r} is not name.py:argpos"
+            )
+        if not _WRITER_NAME_RE.match(name):
+            return dict(_BUILTIN_WRITER_SCRIPTS), (
+                f"entry {entry[:80]!r}: the script must be a bare file name ending "
+                f"in .py (no ':', ';', spaces or path separators; matched by "
+                f"basename); entries are separated by ','"
+            )
+        if not re.match(r"^[0-9]{1,3}$", pos) or not (1 <= int(pos) <= _MAX_ARGPOS):
+            return dict(_BUILTIN_WRITER_SCRIPTS), (
+                f"entry {entry[:80]!r}: argpos must be an integer from 1 to "
+                f"{_MAX_ARGPOS}; it is 1-based (1 = the script's first positional "
+                f"argument)"
+            )
+        extra[name.lower()] = int(pos)
+    writers.update(extra)
+    return writers, None
+
+
+def _load_writer_scripts():
+    # Any fault while parsing the config fails CLOSED (it must not escape at
+    # import time, outside the crash handler).
+    try:
+        return _parse_writer_scripts(os.environ.get("PLAN_GATE_WRITER_SCRIPTS", ""))
+    except Exception as exc:  # pragma: no cover - defensive
+        return dict(_BUILTIN_WRITER_SCRIPTS), f"could not parse ({type(exc).__name__})"
+
+
+WRITER_SCRIPTS, _WRITER_CFG_ERROR = _load_writer_scripts()
+
+# Interpreters: python, python3, python3.12, python3.13t, python3-dbg, pythonw(.exe),
+# pypy, pypy3 (a basename; any directory prefix is ignored), and the py launcher.
+_INTERP_RE = re.compile(
+    r"^(?:(?:python|pythonw|pypy)[0-9.]*[a-z\-]*(?:\.exe)?|py(?:\.exe)?)$"
+)
+_PY_LAUNCHER_FLAG_RE = re.compile(r"^-(?:V:\S*|[0-9][0-9.a-z\-]*)$")
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Wrappers that may sit in front of the interpreter without changing what runs,
+# with the options of each that take a separate value word.
+_WRAPPER_VALUE_OPTS = {
+    "env": ("-u", "-C", "-S", "-P", "--unset", "--chdir", "--split-string"),
+    "time": ("-f", "-o", "--format", "--output"),
+    "sudo": ("-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U"),
+    "nice": ("-n", "--adjustment"),
+    "timeout": ("-k", "-s", "--kill-after", "--signal"),
+    "exec": ("-a",),
+    "nohup": (),
+    "command": (),
+}
+_PS_CD_WORDS = ("cd", "chdir", "sl", "set-location", "pushd", "popd")
+# Interpreter short options that take a value (separate word, or the rest of the
+# cluster), and long ones that take a separate value word.
+_INTERP_VALUE_SHORT = "WXQ"
+_INTERP_VALUE_LONG = ("--check-hash-based-pycs",)
+
+
+def _basename_lc(tok: str) -> str:
+    return tok.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+
+
+def _is_python_prog(tok: str) -> bool:
+    return bool(_INTERP_RE.match(_basename_lc(tok)))
+
+
+def _skip_wrappers(tokens: list[str]) -> int:
+    """Index of the first token that is not a VAR=val, call operator, or a
+    wrapper (with its options)."""
+    i, n = 0, len(tokens)
+    while i < n:
+        t = tokens[i]
+        if _ENV_ASSIGN_RE.match(t) or t in ("&", "."):
+            i += 1
+            continue
+        w = _basename_lc(t)
+        if w not in _WRAPPER_VALUE_OPTS:
+            break
+        i += 1
+        valued = _WRAPPER_VALUE_OPTS[w]
+        while i < n:
+            o = tokens[i]
+            if o == "--":
+                i += 1
+                break
+            if o.startswith("-") and len(o) > 1:
+                i += 2 if o in valued else 1
+                continue
+            if w == "env" and _ENV_ASSIGN_RE.match(o):
+                i += 1
+                continue
+            break
+        if w == "timeout" and i < n:
+            i += 1  # the DURATION word
+    return i
+
+
+def _program_index(tokens: list[str]) -> int:
+    """Index of the program word, past env assignments / `&` / `.` / wrappers
+    (env, time, sudo, nice, timeout, nohup, exec, command, with their options)."""
+    return _skip_wrappers(tokens)
+
+
+def _python_invocation(tokens: list[str]):
+    """None if `tokens` (one simple command) is not a python interpreter call.
+    Else (script_token, args_after_script), where script_token is None when python
+    is not running a script file (`-m mod`, `-c code`, script on stdin, or no
+    script) and args_after_script is then every word after the interpreter."""
+    n = len(tokens)
+    i = _program_index(tokens)
+    if i >= n or not _is_python_prog(tokens[i]):
+        return None
+    prog = tokens[i]
+    launcher = _basename_lc(prog).startswith("py") and not _basename_lc(prog).startswith(
+        ("python", "pypy"))
+    j = i + 1
+    while j < n:
+        t = tokens[j]
+        if t == "-":
+            return None, tokens[j + 1:]  # script on stdin
+        if t.startswith("--"):
+            j += 2 if (t in _INTERP_VALUE_LONG) else 1
+            continue
+        if t.startswith("-"):
+            if launcher and _PY_LAUNCHER_FLAG_RE.match(t):
+                j += 1
+                continue
+            skip = 1
+            for k, ch in enumerate(t[1:], start=1):
+                if ch in "mc":
+                    # -m module / -c code: not a script file
+                    return None, tokens[j + 1:]
+                if ch in _INTERP_VALUE_SHORT:
+                    skip = 1 if k < len(t) - 1 else 2  # value attached, or next word
+                    break
+            j += skip
+            continue
+        break
+    if j >= n:
+        return None, []
+    return tokens[j], tokens[j + 1:]
+
+
+def _writer_invocation(tokens: list[str]):
+    """If `tokens` (one simple command) runs a listed writer script (via a python
+    interpreter, or by executing it directly), return (script_basename_lc,
+    args_after_script); else None. `python -m mod`, `python -c code`, a non-listed
+    script, or a program that is not python are all None (unaffected)."""
+    i = _program_index(tokens)
+    if i < len(tokens) and _basename_lc(tokens[i]) in WRITER_SCRIPTS:
+        return _basename_lc(tokens[i]), tokens[i + 1:]  # direct execution
+    inv = _python_invocation(tokens)
+    if inv is None or inv[0] is None:
+        return None
+    base = _basename_lc(inv[0])
+    if base not in WRITER_SCRIPTS:
+        return None
+    return base, inv[1]
+
+
+# --- plan approval is a human act (the gate refuses to run it for an agent) --------
+# Programs that run another command line or script given as text; if their words
+# mention plan-gate and approve, the gate cannot rule out a self-approval.
+_RUNNER_PROGS = (
+    "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash", "busybox",
+    "eval", "xargs", "pwsh", "powershell", "cmd", "node", "nodejs", "ruby", "perl",
+    "php", "deno", "bun", "script", "ssh", "su", "watch", "timeout", "setsid",
+    "find", "parallel", "at", "batch", "start", "start-process", "invoke-expression",
+    "iex", "invoke-command", "icm",
+)
+_EXPANSION_CHARS = "$`*?[{"
+_GATE_VERBS = ("approve", "revoke")  # human-only subcommands of plan-gate.py
+_APPROVE_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:approve|revoke)(?![A-Za-z0-9_-])", re.IGNORECASE)
+
+
+def _mentions_gate_approve(text: str) -> bool:
+    low = text.lower()
+    return "plan-gate" in low and bool(_APPROVE_WORD_RE.search(low))
+
+
+def _is_gate_script(tok: str) -> bool:
+    b = _basename_lc(tok)
+    return b in ("plan-gate.py", "plan-gate")
+
+
+def _approve_self_check(raw_segs: list[str], shell: str):
+    """Deny reason when a Bash/PowerShell command would run `plan-gate.py approve`
+    (or cannot be ruled out): interpreter + plan-gate.py + `approve` in any spelling
+    the writer-script detection recognizes, plan-gate.py executed directly, an
+    unresolvable script word next to `approve`, or a shell/eval/interpreter -c
+    style runner whose words mention plan-gate and approve. Best-effort: indirection
+    through other scripts is not parsed, `--no-tty-check` is something an agent can
+    pass, and the log guard depends on parsing paths. This is a barrier against the
+    direct routes, not authentication."""
+    why = (
+        "plan-gate: this command would run `plan-gate.py approve` or `revoke` (or could "
+        "not be ruled out). Approving or revoking a plan is a human act: run it yourself "
+        "in a terminal; an agent may not approve its own plan or revoke one."
+    )
+    for raw in raw_segs:
+        try:
+            if shell == "ps":
+                seglists = _tokenize_ps(raw)
+            else:
+                seglists = [shlex.split(raw)]
+        except ValueError:
+            if _mentions_gate_approve(raw):
+                return why
+            continue
+        for toks in seglists:
+            if not toks:
+                continue
+            if any(t in ("-S", "--split-string") or t.startswith("--split-string=")
+                   for t in toks) and _mentions_gate_approve(" ".join(toks)):
+                return why  # env -S "python3 plan-gate.py approve ..."
+            i = _program_index(toks)
+            if i >= len(toks):
+                continue
+            prog = toks[i]
+            rest = toks[i + 1:]
+            has_approve = any(a.lower() in _GATE_VERBS for a in rest)
+            prog_b = _basename_lc(prog)
+            if prog_b.endswith(".exe"):
+                prog_b = prog_b[:-4]
+            inv = _python_invocation(toks)
+            if inv is not None:
+                script, sargs = inv
+                if script is None:
+                    # -c / -m / stdin script: text we cannot read.
+                    if any(a.lower() in _GATE_VERBS for a in sargs) and (
+                            any(t == "-" for t in toks[i + 1:i + 6])):
+                        return why
+                    if _mentions_gate_approve(" ".join(toks)):
+                        return why
+                    continue
+                s_unsure = any(a.lower() in _GATE_VERBS for a in sargs) or any(
+                    ch in a for a in sargs for ch in "$`")
+                if s_unsure and (_is_gate_script(script)
+                                 or any(ch in script for ch in _EXPANSION_CHARS)):
+                    return why
+                continue
+            unsure = has_approve or any(ch in a for a in rest for ch in "$`")
+            if unsure and (_is_gate_script(prog)
+                           or any(ch in prog for ch in _EXPANSION_CHARS)):
+                return why
+            if prog_b in _RUNNER_PROGS and _mentions_gate_approve(" ".join(rest)):
+                return why
+    return None
+
+
+# --- lease identity and lock refs are not the agent's to set ------------------------
+# A lease is owned by the identity the HARNESS gives the agent (SCOPE_LEASE_OWNER in the
+# hook/harness environment, else its branch). If the agent could type an identity into a
+# command, it could take over, extend or release another agent's lease with values the
+# deny message or `git for-each-ref` shows it. So a gated command may not (a) pass
+# identity to scope-lease.py acquire/release, set SCOPE_LEASE_OWNER / SCOPE_LEASE_LOCK_ID,
+# or (b) change refs/locks/ with git. Best effort, like the approve check: a plan that
+# lets the agent run code it can change can still edit lock refs.
+_LEASE_ENV_ASSIGN_RE = re.compile(r"SCOPE_LEASE_(OWNER|LOCK_ID)\s*=", re.IGNORECASE)
+_LEASE_IDENTITY_FLAGS = ("--owner", "--lock-id", "--no-owner", "--owner-root", "--force")
+
+
+def _lease_flag_matches(arg: str, flags) -> bool:
+    """True if `arg` is one of `flags` or an argparse-style abbreviation of one
+    (`--forc`, `--own=x`): at least `--` plus one letter, a prefix of the flag."""
+    if not arg.startswith("--"):
+        return False
+    name = arg.split("=", 1)[0]
+    return len(name) >= 3 and any(f.startswith(name) for f in flags)
+_GIT_READ_ONLY_SUBS = (
+    "for-each-ref", "show-ref", "rev-parse", "cat-file", "log", "show", "ls-remote",
+    "rev-list", "describe", "name-rev", "diff", "status", "ls-tree", "ls-files",
+    "check-ref-format", "show-branch", "reflog", "var",
+)
+_GIT_REF_WRITER_SUBS = ("update-ref", "symbolic-ref", "branch", "tag", "push", "fetch",
+                        "pull", "replace", "notes")
+
+
+def _is_scope_lease_script(tok: str) -> bool:
+    return _basename_lc(tok) in ("scope-lease.py", "scope-lease")
+
+
+def _lease_self_check(raw_segs: list[str], shell: str, force_only: bool = False):
+    """Deny reason (str) or None. The full check (identity flags, SCOPE_LEASE_* env
+    assignments, refs/locks changes) runs when scope-lease is configured. With
+    force_only=True (scope-lease not configured) only the `--force` rule runs: a
+    scope-lease invocation carrying --force, an abbreviation of it, or arguments that
+    cannot be read. `release --force` is for a human at a terminal whether or not this
+    gate is wired to scope-lease."""
+    why_id = (
+        "plan-gate: a command may not choose its own lease identity (--owner, --lock-id, "
+        "--no-owner, --owner-root, or setting SCOPE_LEASE_OWNER / SCOPE_LEASE_LOCK_ID) "
+        "when it acquires or releases a lease, may not use --force, and may not pass "
+        "arguments plan-gate cannot read. Identity comes only from the harness "
+        "environment; `release --force` is for a human at a terminal. Run the plain "
+        "command (scope-lease.py acquire / release) instead."
+    )
+    why_ref = (
+        "plan-gate: this command would change refs/locks/ (the scope-lease lock refs), or "
+        "could not be ruled out. Lock refs change only through scope-lease.py acquire / "
+        "release, run with the harness-provided identity."
+    )
+    for raw in raw_segs:
+        if not force_only and _LEASE_ENV_ASSIGN_RE.search(raw):
+            return why_id
+        try:
+            seglists = _tokenize_ps(raw) if shell == "ps" else [shlex.split(raw)]
+        except ValueError:
+            low = raw.lower()
+            flags_here = ("--f",) if force_only else _LEASE_IDENTITY_FLAGS + ("--f",)
+            if ("scope-lease" in low and any(f in low for f in flags_here)):
+                return why_id
+            if not force_only and "refs/locks" in low:
+                return why_ref
+            continue
+        for toks in seglists:
+            if not toks:
+                continue
+            i = _program_index(toks)
+            if i >= len(toks):
+                continue
+            prog_b = _basename_lc(toks[i])
+            if prog_b.endswith(".exe"):
+                prog_b = prog_b[:-4]
+            rest = toks[i + 1:]
+            joined = " ".join(toks)
+            # (a) scope-lease.py invocations
+            script, sargs = None, rest
+            inv = _python_invocation(toks)
+            if inv is not None:
+                script, sargs = inv
+            elif _is_scope_lease_script(toks[i]):
+                script = toks[i]
+            if script is not None and (_is_scope_lease_script(script)
+                                       or any(ch in script for ch in _EXPANSION_CHARS)):
+                sub = sargs[0] if sargs else ""
+                # argparse accepts unambiguous prefixes (`--forc`, `--own`), so match
+                # prefixes of the flag names, not just the exact spellings.
+                force = any(_lease_flag_matches(a, ("--force",)) for a in sargs)
+                ident = any(_lease_flag_matches(a, _LEASE_IDENTITY_FLAGS) for a in sargs)
+                dynamic = any(ch in a for a in sargs for ch in "$`") or any(
+                    ch in sub for ch in _EXPANSION_CHARS)
+                if force or dynamic:
+                    return why_id  # --force is for a human at a terminal, never an agent
+                if ident and not force_only and sub not in ("holder", "fence-check"):
+                    return why_id  # (read-only subcommands write nothing)
+            flags_here = ("--force",) if force_only else _LEASE_IDENTITY_FLAGS
+            if script is None and inv is not None and "scope-lease" in joined.lower():
+                if any(f in joined for f in flags_here):
+                    return why_id  # python -c / stdin script naming scope-lease
+            if prog_b in _RUNNER_PROGS and "scope-lease" in joined.lower() and any(
+                    f in joined for f in flags_here):
+                return why_id
+            if force_only:
+                continue
+            # (b) raw lock-ref changes through git
+            if prog_b == "git":
+                sub = ""
+                k = 0
+                while k < len(rest):
+                    a = rest[k]
+                    if a in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+                        k += 2
+                        continue
+                    if a.startswith("-"):
+                        k += 1
+                        continue
+                    sub = a
+                    break
+                gargs = rest[k + 1:] if sub else rest
+                if sub in _GIT_READ_ONLY_SUBS:
+                    continue
+                low = " ".join(rest).lower()
+                if "refs/locks" in low:
+                    return why_ref
+                if sub in _GIT_REF_WRITER_SUBS or not sub:
+                    if any(ch in a for a in gargs for ch in "$`"):
+                        return why_ref
+                    if sub in ("update-ref", "symbolic-ref") and "--stdin" in gargs:
+                        return why_ref
+            elif prog_b in _RUNNER_PROGS and "refs/locks" in joined.lower():
+                return why_ref
+    return None
+
+
+def _lease_configured() -> bool:
+    return bool(SCOPE_LEASE_SCRIPT) or _env_truthy("PLAN_GATE_REQUIRE_LEASE")
+
+
+def _writer_target(base: str, args: list[str]):
+    """(True, target) or (False, reason) for one recognized writer invocation.
+    Only ONE target per writer is checked (the argpos-th positional). So that an
+    option value cannot shift the positionals, any option (a `-`-prefixed word
+    with no `=`, other than a lone `--`) BEFORE the target denies: write options
+    as --flag=value, or after the target."""
+    argpos = WRITER_SCRIPTS[base]
+    positionals: list[tuple[int, str]] = []
+    after_dd = False
+    for idx, a in enumerate(args):
+        if not after_dd and a == "--":
+            after_dd = True
+            continue
+        if not after_dd and a.startswith("-") and a != "-":
+            if "=" not in a and len(positionals) < argpos:
+                return False, (
+                    f"{base} has option {a[:40]!r} before its target; an option "
+                    f"may take a separate value word and so shift which argument "
+                    f"is the target. Write options as --flag=value (or after the "
+                    f"target)"
+                )
+            continue
+        positionals.append((idx, a))
+    if len(positionals) < argpos:
+        return False, (
+            f"{base} was run without its target (needs positional argument "
+            f"#{argpos}, found {len(positionals)})"
+        )
+    idx, target = positionals[argpos - 1]
+    # An expansion at or before the target could change which word lands in the
+    # target slot (word splitting), or be the target itself: unresolvable.
+    for a in args[:idx + 1]:
+        if any(ch in a for ch in "$`*?[{"):
+            return False, (
+                f"{base} has a shell expansion, glob or brace in its arguments "
+                f"({a[:60]!r}); where it writes cannot be resolved statically"
+            )
+    if not target.strip():
+        return False, f"{base} has an empty target argument"
+    if target.startswith("~"):
+        target = os.path.expanduser(target)
+    return True, target
+
+
+def _tokenize_ps(cmd: str) -> list[list[str]]:
+    """Split a PowerShell command into simple-command token lists. Minimal and
+    conservative: honors '...' and "..." quoting including the doubled-quote
+    escape ('' inside '...', "" inside "..."); a backtick inside "..." raises
+    (PowerShell's escape character is not modeled); treats ; | & ( ) { } and
+    newlines outside quotes as command separators. Raises ValueError on an
+    unterminated quote or a backtick inside double quotes. Redirections (>) and
+    Out-File / Set-Content style writes are NOT parsed."""
+    segs: list[list[str]] = []
+    cur: list[str] = []
+    buf: list[str] = []
+    have = False
+    i, n = 0, len(cmd)
+
+    def end_tok():
+        nonlocal have
+        if have:
+            cur.append("".join(buf))
+        del buf[:]
+        have = False
+
+    def end_seg():
+        end_tok()
+        if cur:
+            segs.append(list(cur))
+        del cur[:]
+
+    while i < n:
+        c = cmd[i]
+        if c in "'\"":
+            i += 1
+            while True:
+                j = cmd.find(c, i)
+                if j == -1:
+                    raise ValueError("unterminated quote")
+                chunk = cmd[i:j]
+                if c == '"' and "`" in chunk:
+                    raise ValueError("backtick escape inside double quotes")
+                buf.append(chunk)
+                if cmd[j + 1:j + 2] == c:  # doubled quote = one literal quote
+                    buf.append(c)
+                    i = j + 2
+                    continue
+                i = j + 1
+                break
+            have = True
+            continue
+        if c in " \t":
+            end_tok()
+        elif c in ";|&(){}\n\r":
+            end_seg()
+        else:
+            buf.append(c)
+            have = True
+        i += 1
+    end_seg()
+    return segs
+
+
+# --- scope-lease integration -------------------------------------------------------
+# PLAN_GATE_SCOPE_LEASE=/path/to/scope-lease.py makes every file-write target (Edit /
+# Write / NotebookEdit file_path, Bash redirect targets, writer-script targets, MCP
+# path arguments) get looked up with `scope-lease.py holder` BEFORE the plan check.
+# A path held by another agent is denied. Canonicalization lives only in scope-lease;
+# plan-gate just hands it absolute paths. PLAN_GATE_REQUIRE_LEASE=on additionally
+# denies a write to a path nobody holds (targets under an always-writable directory,
+# i.e. plans / memory, are exempt from that "must hold one" rule only).
+SCOPE_LEASE_SCRIPT = os.environ.get("PLAN_GATE_SCOPE_LEASE", "").strip()
+
+
+def _lease_timeout() -> float:
+    raw = os.environ.get("PLAN_GATE_SCOPE_LEASE_TIMEOUT", "").strip()
+    try:
+        val = float(raw) if raw else 10.0
+    except ValueError:
+        return 10.0
+    return val if val > 0 else 10.0
+
+
+def _fmt_age(seconds) -> str:
+    if not isinstance(seconds, int):
+        return "unknown"
+    if seconds < 120:
+        return f"{max(seconds, 0)}s"
+    if seconds < 7200:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+def _lease_root_for(abs_target: str) -> str:
+    """The repo / worktree whose lock refs cover `abs_target`: the nearest git root
+    above it, else the hook's working directory (a path outside any repo can only
+    have been leased through the repo the agent works in)."""
+    try:
+        repo, wt = find_repo_and_worktree_roots(Path(os.path.dirname(abs_target) or "."))
+    except Exception:
+        repo, wt = None, None
+    root = wt or repo
+    if root is not None:
+        return str(root)
+    try:
+        return os.getcwd()
+    except OSError:
+        return "."
+
+
+def _lease_check(targets: list[str]):
+    """Deny reason (str) or None. See the scope-lease integration note above."""
+    require = _env_truthy("PLAN_GATE_REQUIRE_LEASE")
+    if not SCOPE_LEASE_SCRIPT and not require:
+        return None
+    for t in targets:
+        tn = norm(t)
+        if "/refs/locks/" in tn + "/" or tn.endswith("/packed-refs"):
+            return (
+                f"plan-gate: {t} is a git ref store path (refs/locks/ holds the scope-lease "
+                f"locks); the gate does not authorize gated writes to it. Lock refs change "
+                f"only through scope-lease.py."
+            )
+    # Every target is looked up under TWO spellings when they differ: the lexical
+    # absolute path (`..` collapsed textually) and its realpath (symlinks followed),
+    # so `lnk/../x.py` and a symlink pointing at a leased file elsewhere are both
+    # seen. Held by someone else under either spelling denies. REQUIRE_LEASE judges
+    # the realpath (the file that is actually written).
+    uniq: list[str] = []          # lexical absolute paths
+    lookups: list[tuple] = []     # (lookup path, is_real_file, display target)
+    seen: set = set()
+    for t in targets:
+        raw_joined = t if os.path.isabs(t) else os.path.join(os.getcwd(), t)
+        a = os.path.normpath(raw_joined)
+        if a in uniq:
+            continue
+        uniq.append(a)
+        try:
+            # realpath of the RAW path: `lnk/../x` must resolve `lnk` first and then
+            # step up from the link's target, as the OS does when it opens the file.
+            # (Collapsing `..` textually first would look up a different file.)
+            real = os.path.realpath(raw_joined)
+        except (OSError, ValueError):
+            real = a
+        spellings = [(a, real == a or norm(real) == norm(a))]
+        if norm(real) != norm(a):
+            spellings = [(a, False), (real, True)]
+        for path, is_real in spellings:
+            if path not in seen:
+                seen.add(path)
+                lookups.append((path, is_real, a))
+    if not lookups:
+        return None
+    if not SCOPE_LEASE_SCRIPT:
+        return (
+            "plan-gate: PLAN_GATE_REQUIRE_LEASE is on but PLAN_GATE_SCOPE_LEASE (the "
+            "path to scope-lease.py) is not set, so lease ownership cannot be "
+            "checked. Failing closed. Set PLAN_GATE_SCOPE_LEASE, or turn "
+            "PLAN_GATE_REQUIRE_LEASE off. " + _BYPASS_HOWTO
+        )
+    script = os.path.expanduser(SCOPE_LEASE_SCRIPT)
+    if not os.path.isabs(script):
+        return (
+            f"plan-gate: PLAN_GATE_SCOPE_LEASE must be an absolute path to scope-lease.py "
+            f"(got {SCOPE_LEASE_SCRIPT!r}); a relative one would resolve against whatever "
+            f"directory the target is in. Failing closed. " + _BYPASS_HOWTO
+        )
+    # Identity anchor, in order: SCOPE_LEASE_OWNER (inherited by the lookup), else the
+    # branch of $CLAUDE_PROJECT_DIR (Claude Code sets it for hooks to the session's
+    # project root, so an agent that `cd`s elsewhere does not change who it is), else the
+    # `cwd` the harness put in the hook payload, else the hook process's cwd.
+    agent_cwd = ""
+    for cand in (os.environ.get("CLAUDE_PROJECT_DIR", "").strip(),
+                 str(_CALL_CTX.get("payload_cwd") or "").strip()):
+        if cand and os.path.isdir(cand):
+            agent_cwd = cand
+            break
+    if not agent_cwd:
+        try:
+            agent_cwd = os.getcwd()
+        except OSError:
+            agent_cwd = ""
+    groups: dict = {}
+    for item in lookups:
+        groups.setdefault(_lease_root_for(item[0]), []).append(item)
+    total = _lease_timeout()
+    deadline_at = time.monotonic() + total
+    results: list[dict] = []
+    for root, items in groups.items():
+        remaining = deadline_at - time.monotonic()
+        if remaining <= 0:
+            return (
+                f"plan-gate: the scope-lease lookups for this call used up the {total:g}s "
+                f"budget (PLAN_GATE_SCOPE_LEASE_TIMEOUT is the total across all repos), so "
+                f"lease ownership of {items[0][0]} is unknown. Failing closed. " + _BYPASS_HOWTO
+            )
+        paths = [it[0] for it in items]
+        cmd = [sys.executable, script, "holder", "--root", root, "--json",
+               "--paths-from", "-"]
+        # MY identity comes from the AGENT's own checkout (the hook's cwd), not from the
+        # repo the path lives in: SCOPE_LEASE_OWNER, else that checkout's branch.
+        if agent_cwd:
+            cmd += ["--owner-root", agent_cwd]
+        else:
+            cmd += ["--no-owner"]
+        try:
+            stdin_bytes = b"\0".join(os.fsencode(p) for p in paths) + b"\0"
+        except (UnicodeError, ValueError) as exc:
+            return (
+                f"plan-gate: a write target cannot be encoded for the lease lookup ({exc}); "
+                f"lease ownership is unknown. Failing closed. " + _BYPASS_HOWTO
+            )
+        try:
+            proc = subprocess.run(
+                cmd, cwd=root if os.path.isdir(root) else None, input=stdin_bytes,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=remaining,
+            )
+        except subprocess.TimeoutExpired:
+            return (
+                f"plan-gate: scope-lease holder lookup timed out (budget {total:g}s in "
+                f"total), so lease ownership of {paths[0]} is unknown. Failing closed. "
+                + _BYPASS_HOWTO
+            )
+        except OSError as exc:
+            return (
+                f"plan-gate: could not run scope-lease ({exc}); PLAN_GATE_SCOPE_LEASE="
+                f"{SCOPE_LEASE_SCRIPT!r}. Failing closed. " + _BYPASS_HOWTO
+            )
+        out = proc.stdout.decode("utf-8", "replace")
+        if proc.returncode not in (0, 5):
+            err = (proc.stderr.decode("utf-8", "replace").strip() or out.strip())[:300]
+            return (
+                f"plan-gate: scope-lease holder lookup failed (exit {proc.returncode}: "
+                f"{err}), so lease ownership of {paths[0]} is unknown. Failing closed. "
+                + _BYPASS_HOWTO
+            )
+        try:
+            rows = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+            if len(rows) != len(paths) or not all(isinstance(r, dict) for r in rows):
+                raise ValueError("unexpected row count")
+        except ValueError:
+            return (
+                f"plan-gate: scope-lease holder returned output plan-gate cannot read "
+                f"(exit {proc.returncode}, {out[:120]!r}). Failing closed. " + _BYPASS_HOWTO
+            )
+        if proc.returncode == 5 and not any(r.get("status") == "held" for r in rows):
+            return (
+                f"plan-gate: scope-lease holder exited 5 (held) but reported no held path; "
+                f"lease ownership of {paths[0]} is unclear. Failing closed. " + _BYPASS_HOWTO
+            )
+        for it, r in zip(items, rows):
+            r["_target"], r["_real"], r["_display"] = it[0], it[1], it[2]
+            if r.get("status") not in ("free", "mine", "held"):
+                return (
+                    f"plan-gate: scope-lease reported an unknown status "
+                    f"({str(r.get('status'))[:40]!r}) for {it[0]}. Failing closed. "
+                    + _BYPASS_HOWTO
+                )
+        results.extend(rows)
+    for r in results:
+        if r.get("status") == "held":
+            alias = ("" if r["_target"] == r["_display"]
+                     else f" (reached as {r['_display']})")
+            return (
+                f"plan-gate: {r['_target']}{alias} is leased by another agent: owner "
+                f"{r.get('owner', '?')}, lease age "
+                f"{_fmt_age(r.get('age_seconds'))}, until {r.get('deadline', '?')}. "
+                f"Pick a different file, or wait for the lease to lapse or be released."
+            )
+    if require:
+        # The exemption for plans / memory directories is judged on the REAL file:
+        # compare against the directories as given and as resolved.
+        always_dirs = list(ALWAYS_WRITABLE_DIRS)
+        for d in ALWAYS_WRITABLE_DIRS:
+            try:
+                always_dirs.append(Path(os.path.realpath(str(d))))
+            except (OSError, ValueError):
+                pass
+        for r in results:
+            if (r["_real"] and r.get("status") == "free"
+                    and not _under_any(norm(r["_target"]), always_dirs)):
+                why = "its lease has expired" if r.get("expired") else "no lease is held on it"
+                return (
+                    f"plan-gate: {r['_target']}: {why} (PLAN_GATE_REQUIRE_LEASE is on). "
+                    f"Acquire it first: scope-lease.py acquire."
+                )
+    return None
+
+
+# --- PowerShell segments ------------------------------------------------------
+# Mirrors the Bash path: the command is split into simple commands and EACH must
+# independently be read-only or start with an allowed_commands entry. Anything the
+# splitter cannot place with confidence is refused (fail closed).
+_PS_UNCHECKED_WRITERS = (
+    "out-file", "set-content", "add-content", "new-item", "copy-item", "move-item",
+    "tee-object", "export-csv", "export-clixml",
+    "sc", "ac", "ni", "cpi", "cp", "copy", "mi", "mv", "move", "tee",
+)
+
+
+def _ps_segments(cmd: str):
+    """(segments, problem). Segments are the raw simple-command texts, split on
+    ; | || & && and newlines outside quotes (quotes, including the doubled-quote
+    escape, are honored). A leading `&` (call operator) stays in its segment.
+    `problem` is a message when the command contains something the gate cannot
+    check: a backtick, $( or @( , a script block or parenthesis, a redirection
+    (> >> 2> <), or an unterminated quote."""
+    segs: list[str] = []
+    start = 0
+    i, n = 0, len(cmd)
+
+    def push(end):
+        t = cmd[start:end].strip()
+        if t:
+            segs.append(t)
+
+    while i < n:
+        c = cmd[i]
+        if c in "'\"":
+            i += 1
+            while True:
+                j = cmd.find(c, i)
+                if j == -1:
+                    return [], "unterminated quote"
+                chunk = cmd[i:j]
+                if "`" in chunk:
+                    return [], "a backtick escape"
+                if c == '"' and "$(" in chunk:
+                    return [], "a $( ) subexpression inside double quotes"
+                if cmd[j + 1:j + 2] == c:  # doubled quote = one literal quote
+                    i = j + 2
+                    continue
+                i = j + 1
+                break
+            continue
+        if c == "`":
+            return [], "a backtick escape"
+        if c in "(){}":
+            return [], f"{c!r} (a subexpression, grouping or script block)"
+        if c in "<>":
+            return [], f"a redirection ({c!r})"
+        if c in ";\n\r":
+            push(i)
+            start = i + 1
+        elif c == "|":
+            push(i)
+            i += 2 if cmd[i + 1:i + 2] == "|" else 1
+            start = i
+            continue
+        elif c == "&":
+            nxt = cmd[i + 1:i + 2]
+            if not cmd[start:i].strip() and nxt in (" ", "\t", "'", '"', "$"):
+                i += 1  # call operator at the start of a command
+                continue
+            push(i)
+            i += 2 if nxt == "&" else 1
+            start = i
+            continue
+        i += 1
+    push(n)
+    return segs, None
+
+
+def _ps_prefix_match(seg: str, prefix: str) -> bool:
+    p = str(prefix).strip()
+    if not p:
+        return False
+    if seg == p:
+        return True
+    return seg.startswith(p) and (p[-1] in " \t" or seg[len(p)] in " \t")
+
+
+def _ps_read_only(seg: str) -> bool:
+    return any(_ps_prefix_match(seg, pre) for pre in READ_ONLY_PS_PREFIXES)
+
+
+def _ps_unchecked_writer(seg: str):
+    """The cmdlet name if `seg` runs a file-writing cmdlet whose target the gate
+    cannot check, else None."""
+    try:
+        segs = _tokenize_ps(seg)
+    except ValueError:
+        return None
+    for toks in segs[:1]:
+        words = [t for t in toks if t not in ("&", ".")]
+        if words and words[0].lower() in _PS_UNCHECKED_WRITERS:
+            return words[0]
+    return None
+
+
+def _extra_write_target_checks(targets: list[str]):
+    """Per-write-target checks beyond log self-protection / always-writable /
+    allowed_paths. Takes ALL of one tool call's write targets (so the scope-lease
+    lookup is one subprocess per repo, not one per path) and returns a deny reason
+    or None. Runs AFTER log self-protection and BEFORE the plan check."""
+    return _lease_check(targets)
+
+
+def _collect_writer_targets(raw_segs: list[str], shell: str, has_cd: bool):
+    """Find writer-script invocations among `raw_segs` (Bash segments, or for
+    shell == "ps" the whole command) and classify each target like a redirect.
+    Returns (plan_targets, problem, all_targets): plan_targets is
+    [(abs_target, script)] that must be in allowed_paths; problem is None or
+    (deny_reason, log_class); all_targets is every resolved absolute target (for
+    the scope-lease check)."""
+    plan_targets: list[tuple[str, str]] = []
+    all_targets: list[str] = []
+    token_segs: list[list[str]] = []
+    for raw in raw_segs:
+        try:
+            if shell == "ps":
+                token_segs.extend(_tokenize_ps(raw))
+            else:
+                token_segs.append(shlex.split(raw))
+        except ValueError:
+            low = raw.lower()
+            hit = [w for w in WRITER_SCRIPTS if w in low]
+            if hit:
+                return plan_targets, (
+                    f"plan-gate: cannot tokenize a command that mentions writer "
+                    f"script {hit[0]} ({raw[:120]!r}); where it writes cannot be "
+                    f"resolved statically. Failing closed.",
+                    "writer_script",
+                ), all_targets
+    for toks in token_segs:
+        if shell == "ps" and toks and toks[0].lower() in _PS_CD_WORDS:
+            has_cd = True
+    for toks in token_segs:
+        inv = _writer_invocation(toks)
+        if inv is None:
+            continue
+        base, args = inv
+        ok, val = _writer_target(base, args)
+        if not ok:
+            return plan_targets, (f"plan-gate: writer script: {val}. Failing closed.",
+                                  "writer_script"), all_targets
+        what = f"{base} write target"
+        kind, v = _classify_redirect(val, has_cd, what)
+        if kind == "error":
+            return plan_targets, (v, "writer_script"), all_targets
+        if kind == "log":
+            return plan_targets, (v, "log_self_protect"), all_targets
+        if kind in ("always", "plan"):
+            all_targets.append(v)
+            if kind == "plan":
+                plan_targets.append((v, base))
+    return plan_targets, None, all_targets
+
+
+def _writer_cfg_deny_reason() -> str:
+    return (
+        f"plan-gate: PLAN_GATE_WRITER_SCRIPTS is malformed ({_WRITER_CFG_ERROR}). "
+        f"Expected name.py:argpos[,name2.py:argpos2] with argpos the 1-based "
+        f"position of the target among the script's positional arguments. "
+        f"Failing closed: Bash/PowerShell commands that are not read-only are "
+        f"denied until it is fixed. " + _BYPASS_HOWTO
+    )
 
 
 # What the top-level handler knows about the call in flight, so a gate_error row
@@ -1582,9 +3151,10 @@ def _classify_redirect(target: str, has_cd: bool):
 _CALL_CTX: dict = {"tool": "", "tool_input": {}}
 
 _BYPASS_HOWTO = (
-    "To proceed anyway, set PLAN_GATE_BYPASS=on inline for that command (in the "
-    "environment the hook runs in); every bypass use is logged as an "
-    "emergency_bypass row."
+    "To proceed anyway, set PLAN_GATE_BYPASS=on in the environment the harness "
+    "starts the hook with (the env Claude Code was launched with, or the "
+    "settings.json env block); it cannot be passed as a prefix on the agent's "
+    "command. Every bypass use is logged as an emergency_bypass row."
 )
 
 
@@ -1612,15 +3182,17 @@ def _handle_crash(exc: BaseException) -> None:
         traceback.print_exc(file=sys.stderr)
     except Exception:
         pass
-    if os.environ.get("PLAN_GATE", "").strip().lower() != "on":
-        allow("plan-gate: PLAN_GATE != 'on' — gate disabled.")
-    if os.environ.get("PLAN_GATE_BYPASS", "").strip().lower() == "on":
-        reason = "plan-gate: PLAN_GATE_BYPASS=on — emergency bypass (gate fault path)."
+    if not _env_truthy("PLAN_GATE"):
+        _allow_or_defer("plan-gate: PLAN_GATE is not on/1/true/yes — gate disabled.",
+                        _CALL_CTX["tool"])
+    if _env_truthy("PLAN_GATE_BYPASS"):
+        reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
+                  f"— emergency bypass (gate fault path).")
         _log_decision(
             "allow", "gate", "emergency_bypass", _CALL_CTX["tool"],
             _CALL_CTX["tool_input"], reason, None,
         )
-        allow(reason)
+        _allow_or_defer(reason, _CALL_CTX["tool"])
     _fail_closed("unhandled exception in the gate", f"{type(exc).__name__}: {exc}")
 
 
@@ -1635,15 +3207,15 @@ def main() -> None:
         raise RuntimeError("injected test crash (early)")
 
     # Master gate switch. If off or unset, this hook is inert.
-    gate_env = os.environ.get("PLAN_GATE", "").strip().lower()
-    if gate_env != "on":
-        allow("plan-gate: PLAN_GATE != 'on' — gate disabled.")
+    if not _env_truthy("PLAN_GATE"):
+        _allow_or_defer("plan-gate: PLAN_GATE is not on/1/true/yes — gate disabled.",
+                        _peek_tool_name())
 
     # Emergency bypass. Logged (class=emergency_bypass) even in the deny-only
     # log mode — bypass usage is exception-class audit evidence. The payload
     # parse here is best-effort context ONLY: any failure still allows (the
     # bypass must never wedge), and an interactive TTY stdin is not consumed.
-    if os.environ.get("PLAN_GATE_BYPASS", "").strip().lower() == "on":
+    if _env_truthy("PLAN_GATE_BYPASS"):
         b_tool, b_input = "", {}
         try:
             if sys.stdin is not None and not sys.stdin.isatty():
@@ -1652,11 +3224,10 @@ def main() -> None:
                 b_input = b_payload.get("tool_input") or {}
         except Exception:
             pass
-        _log_decision(
-            "allow", "gate", "emergency_bypass", b_tool, b_input,
-            "plan-gate: PLAN_GATE_BYPASS=on — emergency bypass.", None,
-        )
-        allow("plan-gate: PLAN_GATE_BYPASS=on — emergency bypass.")
+        b_reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
+                    f"— emergency bypass.")
+        _log_decision("allow", "gate", "emergency_bypass", b_tool, b_input, b_reason, None)
+        _allow_or_defer(b_reason, b_tool if isinstance(b_tool, str) else "")
 
     try:
         payload = json.load(sys.stdin)
@@ -1678,6 +3249,7 @@ def main() -> None:
         )
     _CALL_CTX["tool"] = tool
     _CALL_CTX["tool_input"] = tool_input
+    _CALL_CTX["payload_cwd"] = payload.get("cwd") if isinstance(payload.get("cwd"), str) else ""
     if _inject == "late":
         raise RuntimeError("injected test crash (late)")
     plan_name: str | None = None
@@ -1689,7 +3261,7 @@ def main() -> None:
             return "bash"
         if tool == "PowerShell":
             return "ps"
-        if tool in MCP_FILE_WRITE_TOOLS:
+        if tool in MCP_FILE_WRITE_TOOLS or tool.startswith("mcp__"):
             return "mcp"
         return "gate"
 
@@ -1705,6 +3277,16 @@ def main() -> None:
         allow(reason)
 
     if tool not in ("Edit", "Write", "NotebookEdit", "Bash", "PowerShell") + MCP_FILE_WRITE_TOOLS:
+        if tool.startswith("mcp__"):
+            # An MCP tool the operator has not configured: not blocked (default-
+            # denying unknown tools is a separate, backlogged item), but a row
+            # is logged so every MCP call the hook sees is on the record.
+            # NO decision (not "allow"): an allow would skip the harness's own
+            # permission prompt for a tool this gate did not actually check.
+            _log_decision("allow", "mcp", "mcp_unconfigured", tool, tool_input,
+                          f"plan-gate: MCP tool {tool!r} is not in "
+                          f"PLAN_GATE_MCP_WRITE_TOOLS.", None)
+            no_decision()
         allow(f"plan-gate: tool {tool!r} is outside the gated set.")
 
     # === Bypasses BEFORE active-plan check ===
@@ -1733,6 +3315,11 @@ def main() -> None:
                 f"never authorizes gated writes to its own decision log.",
                 class_="log_self_protect",
             )
+        # Scope-lease: a path leased by another agent is denied (and, with
+        # PLAN_GATE_REQUIRE_LEASE, a path nobody holds) before the plan is consulted.
+        lease_reason = _extra_write_target_checks([str(target)])
+        if lease_reason:
+            gated_deny(lease_reason, class_="scope_lease")
         if _under_any(target_n, ALWAYS_WRITABLE_DIRS):
             gated_allow(
                 "plan-gate: target is under an always-writable directory.",
@@ -1767,10 +3354,18 @@ def main() -> None:
                 "after parsing. Failing closed. Command: " + cmd[:200],
                 class_="unparseable_command",
             )
+        approve_reason = _approve_self_check(all_segs, "bash")
+        if approve_reason:
+            gated_deny(approve_reason, class_="approve_self_protect")
+        lease_id_reason = _lease_self_check(
+            all_segs, "bash", force_only=not _lease_configured())
+        if lease_id_reason:
+            gated_deny(lease_id_reason, class_="lease_identity_protect")
         has_cd = any(_is_cd_like(sg) for sg in all_segs)
         # Redirection-as-write: each target is a file write, gated like
         # Edit/Write (log self-protection -> always-writable -> allowed_paths).
         plan_targets: list[str] = []
+        lease_targets: list[str] = []
         for rd in all_redirects:
             r_kind, r_val = _classify_redirect(rd, has_cd)
             if r_kind == "error":
@@ -1779,6 +3374,20 @@ def main() -> None:
                 gated_deny(r_val, class_="log_self_protect")
             elif r_kind == "plan":
                 plan_targets.append(r_val)
+                lease_targets.append(r_val)
+            elif r_kind == "always":
+                lease_targets.append(r_val)
+        # Writer scripts (python atomic-write.py TARGET ...): the target is a
+        # file write, gated like a redirect target.
+        if _WRITER_CFG_ERROR and _first_bad_segment(all_segs, []) is not None:
+            gated_deny(_writer_cfg_deny_reason(), class_="writer_script")
+        writer_plan_targets, w_problem, w_all = _collect_writer_targets(
+            all_segs, "bash", has_cd)
+        if w_problem:
+            gated_deny(w_problem[0], class_=w_problem[1])
+        lease_reason = _extra_write_target_checks(lease_targets + w_all)
+        if lease_reason:
+            gated_deny(lease_reason, class_="scope_lease")
         # Pre-plan read-only bypass: a compound is read-only only if EVERY
         # segment is (a `cd` segment is a navigation no-op), and every write
         # redirection is /dev/null or lands in an always-writable directory.
@@ -1804,17 +3413,61 @@ def main() -> None:
                 "plan-gate: PowerShell tool_input has no 'command'.",
                 class_="empty_command",
             )
-        for prefix in READ_ONLY_PS_PREFIXES:
-            p = prefix.rstrip()
-            if cmd == p or cmd.startswith(prefix):
-                gated_allow(
-                    f"plan-gate: read-only PS bypass ({p!r}).",
-                    "read_only_bypass",
+        # Approving a plan is a human act: refuse before any fast path.
+        approve_reason = _approve_self_check([cmd], "ps")
+        if approve_reason:
+            gated_deny(approve_reason, class_="approve_self_protect")
+        lease_id_reason = _lease_self_check(
+            [cmd], "ps", force_only=not _lease_configured())
+        if lease_id_reason:
+            gated_deny(lease_id_reason, class_="lease_identity_protect")
+        # Split into simple commands (like the Bash path). Anything the splitter
+        # cannot place is refused outright.
+        ps_segs, ps_problem = _ps_segments(cmd)
+        if ps_problem:
+            gated_deny(
+                f"plan-gate: cannot safely check this PowerShell command "
+                f"({ps_problem}). Failing closed. Rewrite it as simple commands "
+                f"(one per call, separated by ; | && || or newlines), without "
+                f"subexpressions, script blocks, backticks or redirection. "
+                f"Command: {cmd[:200]}",
+                class_="unparseable_command",
+            )
+        if not ps_segs:
+            gated_deny(
+                "plan-gate: no executable command found in this PowerShell "
+                "command after parsing. Failing closed.",
+                class_="unparseable_command",
+            )
+        for sg in ps_segs:
+            cmdlet = _ps_unchecked_writer(sg)
+            if cmdlet:
+                gated_deny(
+                    f"plan-gate: PowerShell {cmdlet} writes a file whose target "
+                    f"the gate cannot check; use Edit/Write (gated by "
+                    f"allowed_paths) instead. Command: {cmd[:200]}",
+                    class_="ps_unchecked_write",
                 )
-        # No bare-cd / Set-Location bypass for PS: the quote-aware Bash splitter
-        # does not model PS compound semantics. Any PS compound needs an explicit
-        # allowed_commands entry.
+        # Read-only fast path: every segment is a known read-only command.
+        if all(_ps_read_only(sg) for sg in ps_segs):
+            gated_allow(
+                f"plan-gate: read-only PS bypass ({len(ps_segs)} segment(s), all "
+                f"read-only).",
+                "read_only_bypass",
+            )
+        # Writer scripts (python atomic-write.py TARGET ...): the target is a
+        # file write, gated like a redirect target.
+        if _WRITER_CFG_ERROR:
+            gated_deny(_writer_cfg_deny_reason(), class_="writer_script")
+        ps_writer_plan_targets, w_problem, ps_w_all = _collect_writer_targets(
+            ps_segs, "ps", False)
+        if w_problem:
+            gated_deny(w_problem[0], class_=w_problem[1])
+        lease_reason = _extra_write_target_checks(ps_w_all)
+        if lease_reason:
+            gated_deny(lease_reason, class_="scope_lease")
 
+    mcp_plan_targets: list[str] = []
     if tool in MCP_FILE_WRITE_TOOLS:
         # Distinguish "empty payload" from "non-empty, also denied" in telemetry.
         # No read-only equivalent: every external-state write is mutating.
@@ -1823,6 +3476,38 @@ def main() -> None:
                 f"plan-gate: MCP tool {tool!r} has empty tool_input.",
                 class_="empty_input",
             )
+        if tool in MCP_TOOL_ARGS:
+            # Tool with an argument spec: every target is checked exactly like
+            # an Edit/Write file_path (log self-protection, always-writable,
+            # then allowed_paths below). All must pass.
+            mcp_targets, mcp_problem = _mcp_targets(tool, tool_input)
+            if mcp_problem:
+                gated_deny(
+                    f"plan-gate: MCP tool {tool!r}: {mcp_problem} (configured "
+                    f"path argument(s): {', '.join(MCP_TOOL_ARGS[tool])}). "
+                    f"Failing closed.",
+                    class_="mcp_target",
+                )
+            for mt in mcp_targets:
+                if _is_under_log_dir(mt):
+                    gated_deny(
+                        f"plan-gate: {mt} is under PLAN_GATE_LOG_DIR; the gate "
+                        f"never authorizes gated writes to its own decision log.",
+                        class_="log_self_protect",
+                    )
+            extra_reason = _extra_write_target_checks(mcp_targets)
+            if extra_reason:
+                gated_deny(extra_reason, class_="scope_lease")
+            mcp_plan_targets = [
+                mt for mt in mcp_targets
+                if not _under_any(norm(os.path.normpath(mt)), ALWAYS_WRITABLE_DIRS)
+            ]
+            if not mcp_plan_targets:
+                gated_allow(
+                    f"plan-gate: all {len(mcp_targets)} MCP target(s) are under "
+                    f"an always-writable directory.",
+                    "always_writable",
+                )
 
     # === Session-CWD-aware roots ===
     # Hoisted above the active-plan check so find_active_plans() can filter by
@@ -1836,7 +3521,23 @@ def main() -> None:
         repo_root, worktree_root = find_repo_and_worktree_roots(cwd)
 
     # === Active-plan check ===
+    approval_required, approval_cfg_error = _approval_mode()
+    if approval_cfg_error:
+        gated_deny(approval_cfg_error, class_="approval_config")
     actives = find_active_plans(worktree_root=worktree_root)
+    if not actives and approval_required:
+        # A plan can say `status: active` and still not count: nobody approved
+        # these exact bytes (or it was edited after approval). Say so, by name.
+        unapproved = find_active_plans(worktree_root=worktree_root, approval="unapproved")
+        if unapproved:
+            first = unapproved[0][0]
+            more = (f" (and {len(unapproved) - 1} more)" if len(unapproved) > 1 else "")
+            gated_deny(
+                f"plan-gate: plan {first.name} is marked active but not approved (or "
+                f"changed since approval){more}. Ask a human to run, in a terminal: "
+                f"{approve_command_for(first)}",
+                class_="plan_not_approved",
+            )
     if not actives:
         if worktree_root is not None:
             # The REAL no-claim path: find_active_plans filtered every active
@@ -1974,6 +3675,14 @@ def main() -> None:
                     f"redirection (>, >>, >|, &>) is a file write and is gated "
                     f"like Edit/Write. Command: {cmd[:200]}"
                 )
+        for tgt, script in writer_plan_targets:
+            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+                gated_deny(
+                    f"plan-gate: {script} target {tgt} is NOT in allowed_paths "
+                    f"of active plan ({plan_path.name}). A writer script's "
+                    f"target is a file write and is gated like Edit/Write. "
+                    f"Command: {cmd[:200]}"
+                )
         used_plan_cmd = any(
             _segment_class(sg, allowed_cmds) == "allowed_command" for sg in all_segs
         )
@@ -1981,27 +3690,59 @@ def main() -> None:
             f"plan-gate: all {len(all_segs)} segment(s) permitted"
             + (f"; {len(plan_targets)} redirection target(s) in allowed_paths"
                if plan_targets else "")
+            + (f"; {len(writer_plan_targets)} writer-script target(s) in "
+               f"allowed_paths" if writer_plan_targets else "")
             + ".",
             "allowed_command" if used_plan_cmd else "allowed_paths",
         )
 
     if tool == "PowerShell":
-        # Conservative: startswith match against allowed_commands only. NO
-        # compound parsing. The read-only PS bypass was applied in the early
-        # branch.
-        for ac in allowed_cmds:
-            if str(ac).strip() and cmd.startswith(ac):
-                gated_allow(
-                    f"plan-gate: matches allowed_command prefix {ac!r}.",
-                    "allowed_command",
+        # EVERY segment must be read-only or start (at a word boundary) with an
+        # allowed_commands entry, exactly like the Bash path.
+        used_ps_cmd = False
+        for sg in ps_segs:
+            if _ps_read_only(sg):
+                continue
+            if not any(_ps_prefix_match(sg, ac) for ac in allowed_cmds):
+                gated_deny(
+                    f"plan-gate: PowerShell command not allowed by active plan "
+                    f"({plan_path.name}): segment {sg[:120]!r} is neither "
+                    f"read-only nor starts with an allowed_commands entry. "
+                    f"Compound commands (; | && || & newline) are checked segment "
+                    f"by segment. Command: {cmd[:200]}"
                 )
-        gated_deny(
-            f"plan-gate: PowerShell command not allowed by active plan "
-            f"({plan_path.name}). Command: {cmd[:200]}"
+            used_ps_cmd = True
+        for tgt, script in ps_writer_plan_targets:
+            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+                gated_deny(
+                    f"plan-gate: {script} target {tgt} is NOT in "
+                    f"allowed_paths of active plan ({plan_path.name}). "
+                    f"A writer script's target is a file write and is "
+                    f"gated like Edit/Write. Command: {cmd[:200]}"
+                )
+        gated_allow(
+            f"plan-gate: all {len(ps_segs)} PowerShell segment(s) permitted.",
+            "allowed_command" if used_ps_cmd else "allowed_paths",
+        )
+
+    if tool in MCP_TOOL_ARGS:
+        resolved_n = {norm(rp) for rp in resolved_paths}
+        for mt in mcp_plan_targets:
+            if norm(os.path.normpath(mt)) not in resolved_n:
+                gated_deny(
+                    f"plan-gate: MCP tool {tool!r} target {mt} is NOT in "
+                    f"allowed_paths of active plan ({plan_path.name}). An MCP "
+                    f"write tool's configured path arguments are checked like "
+                    f"Edit/Write. Update the plan or stop."
+                )
+        gated_allow(
+            f"plan-gate: all {len(mcp_plan_targets)} MCP target(s) of {tool!r} "
+            f"match allowed_paths.",
+            "allowed_paths",
         )
 
     if tool in MCP_FILE_WRITE_TOOLS:
-        # Conservative default-DENY. No opt-in surface here; the premise is no
+        # Conservative default-DENY (a tool with no argument spec). No opt-in surface here; the premise is no
         # external-state writes during a gated unit of work. Telemetry falsifies
         # that premise — if legitimate usage appears, add an `allowed_mcp_tools`
         # opt-in surface (v2). The empty-input early-deny was applied above.
@@ -2018,6 +3759,12 @@ if __name__ == "__main__":
     # reads tool-use JSON from stdin as usual.
     if len(sys.argv) >= 2 and sys.argv[1] == "verify-log":
         sys.exit(verify_log(sys.argv[2] if len(sys.argv) > 2 else None))
+    # `plan-gate.py approve <plan.md> [--no-tty-check]` records a human's approval
+    # of the plan's exact bytes in the decision log (see approve_cli).
+    if len(sys.argv) >= 2 and sys.argv[1] == "approve":
+        sys.exit(approve_cli(sys.argv[2:]))
+    if len(sys.argv) >= 2 and sys.argv[1] == "revoke":
+        sys.exit(revoke_cli(sys.argv[2:]))
     try:
         main()
     except SystemExit:

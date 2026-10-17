@@ -1,5 +1,5 @@
 {
-  "_comment": "Example Claude Code settings.json wiring plan-gate as a PreToolUse hook. Replace the absolute paths with your own (use absolute paths; do not rely on ~ or $HOME expanding in env values). The env block turns the gate on, points it at your plans directory and sets the audit log directory; the hooks block runs the gate before every gated tool call. Use python3 (a bare python is missing on many systems: a missing interpreter makes the harness proceed with no gating) and a correct absolute script path (a wrong path makes every tool call fail with a can't-open-file error). Verify the gate is live after wiring it (see plan-gate/README.md). PLAN_GATE_ALWAYS_WRITABLE below makes the plans directory writable by the agent, so an agent can write an active plan itself; remove it if a human should write plans. The matcher does not include MCP tools; add mcp__.* to route them to the gate.",
+  "_comment": "Example Claude Code settings.json wiring plan-gate as a PreToolUse hook. Replace the absolute paths with your own (use absolute paths; do not rely on ~ or $HOME expanding in env values). The env block turns the gate on, points it at your plans directory and sets the audit log directory; the hooks block runs the gate before every gated tool call, including MCP tools (mcp__). Use python3 (a bare python is missing on many systems: a missing interpreter makes the harness proceed with no gating) and a correct absolute script path (a wrong path makes every tool call fail with a can't-open-file error). Verify the gate is live after wiring it (see plan-gate/README.md). Because PLAN_GATE_LOG_DIR is set, a plan only takes effect after a human approves it in a terminal: python3 /absolute/path/to/strictlock/plan-gate/plan-gate.py approve /home/you/.agent/plans/<plan>.md --log-dir /home/you/.agent/logs (your shell does not have the env block, so --log-dir is needed; the gate's deny message prints this exact command; set PLAN_GATE_REQUIRE_APPROVAL=off to opt out). PLAN_GATE_ALWAYS_WRITABLE below lets the agent draft plans; a draft does nothing until approved. To honor scope-lease locks, also set PLAN_GATE_SCOPE_LEASE to the path of scope-lease.py.",
 
   "env": {
     "PLAN_GATE": "on",
@@ -11,7 +11,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|NotebookEdit|Bash|PowerShell",
+        "matcher": "^(Edit|Write|NotebookEdit|Bash|PowerShell)$|^mcp__",
         "hooks": [
           {
             "type": "command",

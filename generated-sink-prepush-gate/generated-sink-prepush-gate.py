@@ -51,17 +51,27 @@ import traceback
 from pathlib import Path
 
 # --- environment variable names (consistently GENERATED_SINK_PREPUSH_GATE_*-prefixed) ---
-ENV_ENABLE = "GENERATED_SINK_PREPUSH_GATE"           # "on" enables the gate; else inert.
+ENV_ENABLE = "GENERATED_SINK_PREPUSH_GATE"           # on/1/true/yes enables the gate; else inert.
 ENV_GENERATOR = "GENERATED_SINK_PREPUSH_GATE_GENERATOR"   # the generator --check command.
 ENV_GENERATOR_CWD = "GENERATED_SINK_PREPUSH_GATE_GENERATOR_CWD"  # cwd for the generator (repo-root-relative or absolute).
 ENV_TIMEOUT = "GENERATED_SINK_PREPUSH_GATE_TIMEOUT"  # seconds before the generator is treated as a fail-closed timeout.
 ENV_LOG_DIR = "GENERATED_SINK_PREPUSH_GATE_LOG_DIR"  # optional dir for the append-only decision log.
-ENV_BYPASS = "GENERATED_SINK_PREPUSH_GATE_BYPASS"    # "1" = single-push, log-on-use bypass (uniquely-named).
+ENV_BYPASS = "GENERATED_SINK_PREPUSH_GATE_BYPASS"    # on/1/true/yes = single-push, log-on-use bypass (uniquely-named).
 
 DEFAULT_TIMEOUT_S = 120
 
 EXIT_ALLOW = 0
 EXIT_BLOCK = 1
+
+
+_TRUTHY = ("on", "1", "true", "yes")
+
+
+def _env_truthy(name: str) -> bool:
+    """True when the env var is on/1/true/yes (case-insensitive, whitespace-trimmed).
+    Every other value, including unset and empty, is off. (Copied per module on
+    purpose: each module is a standalone single file.)"""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
 
 
 def _log(repo_root: Path | None, decision: str, reason: str) -> None:
@@ -256,21 +266,21 @@ def run_check(repo_root: Path) -> None:
 
 def main() -> None:
     # Master switch — inert unless explicitly enabled.
-    if os.environ.get(ENV_ENABLE, "").strip().lower() != "on":
-        print(f"generated-sink-prepush-gate: {ENV_ENABLE} != 'on' — gate disabled.", file=sys.stderr)
+    if not _env_truthy(ENV_ENABLE):
+        print(f"generated-sink-prepush-gate: {ENV_ENABLE} is not on/1/true/yes — gate disabled.", file=sys.stderr)
         sys.exit(EXIT_ALLOW)
 
     # Uniquely-named, single-push, log-on-use bypass. Distinct from the
     # commit-time gate's bypass on purpose: a bypass of the first line of defense
     # must not collaterally disable the last line of defense.
-    if os.environ.get(ENV_BYPASS, "").strip() == "1":
+    if _env_truthy(ENV_BYPASS):
         print(
-            f"generated-sink-prepush-gate: {ENV_BYPASS}=1 — backstop DELIBERATELY "
+            f"generated-sink-prepush-gate: {ENV_BYPASS}={os.environ.get(ENV_BYPASS, '').strip()} — backstop DELIBERATELY "
             f"bypassed for this push (logged on use). Use only for a documented, "
             f"deliberately-shipped stale snapshot.",
             file=sys.stderr,
         )
-        _log(None, "bypass", f"{ENV_BYPASS}=1 explicit single-push bypass")
+        _log(None, "bypass", f"{ENV_BYPASS}={os.environ.get(ENV_BYPASS, '').strip()} explicit single-push bypass")
         sys.exit(EXIT_ALLOW)
 
     repo_root = resolve_repo_root()

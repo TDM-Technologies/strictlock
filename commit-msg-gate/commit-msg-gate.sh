@@ -18,7 +18,7 @@
 # least one body slug must resolve to <slug>.md in that directory.
 #
 # Configuration (environment):
-#   COMMIT_MSG_GATE_BYPASS=on        skip the gate (single-use by convention: set inline per commit).
+#   COMMIT_MSG_GATE_BYPASS=on        skip the gate (on/1/true/yes, case-insensitive; single-use by convention: set inline per commit).
 #   COMMIT_MSG_GATE_PLANS_DIR=<dir>  opt in to slug validation: `plan: <slug>` must resolve to
 #                                    <dir>/<slug>.md (plan-gate's plan-file layout). If the
 #                                    directory is set but missing/unreadable the gate FAILS CLOSED.
@@ -33,8 +33,12 @@ if [[ -z "$MSG_FILE" || ! -f "$MSG_FILE" ]]; then
   exit 1
 fi
 
-if [[ "${COMMIT_MSG_GATE_BYPASS:-}" == "on" ]]; then
-  echo "commit-msg-gate: COMMIT_MSG_GATE_BYPASS=on — skipping gate." >&2
+# Truthy (case-insensitive, leading/trailing whitespace trimmed): on / 1 / true / yes.
+# Lowercased with tr (no ${var,,}: macOS ships bash 3.2). Inner whitespace is kept, so
+# "o n" is NOT on. Anything else, including empty, is off.
+bypass_val="$(printf '%s' "${COMMIT_MSG_GATE_BYPASS:-}" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if [[ "$bypass_val" == "on" || "$bypass_val" == "1" || "$bypass_val" == "true" || "$bypass_val" == "yes" ]]; then
+  echo "commit-msg-gate: COMMIT_MSG_GATE_BYPASS=${COMMIT_MSG_GATE_BYPASS} — skipping gate." >&2
   exit 0
 fi
 

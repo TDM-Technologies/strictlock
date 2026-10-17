@@ -17,6 +17,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -224,6 +225,22 @@ class CommitGateTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, msg=f"expected ALLOW (bypass); stderr={p.stderr!r}")
         self.assertIn("bypass", p.stderr.lower())
 
+    def test_bypass_message_prints_the_actual_value(self):
+        self.source.write_text("changed source\n", encoding="utf-8")
+        self.stage("SOURCE.txt")
+        p = self.run_gate(self.gate_env(GENERATED_SINK_COMMIT_GATE_BYPASS="TRUE"))
+        self.assertIn("GENERATED_SINK_COMMIT_GATE_BYPASS=TRUE", p.stderr)
+
+    def test_bypass_accepts_on_true_yes_but_not_garbage(self):
+        self.source.write_text("changed source\n", encoding="utf-8")
+        self.stage("SOURCE.txt")
+        for v in ("on", "TRUE", " yes "):
+            p = self.run_gate(self.gate_env(GENERATED_SINK_COMMIT_GATE_BYPASS=v))
+            self.assertEqual(p.returncode, 0, msg=f"bypass={v!r}; stderr={p.stderr!r}")
+        for v in ("0", "off", "garbage"):
+            p = self.run_gate(self.gate_env(GENERATED_SINK_COMMIT_GATE_BYPASS=v))
+            self.assertNotEqual(p.returncode, 0, msg=f"bypass={v!r} must not bypass")
+
     def test_decision_log_written(self):
         # When a log dir is configured, a block appends an audit record.
         log_dir = Path(self._tmp.name) / "logs"
@@ -257,6 +274,42 @@ class SplitCommandTests(unittest.TestCase):
 
     def test_posix_unchanged(self):
         self.assertEqual(self.m._split_command("'a b' c", posix=True), ["a b", "c"])
+
+
+TRUTHY_VALUES = ["on", "1", "true", "yes", "ON", "On", "TRUE", "Yes", " yes ", "\ton\n"]
+FALSY_VALUES = ["0", "off", "false", "no", "", "garbage", "onn", "yes please", "2", "  "]
+
+
+class BypassValueTests(unittest.TestCase):
+    """Switch values: on/1/true/yes (case-insensitive, whitespace-trimmed) are truthy;
+    everything else, including empty and garbage, is off."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("bypass_values_under_test", Path(__file__).resolve().parent.parent / "generated-sink-commit-gate.py")
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def _truthy(self, var, value):
+        with mock.patch.dict(os.environ, {var: value}):
+            return self.m._env_truthy(var)
+
+    def test_truthy_values(self):
+        for var in ['GENERATED_SINK_COMMIT_GATE', 'GENERATED_SINK_COMMIT_GATE_BYPASS']:
+            for v in TRUTHY_VALUES:
+                self.assertTrue(self._truthy(var, v), msg=f"{var}={v!r} should be truthy")
+
+    def test_falsy_values(self):
+        for var in ['GENERATED_SINK_COMMIT_GATE', 'GENERATED_SINK_COMMIT_GATE_BYPASS']:
+            for v in FALSY_VALUES:
+                self.assertFalse(self._truthy(var, v), msg=f"{var}={v!r} should be off")
+
+    def test_unset_is_off(self):
+        env = {k: v for k, v in os.environ.items() if k not in ['GENERATED_SINK_COMMIT_GATE', 'GENERATED_SINK_COMMIT_GATE_BYPASS']}
+        with mock.patch.dict(os.environ, env, clear=True):
+            for var in ['GENERATED_SINK_COMMIT_GATE', 'GENERATED_SINK_COMMIT_GATE_BYPASS']:
+                self.assertFalse(self.m._env_truthy(var))
 
 
 if __name__ == "__main__":

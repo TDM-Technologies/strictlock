@@ -294,8 +294,8 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 
 ## Open after Stage 2 (2026-10-16)
 Built-but-narrower or deliberately not built in PR 2; each keeps its interim wording where a claim depends on it.
-- **plan-gate PowerShell segment + redirect handling** — not built. PowerShell stays prefix-match with no
-  compound parsing (`Get-Content x > f` still passes the read-only prefix). Needs its own scanner; docs name the gap.
+- **plan-gate PowerShell segment + redirect handling** — *built in round 2 (PR #22)*: segment-by-segment
+  checking, parentheses/script blocks/backticks/redirections denied, file-writing cmdlets denied even if listed.
 - **plan-gate Edit/Write always-writable check** — re-check whether a symlink inside an always-writable dir
   can escape it (paths are normalized; a `..` escape did not reproduce on 2026-10-16). Unverified; investigate before acting.
 - **plan-gate bypass-hunt, wider families** — a hand probe on 2026-10-16 (~70 payloads: chain/pipe/newline/
@@ -320,6 +320,23 @@ parked from that spec: `no-oracle-reuse` (§4) and `no-mock-echo` (§5).
 ### Promote the wave-2 rules to `error` in `recommended` — *not now (2026-10-16)*
 Promote `no-tautological-assertions` + `no-unasserted-result` to `error` in `recommended`
 (they ship as `warn` in 0.2.0). Revisit after real-suite feedback.
+
+## Open after round 2 (2026-10-17)
+Follow-ups from the claims-true round 2 build and its adversarial verification. The spec is
+[`CLAIMS-TRUE-ROUND-2-SPEC.md`](CLAIMS-TRUE-ROUND-2-SPEC.md).
+- **`allow()` skips the harness prompt** — plan-gate emits `permissionDecision: "allow"`, which skips Claude
+  Code's own permission prompt for Edit/Bash when the gate is off, on bypass, or for read-only commands.
+  Pre-existing. Consider emitting no decision there, as was done for unlisted MCP tools.
+- **Lexical `allowed_paths` matching** — a symlink plus `..` can escape for Edit, and `norm()` lowercases on
+  Linux, where paths are case-sensitive.
+- **`worktree_bypass:` accepts only `true`** — other truthy spellings are ignored.
+- **`cp` / `mv` / `tee` / `sed -i` are not lease-checked** — files written by commands admitted through
+  `allowed_commands` are not looked up, even with `PLAN_GATE_REQUIRE_LEASE=on`.
+- **Lease lookup cost** — about 65 ms added per write tool call when `PLAN_GATE_SCOPE_LEASE` is set.
+- **Rotating the decision log voids approvals** — approval rows live in the log; rotation, truncation or
+  archiving means every plan must be approved again.
+- **PowerShell quoted-exe paths** in printed commands: the approve command now gets a `&` prefix on
+  Windows when the interpreter path is quoted; not yet exercised on a real Windows console.
 
 ## Done
 - **2026-10-16** — **Windows CI bring-up (PR #17)** — two real bugs fixed: scope-lease fed `git update-ref

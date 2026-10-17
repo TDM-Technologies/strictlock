@@ -20,9 +20,10 @@ refs/locks/<sha1(canonical-repo-relative-path)>  ->  a blob
 | Field | Type | Meaning |
 |---|---|---|
 | `lock_id` | string | The identity holding the scope. Acquire stamps it; fence-check and release compare against it. |
-| `owner` | string | Human/agent label (branch, email, CI runner id). Informational — used in DENY/reclaim messages, not in the ownership decision. |
+| `owner` | string | The acquiring agent's identity: `SCOPE_LEASE_OWNER`, else its worktree's git branch (or `--owner`). Part of ownership: while a lock is live, only the same `owner` AND `lock_id` may extend or release it, and `holder` counts a lock as mine when the owner matches (or the caller's lock id does). Two agents with the same owner string are one owner. |
 | `token` | int | Monotonic per-path fencing token. Starts at 1; `+1` on every reclaim/extend. The replay-safety backstop for reclaim CAS. |
 | `deadline` | string | ISO-8601 expiry. Past the deadline the lock is **reclaimable**. The only liveness signal. |
+| `acquired` | string | ISO-8601 time the holder first took the scope (kept when the same owner extends; restarted when a lock is reclaimed after it expired). Only used by `holder` to report a lease age. A lock minted by an older version has none (age reported as unknown); the first extend of such a lock stamps `acquired` with the time of that extend, so its age counts from then. |
 | `host` | string | The hostname that minted the lock. |
 | `git_dir` | string | The resolved git-common-dir that minted it. `host` + `git_dir` together identify the ref store. |
 
@@ -95,9 +96,11 @@ fence-check and release act only on refs whose blob `lock_id` matches.
   work. With the `plan-gate` / `file` sources it's derived from the plan `name`, so it's stable
   as long as the plan is. With `--source paths` you supply it (`--lock-id` /
   `SCOPE_LEASE_LOCK_ID`) and are responsible for reusing the same value.
-- `owner` is **not** the identity check — two sessions could share an owner label; only
-  `lock_id` decides ownership. `owner` is there to make a DENY or a reclaim message name a
-  human-legible holder.
+- Ownership of a **live** lock needs the lock id **and** the owner: a lock id is visible (it is
+  printed in plan-gate's deny message), so matching it alone does not let another owner take
+  over, extend or release the lock (exit `5`). An expired lock can be reclaimed by anyone.
+  `fence-check` still asks only "does a lock with my lock id hold this path". Sessions that
+  share an owner label are one owner.
 
 ## Empty path set
 

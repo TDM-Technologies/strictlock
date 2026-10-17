@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -199,7 +200,7 @@ class FenceCheckTests(unittest.TestCase):
         self.assertEqual(_run_cli(["fence-check", "--root", str(self.root)], env), 0)
         # Steal the scope: re-stamp our own lock as EXPIRED, then let a foreign live holder
         # reclaim it. The CLI fence-check (lock id 'fence-plan' from the plan name) must now fail.
-        sl.acquire_lease(root=self.root, lock_id="fence-plan", owner="me",
+        sl.acquire_lease(root=self.root, lock_id="fence-plan", owner="work-branch",
                          paths=["src/c.py"], deadline=past())   # our own holder, now expired
         sl.acquire_lease(root=self.root, lock_id="thief", owner="bob",
                          paths=["src/c.py"], deadline=future())  # reclaimed away from us
@@ -681,8 +682,10 @@ class CLITests(unittest.TestCase):
 
     def test_release_row_owner_is_the_locks_owner_not_the_releaser(self):
         logdir = self.root / "logs3"
+        # The lock has expired, so another owner may clean it up by lock id (a LIVE
+        # lock of a different owner is refused: see LeaseTakeoverTests).
         sl.acquire_lease(root=self.root, lock_id="L", owner="alice",
-                         paths=["src/a.py"], deadline=future())
+                         paths=["src/a.py"], deadline=past())
         sl.release_lease(root=self.root, lock_id="L", paths=["src/a.py"],
                          log_dir=logdir, owner="bob")
         row = json.loads((logdir / "scope-lease.log").read_text(encoding="utf-8").splitlines()[-1])
@@ -714,6 +717,379 @@ class CLITests(unittest.TestCase):
         self.assertEqual(_run_cli(["fence-check", *args], env), 0)
         self.assertEqual(_run_cli(["release", *args], env), 0)
         self.assertEqual(lock_refs(self.root), [])
+
+
+def _run_holder(root: Path, paths: list, env_extra: dict, *flags: str):
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("SCOPE_LEASE", "SCOPE_LEASE_OWNER", "SCOPE_LEASE_LOCK_ID")}
+    env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "holder", "--root", str(root), *flags, *map(str, paths)],
+        capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+    )
+
+
+class HolderTests(unittest.TestCase):
+    """`holder`: read-only lookup. 0 = every path free or mine, 5 = any held by someone else."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = make_repo(Path(self._tmp.name))
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_free_path_exit_0(self):
+        p = _run_holder(self.root, [self.root / "src" / "free.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("FREE", p.stdout)
+
+    def test_held_by_other_exit_5_names_holder_and_age(self):
+        p = _run_holder(self.root, [self.root / "src" / "a.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 5, p.stderr)
+        self.assertIn("alice", p.stdout)
+        self.assertIn("lock-a", p.stdout)
+        self.assertIn("age", p.stdout)
+
+    def test_mine_by_owner_and_by_lock_id(self):
+        a = _run_holder(self.root, ["src/a.py"], {"SCOPE_LEASE_OWNER": "alice"})
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertIn("MINE", a.stdout)
+        b = _run_holder(self.root, ["src/a.py"],
+                        {"SCOPE_LEASE_OWNER": "bob", "SCOPE_LEASE_LOCK_ID": "lock-a"})
+        self.assertEqual(b.returncode, 0, b.stderr)
+        self.assertIn("MINE", b.stdout)
+
+    def test_json_age_is_reported(self):
+        p = _run_holder(self.root, ["src/a.py"], {"SCOPE_LEASE_OWNER": "bob"}, "--json")
+        row = json.loads(p.stdout.splitlines()[0])
+        self.assertEqual((row["status"], row["owner"], row["lock_id"]), ("held", "alice", "lock-a"))
+        self.assertIsInstance(row["age_seconds"], int)
+        self.assertGreaterEqual(row["age_seconds"], 0)
+
+    def test_one_held_among_many_is_exit_5(self):
+        p = _run_holder(self.root, ["src/free.py", "src/a.py"], {"SCOPE_LEASE_OWNER": "bob"},
+                        "--json")
+        self.assertEqual(p.returncode, 5)
+        self.assertEqual([json.loads(x)["status"] for x in p.stdout.splitlines()],
+                         ["free", "held"])
+
+    def test_expired_lease_counts_as_free(self):
+        sl.acquire_lease(root=self.root, lock_id="old", owner="carol",
+                         paths=["src/old.py"], deadline=past())
+        p = _run_holder(self.root, ["src/old.py"], {"SCOPE_LEASE_OWNER": "bob"}, "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        row = json.loads(p.stdout.splitlines()[0])
+        self.assertEqual(row["status"], "free")
+        self.assertTrue(row["expired"])
+
+    def test_writes_nothing(self):
+        before = set(lock_refs(self.root))
+        _run_holder(self.root, ["src/a.py", "src/new.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(set(lock_refs(self.root)), before)
+
+    def test_ignores_scope_lease_off_switch(self):
+        p = _run_holder(self.root, ["src/a.py"],
+                        {"SCOPE_LEASE": "off", "SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 5)
+
+    def test_foreign_ref_store_is_exit_6(self):
+        ref = sl._lease_ref("src/zz.py")
+        blob = sl._hash_lease_blob(self.root, lock_id="x", owner="y", token=1, deadline=future(),
+                                   refstore={"host": "other-host", "git_dir": "/elsewhere"})
+        _git(self.root, "update-ref", ref, blob)
+        p = _run_holder(self.root, ["src/zz.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 6)
+
+    def test_not_a_repo_is_an_error(self):
+        plain = Path(self._tmp.name) / "plain"
+        plain.mkdir()
+        p = _run_holder(plain, ["x.py"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertGreaterEqual(p.returncode, 1)
+        self.assertNotIn(p.returncode, (5,))
+
+    def test_case_fold_follows_git_ignorecase(self):
+        # Same canonicalization as acquire: with core.ignorecase a different spelling of
+        # the leased file is still held; on a case-sensitive repo it is a different file.
+        _git(self.root, "config", "core.ignorecase", "true")
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                         paths=["docs/Foo.md"], deadline=future())
+        p = _run_holder(self.root, ["docs/foo.md"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 5, p.stdout)
+        _git(self.root, "config", "core.ignorecase", "false")
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                         paths=["docs/Bar.md"], deadline=future())
+        q = _run_holder(self.root, ["docs/bar.md"], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(q.returncode, 0, q.stdout)
+
+    def test_extend_keeps_original_acquire_time(self):
+        first = sl.holder_status(root=self.root, paths=["src/a.py"], owner="bob")[0]
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+        second = sl.holder_status(root=self.root, paths=["src/a.py"], owner="bob")[0]
+        self.assertEqual(first["acquired"], second["acquired"])
+        self.assertEqual(second["token"], first["token"] + 1)
+
+
+class LeaseTakeoverTests(unittest.TestCase):
+    """A lock id is visible (plan-gate prints it), so knowing it must not let another
+    owner take over, extend or release a LIVE lock. Expired locks stay reclaimable."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = make_repo(Path(self._tmp.name))
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _cli(self, verb, owner, *extra):
+        env = dict(os.environ, SCOPE_LEASE_OWNER=owner)
+        args = [verb, "--root", str(self.root), "--source", "paths", "--paths", "src/a.py",
+                "--lock-id", "lock-a", *extra]
+        p = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True,
+                           env=env, stdin=subprocess.DEVNULL)
+        return p
+
+    def test_other_owner_cannot_take_or_extend_a_live_lock_by_lock_id(self):
+        p = self._cli("acquire", "bob")
+        self.assertEqual(p.returncode, 5, p.stderr)
+        self.assertIn("alice", p.stderr)
+        h = sl.holder_status(root=self.root, paths=["src/a.py"], owner="alice")[0]
+        self.assertEqual((h["owner"], h["token"]), ("alice", 1))
+
+    def test_other_owner_cannot_release_a_live_lock_by_lock_id(self):
+        p = self._cli("release", "bob")
+        self.assertEqual(p.returncode, 5, p.stderr)
+        self.assertEqual(len(lock_refs(self.root)), 1)
+
+    def test_the_real_owner_can_extend_and_release(self):
+        self.assertEqual(self._cli("acquire", "alice").returncode, 0)
+        h = sl.holder_status(root=self.root, paths=["src/a.py"], owner="alice")[0]
+        self.assertEqual(h["token"], 2)
+        self.assertEqual(self._cli("release", "alice").returncode, 0)
+        self.assertEqual(lock_refs(self.root), [])
+
+    # --- Q10: release --force is for a human at a terminal -----------------------------
+    def test_force_release_drops_a_live_lock_of_another_owner_and_logs_it(self):
+        logdir = self.root / "forcelogs"
+        env = dict(os.environ, SCOPE_LEASE_OWNER="carol", SCOPE_LEASE_LOG_DIR=str(logdir))
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT), "release", "--force", "--root", str(self.root),
+             "--source", "paths", "--paths", "src/a.py", "--lock-id", "whatever"],
+            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(lock_refs(self.root), [])
+        self.assertIn("FORCE-RELEASED", p.stderr)
+        row = json.loads((logdir / "scope-lease.log").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["event"], "force_release")
+        self.assertEqual(row["forced"][0]["was_owner"], "alice")
+        self.assertEqual(row["forced"][0]["was_lock_id"], "lock-a")
+        self.assertEqual(row["released_by"], "carol")
+
+    def test_force_release_needs_no_lock_id_but_plain_release_does(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SCOPE_LEASE_LOCK_ID",)}
+        env["SCOPE_LEASE_OWNER"] = "carol"
+        base = ["--root", str(self.root), "--source", "paths", "--paths", "src/a.py"]
+        plain = subprocess.run([sys.executable, str(SCRIPT), "release", *base],
+                               capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(plain.returncode, 1)
+        self.assertIn("no lock id", plain.stderr)
+        forced = subprocess.run([sys.executable, str(SCRIPT), "release", "--force", *base],
+                                capture_output=True, text=True, env=env,
+                                stdin=subprocess.DEVNULL)
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(lock_refs(self.root), [])
+
+    def test_force_release_works_with_no_identity_at_all(self):
+        _git(self.root, "checkout", "-q", "--detach")
+        env = {k: v for k, v in os.environ.items() if k != "SCOPE_LEASE_OWNER"}
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT), "release", "--force", "--root", str(self.root),
+             "--source", "paths", "--paths", "src/a.py", "--lock-id", "x"],
+            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(lock_refs(self.root), [])
+
+    def test_without_force_an_owner_only_refusal_still_holds(self):
+        self.assertEqual(self._cli("release", "bob").returncode, 5)
+        self.assertEqual(len(lock_refs(self.root)), 1)
+
+    def test_fence_check_needs_no_owner(self):
+        _git(self.root, "checkout", "-q", "--detach")
+        env = {k: v for k, v in os.environ.items() if k != "SCOPE_LEASE_OWNER"}
+        base = ["--root", str(self.root), "--source", "paths", "--paths", "src/a.py",
+                "--lock-id", "lock-a"]
+        p = subprocess.run([sys.executable, str(SCRIPT), "fence-check", *base],
+                           capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("FENCE OK", p.stdout)
+        # ... but acquire and a plain release still need one.
+        for verb in ("acquire", "release"):
+            q = subprocess.run([sys.executable, str(SCRIPT), verb, *base],
+                               capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+            self.assertEqual(q.returncode, 1, (verb, q.stderr))
+
+    def test_expired_lock_can_be_reclaimed_by_anyone_even_by_lock_id(self):
+        sl.acquire_lease(root=self.root, lock_id="lock-x", owner="alice",
+                         paths=["src/x.py"], deadline=past())
+        sl.acquire_lease(root=self.root, lock_id="lock-x", owner="bob",
+                         paths=["src/x.py"], deadline=future())
+        h = sl.holder_status(root=self.root, paths=["src/x.py"], owner="bob")[0]
+        self.assertEqual((h["status"], h["owner"]), ("mine", "bob"))
+
+
+class IdentityTests(unittest.TestCase):
+    """Q9: identity = SCOPE_LEASE_OWNER, else the git branch of the AGENT's own worktree.
+    No user.email fallback; no identity means nothing is mine."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = make_repo(Path(self._tmp.name))
+        sl.acquire_lease(root=self.root, lock_id="lock-a", owner="work-branch",
+                         paths=["src/a.py"], deadline=future())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _env(self, **kw):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SCOPE_LEASE", "SCOPE_LEASE_OWNER", "SCOPE_LEASE_LOCK_ID")}
+        env.update(kw)
+        return env
+
+    def test_no_email_fallback(self):
+        _git(self.root, "checkout", "-q", "--detach")
+        with mock.patch.dict(os.environ, {k: v for k, v in os.environ.items()
+                                          if k != "SCOPE_LEASE_OWNER"}, clear=True):
+            with self.assertRaises(sl.OwnerDeriveError):
+                sl.derive_owner(self.root)
+
+    def test_detached_head_agent_owns_nothing(self):
+        other = Path(self._tmp.name) / "wt-detached"
+        _git(self.root, "worktree", "add", "-q", "--detach", str(other))
+        p = _run_holder(self.root, ["src/a.py"], {}, "--owner-root", str(other))
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+
+    def test_owner_comes_from_owner_root_not_the_repo_of_the_path(self):
+        other = Path(self._tmp.name) / "wt-other"
+        _git(self.root, "worktree", "add", "-q", "-b", "other-branch", str(other))
+        # The lock was minted for 'work-branch' (the main checkout); an agent whose own
+        # worktree is on 'other-branch' is a different agent even though it looks the
+        # path up through the main checkout.
+        p = _run_holder(self.root, ["src/a.py"], {}, "--owner-root", str(other))
+        self.assertEqual(p.returncode, 5)
+        q = _run_holder(self.root, ["src/a.py"], {}, "--owner-root", str(self.root))
+        self.assertEqual(q.returncode, 0, q.stdout)
+
+    def test_same_branch_counts_as_one_agent(self):
+        # Documented behaviour: two agents that share a branch (or an owner name) are one
+        # agent to scope-lease. Both processes below see the lock as theirs; give each
+        # agent its own SCOPE_LEASE_OWNER to keep them apart.
+        for env in ({}, {"SCOPE_LEASE_OWNER": "work-branch"}):
+            p = _run_holder(self.root, ["src/a.py"], env)
+            self.assertEqual(p.returncode, 0, p.stdout)
+            self.assertIn("MINE", p.stdout)
+        q = _run_holder(self.root, ["src/a.py"], {"SCOPE_LEASE_OWNER": "agent-2"})
+        self.assertEqual(q.returncode, 5)
+
+    def test_no_owner_flag_means_nothing_is_mine(self):
+        p = _run_holder(self.root, ["src/a.py"], {}, "--no-owner")
+        self.assertEqual(p.returncode, 5)
+
+    def test_paths_from_stdin_is_nul_separated_and_handles_newlines(self):
+        weird = "src/we\nird.py"
+        sl.acquire_lease(root=self.root, lock_id="lock-w", owner="alice",
+                         paths=[weird], deadline=future())
+        env = self._env(SCOPE_LEASE_OWNER="bob")
+        p = subprocess.run(
+            [sys.executable, str(SCRIPT), "holder", "--root", str(self.root), "--json",
+             "--paths-from", "-"],
+            input=("src/free.py\0" + weird + "\0").encode(), capture_output=True, env=env)
+        self.assertEqual(p.returncode, 5, p.stderr)
+        rows = [json.loads(x) for x in p.stdout.decode().splitlines()]
+        self.assertEqual([r["status"] for r in rows], ["free", "held"])
+
+    def test_holder_needs_a_path(self):
+        p = _run_holder(self.root, [], {"SCOPE_LEASE_OWNER": "bob"})
+        self.assertEqual(p.returncode, 2)
+
+
+class CaseVariantPrefixTests(unittest.TestCase):
+    """A path whose directory prefix differs only in case from the repo top-level must
+    still key to the same lock when the repo's filesystem is case-insensitive."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = make_repo(Path(self._tmp.name))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_swapped_case_prefix_keys_like_the_relative_path(self):
+        _git(self.root, "config", "core.ignorecase", "true")
+        top = sl._git_toplevel(self.root)
+        swapped = str(top).swapcase() + os.sep + "src" + os.sep + "a.py"
+        k1 = sl._normalize_paths(self.root, [swapped])
+        k2 = sl._normalize_paths(self.root, ["src/a.py"])
+        self.assertEqual(k1, k2, "case-variant prefix must not become a different key")
+        sl.acquire_lease(root=self.root, lock_id="L", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+        r = sl.holder_status(root=self.root, paths=[swapped], owner="bob")[0]
+        self.assertEqual(r["status"], "held")
+
+    def _fs_is_case_insensitive(self) -> bool:
+        probe = Path(self._tmp.name) / "CaseProbe.tmp"
+        probe.write_text("x")
+        return (Path(self._tmp.name) / "caseprobe.tmp").exists()
+
+    def test_case_variant_repo_spelling_is_not_a_foreign_ref_store(self):
+        if not self._fs_is_case_insensitive():
+            self.skipTest("needs a case-insensitive filesystem")
+        sl.acquire_lease(root=self.root, lock_id="L", owner="alice",
+                         paths=["src/a.py"], deadline=future())
+        variant = Path(str(self.root).swapcase())
+        self.assertEqual(sl._refstore(variant), sl._refstore(self.root))
+        rows = sl.holder_status(root=variant, paths=["src/a.py"], owner="bob")
+        self.assertEqual(rows[0]["status"], "held")  # found, and no MachineBoundaryError
+
+    def test_case_sensitive_repo_keeps_them_distinct(self):
+        if self._fs_is_case_insensitive():
+            self.skipTest("the filesystem folds case: resolve() cannot keep them distinct")
+        _git(self.root, "config", "core.ignorecase", "false")
+        top = sl._git_toplevel(self.root)
+        swapped = str(top).swapcase() + os.sep + "src" + os.sep + "a.py"
+        if swapped == str(top) + os.sep + "src" + os.sep + "a.py":
+            self.skipTest("path has no letters to swap")
+        self.assertNotEqual(sl._normalize_paths(self.root, [swapped]),
+                            sl._normalize_paths(self.root, ["src/a.py"]))
+
+
+class EnabledSwitchValueTests(unittest.TestCase):
+    """SCOPE_LEASE opt-out switch: unset runs; on/1/true/yes (any case, trimmed) run;
+    any other value disables."""
+
+    def _enabled(self, value):
+        env = {k: v for k, v in os.environ.items() if k != "SCOPE_LEASE"}
+        if value is not None:
+            env["SCOPE_LEASE"] = value
+        with mock.patch.dict(os.environ, env, clear=True):
+            return sl._enabled()
+
+    def test_unset_runs(self):
+        self.assertTrue(self._enabled(None))
+
+    def test_truthy_values_run(self):
+        for v in ("on", "1", "true", "yes", "ON", "True", " yes "):
+            self.assertTrue(self._enabled(v), msg=repr(v))
+
+    def test_other_values_disable(self):
+        for v in ("0", "off", "false", "", "garbage"):
+            self.assertFalse(self._enabled(v), msg=repr(v))
 
 
 if __name__ == "__main__":

@@ -105,6 +105,18 @@ HIPAAPath, exact paths, and whether each item is already safe. In brief:
 - reversibility-tiers / auto-commit — exploring (later) — need a shared 2–3 month evidence window.
 
 ## Decisions
+- 2026-10-17 — **Claims-true round 2: three PRs, all open, none merged.** Docs **#21**; code **#22**, stacked
+  on #21; ESLint **#20**. Code built spec §1–§5 (plan approval, MCP path checks, lease-aware gate, writer
+  scripts, bypass values) plus PowerShell segment hardening, each adversarially verified; this restoration
+  pass puts the stronger wording back in README, COMPLIANCE, module READMEs and the paper where the code
+  and tests back it, keeping every limit `plan-gate/CONFIG.md` states. Maintainer calls Q1–Q11 are in
+  [CLAIMS-TRUE-ROUND-2-SPEC.md](CLAIMS-TRUE-ROUND-2-SPEC.md) (Q10: `scope-lease.py release --force`, never
+  allowed to a gated agent; Q11: `plan-gate.py revoke`, human-only). Test counts on the code branch:
+  plan-gate 273 · scope-lease 76 (1 skipped on case-insensitive filesystems) ·
+  memory-cap 42 · atomic-write 7 · projection 38 · generated-sink-commit-gate 18 ·
+  generated-sink-prepush-gate 17 · sink-resolver 42 · liveness-scan 46 (1 skipped) ·
+  test-protection-guard 59, plus the commit-msg-gate shell test. Follow-ups: BACKLOG "Open after round 2".
+  Merges stay with Tim.
 - 2026-10-16 — **Claims-truth PR 1 + PR 2 merged by Tim** (#15 → `720a24e`, #17 → `0e5746a`). CI 13/13 green
   across Windows/macOS/Ubuntu before merge. **Wave 4 rituals (PR #14) rebased onto that main** with the Wave 4
   dev-doc close-out; merge stays with Tim.

@@ -39,8 +39,9 @@ These are honest slots, not promises with dates. Each is marked:
   guard + required-body validation) that turns the shared blackboard into an auditable,
   reproducible status projection.
 - **scope-lease** — a git-native, zero-service exclusive lock over a path set. Agents that
-  call `acquire` cannot hold the same file at once; plan-gate does not read these locks yet, so
-  an agent that skips `acquire` is not excluded. Reads its path set from a plan-gate plan. The
+  call `acquire` cannot hold the same file at once, and with `PLAN_GATE_SCOPE_LEASE` set plan-gate
+  denies a gated agent's write to a file another agent holds (with `PLAN_GATE_REQUIRE_LEASE=on`,
+  every gated write must hold a lease). Reads its path set from a plan-gate plan. The
   Concurrency flagship.
 - **sink-resolver** — deterministic auto-resolution of generated-file merge conflicts:
   `merge=binary` on the sink + a `resolve` that regenerates from the merged sources, byte-checks,

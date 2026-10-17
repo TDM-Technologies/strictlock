@@ -27,7 +27,7 @@ WHERE THE SIGNAL COMES FROM (two-tier, degrades gracefully):
   work-package ceiling: time since the EARLIEST branch commit not on base — `git log
   base..HEAD --reverse`, first commit time. An owned worktree past it escalates EVEN ON A FRESH
   SIGNAL; a signal itself older than the ceiling escalates too). Caveat: that start time is a
-  committer date, so a rebase / amend / squash rewrites it and restarts the WP clock (under-
+  committer date, so a rebase / amend / squash rewrites it and restarts the branch-age clock (under-
   report). Conversely, a branch stacked on older UNMERGED work, or cut while the base ref is
   stale, inherits that older start (over-report). A report-only tool, so noise, not a block.
 
@@ -79,7 +79,7 @@ from pathlib import Path
 # ── tuning defaults (overridable by env; no machine-specific paths) ──────────────────
 DEFAULT_HEARTBEAT_TIMEOUT_MIN = 10    # heartbeat older than this (with a ~30s touch) => likely dead
 DEFAULT_COMMIT_STALE_MIN = 90         # no-heartbeat fallback: commit mtime older than this => "quiet"
-DEFAULT_CEILING_MIN = 480             # whole-WP ceiling (8h): WP older than this, or signal idle past it => ESCALATE
+DEFAULT_CEILING_MIN = 480             # whole-branch ceiling (8h): branch older than this, or signal idle past it => ESCALATE
 DEFAULT_BASE = "origin/main"
 NO_HEARTBEAT_NOTE = "no heartbeat file — activity inferred from commit mtime"
 
@@ -370,7 +370,7 @@ def classify(wt: dict, now: datetime, *, active_plan: Plan | None, executed_plan
     """Classify ONE worktree → {status, reason, escalate, recovery, signal, age_min}.
     ambiguous => escalate; the core never reaps.
 
-    wp_age_min is the WORK-PACKAGE age: minutes since the earliest branch commit not on base.
+    wp_age_min is the whole-branch age: minutes since the earliest branch commit not on base.
     When known and > the ceiling, an owned worktree escalates EVEN ON A FRESH SIGNAL (a unit of
     work open longer than the ceiling needs a human glance however busy it looks). The ceiling
     also still bounds the signal's own age (a signal older than the ceiling escalates)."""
@@ -403,7 +403,7 @@ def classify(wt: dict, now: datetime, *, active_plan: Plan | None, executed_plan
         if wp_age_min is not None and wp_age_min > th.ceiling:
             return {"status": "ambiguous",
                     "reason": f"active plan {active_plan.name} open {wp_age_min:.0f}m since its "
-                    f"earliest branch commit (> {th.ceiling}m whole-WP ceiling), signal "
+                    f"earliest branch commit (> {th.ceiling}m whole-branch ceiling), signal "
                     f"{signal} {age:.0f}m old — long-running work, crashed-or-slow unclear; "
                     f"ESCALATE, never reap{note}",
                     "escalate": True, "recovery": _recovery_command(path),
@@ -470,7 +470,7 @@ def gather(*, plans_dir: Path | None, base: str, heartbeat_relpath: str | None,
                     except OSError:
                         hb_age = None
 
-        # WP age (time since the earliest branch commit not on base) only matters for an owned,
+        # Branch age (time since the earliest branch commit not on base) only matters for an owned,
         # non-main worktree; skip the extra git call otherwise.
         wp_age: float | None = None
         if claim_active is not None and wt.get("branch", "") not in ("main", "master", ""):

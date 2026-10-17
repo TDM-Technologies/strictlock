@@ -187,9 +187,10 @@ that is intended. To migrate: run the work, read each "segment ... matches neith
 `allowed_commands` entry for every distinct command that appears (one entry per command, kept as
 narrow as §2 says), and `allowed_paths` entries for any file a command redirects into.
 
-(PowerShell is still checked by prefix against `allowed_commands`, with **no compound parsing and no
-redirection handling** — `Get-Foo; Set-Bar` is not split. This is a known gap, not a design choice:
-list each shape you intend explicitly, or run the work through Bash.)
+(PowerShell is checked segment by segment as well, with its own splitter: each segment must be
+read-only or start with an `allowed_commands` entry at a word boundary, and a command containing
+something the gate cannot check (a backtick, `$(`, parentheses, a script block, a redirection) is
+refused. See the **PowerShell** paragraph in [`CONFIG.md`](CONFIG.md).)
 
 ### Rule of thumb
 
@@ -283,7 +284,10 @@ The schema's lifecycle is **Author → Work → Retire**: author a plan with `st
 gate confine the work, then retire the plan (set `status: archived` — or `executed`, or any
 non-`active` value; the gate treats every non-`active` value identically as "inert") so the next
 unit of work starts from a clean deny-by-default state. The discipline is in the *ordering* of the
-last step.
+last step. With `PLAN_GATE_LOG_DIR` set, retiring also has a human step: after the file is
+archived, a person runs `plan-gate.py revoke <plan.md> --log-dir ...` in a terminal, which
+records that nothing under that plan name is active until it is approved again (an agent
+cannot run it).
 
 **The trap.** The instant you flip `status` away from `active`, the plan stops authorizing
 **anything** — including the rest of its own close-out. If your close-out sequence is "flip status,
@@ -333,7 +337,12 @@ Before you set `status: active`, read the plan back as a grant of authority and 
       `>` / `>>` / `&>` redirects into is an exact `allowed_paths` entry (§2).
 - [ ] `worktree_bypass: true` is present **only** if the work is deliberately cross-tree, and then
       `allowed_paths` are absolute.
-- [ ] Exactly **one** plan is `status: active`; the previous unit's plan is archived.
+- [ ] Exactly **one** plan is `status: active`; the previous unit's plan is archived (and
+      revoked: `plan-gate.py revoke`, run by a human in a terminal).
+- [ ] When `PLAN_GATE_LOG_DIR` is set, a human has **approved** the finished file: in a terminal,
+      `python3 /abs/plan-gate.py approve /abs/plan.md --log-dir /abs/logs` (the gate's deny
+      message prints the exact command). Approval covers the file's exact bytes, so do this
+      last: any edit afterwards, even to `status`, voids it.
 - [ ] If concurrent worktrees each need their own active plan, each carries an absolute
       `allowed_paths` anchor in its worktree, and no two active plans share a file.
 - [ ] The close-out sequence ends with the status flip — work and commit come first.

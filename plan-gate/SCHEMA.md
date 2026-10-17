@@ -28,7 +28,7 @@ Free-form description for humans goes here.
 | Field | Type | Meaning |
 |---|---|---|
 | `name` | string | Human label for the plan. Not load-bearing for authorization. |
-| `status` | string | `active` arms the plan. Any other value (e.g. `draft`, `archived`) makes it inert. **Exactly one** active plan per worktree. |
+| `status` | string | `active` arms the plan. Any other value (e.g. `draft`, `archived`) makes it inert. **Exactly one** active plan per worktree. When approval is on (whenever `PLAN_GATE_LOG_DIR` is set, see [CONFIG.md](CONFIG.md#plan-approval)), `status: active` also needs a recorded human approval of the plan's exact bytes, or the plan is inert. |
 | `allowed_paths` | list of strings | The exact files the agent may write. **Exact match only** — a directory entry authorizes *nothing* inside it. Absolute or repo-root-relative. |
 | `allowed_commands` | list of strings | Command **prefixes** the agent may run. For Bash, every *segment* of a command (see below) must *start with* one of these, or be an always-allowed read-only command or a bare `cd`. |
 | `worktree_bypass` | bool | `true` opts out of the worktree guard for deliberately cross-tree work (absolute `allowed_paths`). Omit otherwise. |
@@ -78,7 +78,15 @@ strings). Two behaviors worth committing to memory:
 ## Lifecycle
 
 1. **Author** a plan describing exactly the files and commands the work needs; set
-   `status: active`.
+   `status: active`. (An agent may draft it; a draft does nothing until approved.)
+1b. **Approve** — with `PLAN_GATE_LOG_DIR` set, a human runs, in a terminal,
+   `python3 /abs/path/to/plan-gate.py approve /abs/path/to/plan.md --log-dir /abs/log/dir
+   [--plans-dir /abs/plans/dir]` (the gate's deny message prints this exact command). Any later
+   edit to the file (even one byte, including the `status` line) voids the approval; approve
+   again.
 2. **Work** — the gate confines the agent to that envelope.
-3. **Retire** — set `status: archived` (or move/delete the file) at close-out, so the next
-   unit of work starts from a clean, deny-by-default state.
+3. **Retire** — at close-out, archive the file (set `status: archived`, or move/delete it),
+   **then** a human runs `plan-gate.py revoke <plan.md> --log-dir ...` in a terminal. Revoking
+   records that nothing under that plan name is active until it is approved again, so
+   writing the old approved bytes back does not reactivate it. The next unit of work starts
+   from a clean, deny-by-default state.
