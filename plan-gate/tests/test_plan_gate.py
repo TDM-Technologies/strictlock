@@ -2240,6 +2240,8 @@ class ScopeLeaseTests(unittest.TestCase):
         self.assertEqual(decision(p), "deny", p.stdout)
         self.assertIn("alice", self.reason(p))
 
+    @unittest.skipIf(os.name == "nt", "Windows resolves `..` lexically before following "
+                     "symlinks (GetFullPathName), so lnk/../x.py is x.py there: no alias to test.")
     def test_dotdot_through_a_symlinked_dir_checks_both_spellings(self):
         # lnk -> <repo>/deep/d. The target <repo>/lnk/../x.py is <repo>/x.py when `..` is
         # collapsed textually, but the OS opens <repo>/deep/x.py (the parent of the
