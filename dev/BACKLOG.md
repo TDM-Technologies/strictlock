@@ -325,10 +325,8 @@ Follow-ups from the claims-true round 2 build and its adversarial verification. 
 - **Lease lookup cost** — about 65 ms added per write tool call when `PLAN_GATE_SCOPE_LEASE` is set.
 - **Rotating the decision log voids approvals** — approval rows live in the log; rotation, truncation or
   archiving means every plan must be approved again.
-- **PowerShell quoted-exe paths** in printed commands (the approve command in deny messages) need an `&`
-  prefix to run.
-- **Pending maintainer calls:** Q10 — who may release another agent's lease; Q11 — how to retire an
-  approved plan (no revoke command exists; the docs say "see CONFIG").
+- **PowerShell quoted-exe paths** in printed commands: the approve command now gets a `&` prefix on
+  Windows when the interpreter path is quoted; not yet exercised on a real Windows console.
 
 ## Done
 - **2026-10-16** — **Windows CI bring-up (PR #17)** — two real bugs fixed: scope-lease fed `git update-ref

@@ -196,7 +196,8 @@ is [`CONFIG.md`](CONFIG.md).
   exact bytes. The decision log records who (self-declared OS and git identity), when, and the
   plan's sha256, in a hash chain that shows whether that record was later changed. Without
   `PLAN_GATE_LOG_DIR`, `status: active` alone activates a plan. The latest approval for a plan
-  name wins; for retiring an approved plan, see [`CONFIG.md`](CONFIG.md#plan-approval).
+  name wins; to retire a plan, archive it and run `plan-gate.py revoke` (human-only, like approve; see
+  [`CONFIG.md`](CONFIG.md#plan-approval)).
   plan-gate blocks the direct ways a gated agent could run `approve` itself, but a plan that
   lets the agent run code it can change can be used to approve another plan. Rotating or
   truncating the log voids every approval. Having the plans directory in

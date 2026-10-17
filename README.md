@@ -76,8 +76,8 @@ in [`plan-gate/CONFIG.md`](plan-gate/CONFIG.md) and [`scope-lease/CONFIG.md`](sc
   later changed. That's tamper-evident, not authentication. plan-gate blocks the direct ways a
   gated agent could run `approve` itself, but a plan that lets the agent run code it can change
   can be used to approve another plan. Without `PLAN_GATE_LOG_DIR`, `status: active` alone
-  activates a plan. The latest approval per plan name wins; retiring an approved plan is
-  described in [`plan-gate/CONFIG.md`](plan-gate/CONFIG.md#plan-approval).
+  activates a plan. The latest approval per plan name wins. To retire a plan, archive it and run
+  `plan-gate.py revoke` (human-only, like approve); see [`plan-gate/CONFIG.md`](plan-gate/CONFIG.md#plan-approval).
 - **MCP tools** (tools provided by connected servers): a tool listed in
   `PLAN_GATE_MCP_WRITE_TOOLS` with an argument spec has each path in that argument checked like
   an Edit/Write target; a bare entry is denied. An unlisted MCP tool gets no decision from
