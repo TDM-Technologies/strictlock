@@ -289,7 +289,7 @@ class DecisionLogTests(unittest.TestCase):
         (row,) = self.rows()
         self.assertEqual(row["class"], "no_active_plan")
 
-    def test_mcp_deny_row_has_extra_summary_not_payload(self):
+    def test_mcp_deny_row_logs_tool_only_no_arguments(self):
         p = self.gate(
             {"tool_name": "mcp__drive__create",
              "tool_input": {"title": "Q3 report", "content": "SECRET-BODY"}},
@@ -298,9 +298,10 @@ class DecisionLogTests(unittest.TestCase):
         self.assertEqual(decision(p), "deny")
         (row,) = self.rows()
         self.assertEqual((row["surface"], row["decision"]), ("mcp", "deny"))
-        self.assertEqual(row["extra"]["title"], "Q3 report")
-        self.assertIn("content", row["extra"]["_keys"])
+        self.assertNotIn("extra", row)
+        self.assertEqual(row["tool"], "mcp__drive__create")
         self.assertNotIn("SECRET-BODY", json.dumps(row))
+        self.assertNotIn("Q3 report", json.dumps(row))
 
     # --- emergency bypass ---
 
@@ -1035,6 +1036,13 @@ class McpPathTests(unittest.TestCase):
         self.assertEqual(decision(p), "allow", "should ALLOW: %r %r\n%s" % (tool, tool_input, p.stdout))
         return p
 
+    def assertNoDecision(self, tool, tool_input, **kw):
+        """Exit 0 and NO stdout: the harness keeps its own permission prompt."""
+        p = self.call(tool, tool_input, **kw)
+        self.assertEqual((p.returncode, p.stdout.strip()), (0, ""),
+                         "should give NO decision: %r %r\n%s" % (tool, tool_input, p.stdout))
+        return p
+
     def rows(self):
         text = (self.logs / "plan-gate-decisions.log").read_text(encoding="utf-8")
         return [json.loads(l) for l in text.splitlines()]
@@ -1134,15 +1142,15 @@ class McpPathTests(unittest.TestCase):
     def test_relative_target_never_matches_an_absolute_entry(self):
         self.assertDenied(self.TOOL, {"path": "a.txt"})
 
-    def test_unconfigured_mcp_tool_allowed_and_logged(self):
-        p = self.assertAllowed("mcp__other__read", {"q": "x"}, log_dir=self.logs)
+    def test_unconfigured_mcp_tool_gets_no_decision_and_is_logged(self):
+        self.assertNoDecision("mcp__other__read", {"q": "x"}, log_dir=self.logs)
         (row,) = self.rows()
         self.assertEqual((row["decision"], row["surface"], row["class"], row["tool"]),
                          ("allow", "mcp", "mcp_unconfigured", "mcp__other__read"))
 
     def test_unconfigured_mcp_allow_row_respects_deny_only_mode(self):
-        self.assertAllowed("mcp__other__read", {"q": "x"}, log_dir=self.logs,
-                           extra_env={"PLAN_GATE_LOG_DECISIONS": "deny"})
+        self.assertNoDecision("mcp__other__read", {"q": "x"}, log_dir=self.logs,
+                              extra_env={"PLAN_GATE_LOG_DECISIONS": "deny"})
         self.assertFalse((self.logs / "plan-gate-decisions.log").exists())
 
     def test_non_mcp_unknown_tool_still_unlogged(self):
@@ -1151,7 +1159,7 @@ class McpPathTests(unittest.TestCase):
 
     def test_unconfigured_mcp_allowed_with_no_plan(self):
         (self.plans / "active.md").unlink()
-        self.assertAllowed("mcp__other__read", {"q": "x"})
+        self.assertNoDecision("mcp__other__read", {"q": "x"})
 
     def test_log_rows_record_tool_and_each_target(self):
         self.assertAllowed(self.MOVE, {"source": self.a, "destination": self.b},
@@ -1181,8 +1189,64 @@ class McpPathTests(unittest.TestCase):
         self.assertEqual(row["class"], "mcp_target")
         self.assertNotIn("SECRET-BODY", json.dumps(row))
 
-    def test_bypass_honored(self):
-        self.assertAllowed(self.TOOL, {"path": self.c}, extra_env={"PLAN_GATE_BYPASS": "on"})
+    def test_bypass_defers_to_the_harness_prompt(self):
+        p = self.assertNoDecision(self.TOOL, {"path": self.c},
+                                  extra_env={"PLAN_GATE_BYPASS": "on"}, log_dir=self.logs)
+        self.assertEqual(self.rows()[-1]["class"], "emergency_bypass")
+
+    def test_gate_off_mcp_call_gets_no_decision_but_edit_still_allows(self):
+        self.assertNoDecision("mcp__other__read", {"q": "x"}, gate_on=False)
+        self.assertNoDecision(self.TOOL, {"path": self.c}, gate_on=False)
+        p = run_gate({"tool_name": "Edit", "tool_input": {"file_path": self.c}},
+                     self.plans, gate_on=False, cwd=self.work)
+        self.assertEqual(decision(p), "allow")
+
+    def test_crash_path_mcp_with_bypass_gets_no_decision(self):
+        p = self.call("mcp__other__read", {"q": "x"},
+                      extra_env={"PLAN_GATE_BYPASS": "on", "_PLAN_GATE_TEST_CRASH": "late"})
+        self.assertEqual((p.returncode, p.stdout.strip()), (0, ""))
+
+    def test_checked_and_passing_call_still_emits_allow(self):
+        p = self.assertAllowed(self.TOOL, {"path": self.a})
+        self.assertIn('"permissionDecision": "allow"', p.stdout)
+
+    def test_matcher_in_example_settings_selects_exactly_the_intended_tools(self):
+        cfg = json.loads((HERE.parent / "examples" / "settings.json").read_text(encoding="utf-8"))
+        matcher = cfg["hooks"]["PreToolUse"][0]["matcher"]
+        # The harness treats a matcher with non-alphanumerics as an UNANCHORED regex.
+        hit = lambda name: re.search(matcher, name) is not None
+        for name in ("Edit", "Write", "NotebookEdit", "Bash", "PowerShell",
+                     "mcp__fs__write_file", "mcp__x"):
+            self.assertTrue(hit(name), name)
+        for name in ("TodoWrite", "MultiEdit", "MultiEditX", "WriteX", "XEdit", "BashOutput",
+                     "Read", "Grep", "Task", "xmcp__fs__write"):
+            self.assertFalse(hit(name), name)
+
+    def test_worst_case_mcp_row_stays_under_budget_and_chain_verifies(self):
+        self.logs.mkdir()
+        nasty = [("\x01" * 2048)] * 20
+        self.assertDenied("mcp__fs__multi", {"paths": nasty}, log_dir=self.logs)
+        self.assertAllowed(self.TOOL, {"path": self.a}, log_dir=self.logs)
+        lines = (self.logs / "plan-gate-decisions.log").read_bytes().splitlines()
+        self.assertEqual(len(lines), 2)
+        for ln in lines:
+            self.assertLessEqual(len(ln), 32 * 1024)
+        first = json.loads(lines[0])
+        self.assertTrue(first["extra"].get("targets_truncated"))
+        self.assertEqual(first["extra"]["targets_n"], 20)
+        # the second row chained correctly onto the first
+        v = subprocess.run([sys.executable, str(GATE), "verify-log",
+                            str(self.logs / "plan-gate-decisions.log")],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+
+    def test_unconfigured_row_names_only_the_tool(self):
+        self.assertNoDecision("mcp__mail__send", {"to": "a@b.c", "title": "T", "body": "SECRET-BODY"},
+                              log_dir=self.logs)
+        (row,) = self.rows()
+        self.assertNotIn("extra", row)
+        self.assertNotIn("SECRET-BODY", json.dumps(row))
+        self.assertNotIn("a@b.c", json.dumps(row))
 
 
 class WriterScriptTests(unittest.TestCase):
@@ -1383,6 +1447,111 @@ class WriterScriptTests(unittest.TestCase):
         self.assertEqual(rows[-1]["class"], "writer_script")
         self.assertEqual(rows[-1]["decision"], "deny")
 
+    # --- env parsing (F, I) ---
+
+    def test_separator_typos_in_env_are_malformed(self):
+        self.plan(commands=("python3", "npm test"))
+        for bad in ("w.py:1 gen.py:2", "gen.py:2;w.py:1", "gen.py:2:w.py:1", "w.py:1:2",
+                    "w.py", "w.txt:1", "dir/w.py:1", "dir\\w.py:1", "w .py:1", ".py:1",
+                    "w.py:65", "w.py:1;", "w.py:+1"):
+            p = self.assertDenied("npm test", extra_env={"PLAN_GATE_WRITER_SCRIPTS": bad},
+                                  contains="PLAN_GATE_WRITER_SCRIPTS")
+        for ok in ("w.py:1", " w.py : 2 , Gen-Tool_2.py:64 ,"):
+            self.assertAllowed("npm test", extra_env={"PLAN_GATE_WRITER_SCRIPTS": ok})
+
+    def test_huge_argpos_fails_closed_not_crash_at_import(self):
+        self.plan(commands=("python3", "npm test"))
+        p = self.assertDenied("npm test", extra_env={
+            "PLAN_GATE_WRITER_SCRIPTS": "w.py:" + "1" * 5000}, contains="PLAN_GATE_WRITER_SCRIPTS")
+        self.assertNotIn("INTERNAL ERROR", p.stdout)
+        self.assertNotIn("Traceback", p.stderr)
+
+    # --- option values must not shift positionals (G) ---
+
+    def test_option_before_target_denies(self):
+        self.plan(commands=("python3",))
+        env = {"PLAN_GATE_WRITER_SCRIPTS": "gen.py:1"}
+        evil = (self.root / "evil.txt").as_posix()
+        for args in ("--encoding %s %s" % (self.out, evil), "-o %s %s" % (self.out, evil),
+                     "--verbose %s" % self.out):
+            self.assertDenied("python3 gen.py %s" % args, extra_env=env, contains="--flag=value")
+        # --flag=value and options after the target are fine
+        self.assertAllowed("python3 gen.py --encoding=utf8 %s" % self.out, extra_env=env)
+        self.assertAllowed("python3 gen.py %s --verbose" % self.out, extra_env=env)
+        self.assertAllowed("python3 gen.py -- %s" % self.out, extra_env=env)
+
+    def test_builtin_atomic_write_unchanged(self):
+        self.plan()
+        self.assertAllowed("python3 %s %s" % (self.WRITER, self.out))
+
+    # --- broader recognition (J) ---
+
+    def test_wrappers_with_flags_are_seen_through(self):
+        wr = self.WRITER
+        self.plan(commands=("env", "time", "sudo", "nice", "timeout", "nohup", "exec", "FOO=1"))
+        for pre in ("env -i python3", "env -- python3", "env FOO=x python3",
+                    "env -u FOO python3", "env -i FOO=x BAR=y python3", "time -p python3",
+                    "sudo -u bob python3", "nice -n 5 python3", "nice -5 python3",
+                    "timeout 5 python3", "timeout -k 2 5 python3", "nohup python3",
+                    "exec -a x python3", "FOO=1 env python3"):
+            self.assertDenied("%s %s %s" % (pre, wr, self.other))
+            self.assertAllowed("%s %s %s" % (pre, wr, self.out))
+
+    def test_more_interpreters_are_recognized(self):
+        wr = self.WRITER
+        self.plan(commands=("pythonw", "python3.13t", "pypy", "pypy3", "python3-dbg", "py",
+                            "C:/P/pythonw.exe", "python3.12.exe", "/opt/py/bin/python3.11"))
+        for prog in ("pythonw", "python3.13t", "pypy", "pypy3", "python3-dbg", "py.exe",
+                     "C:/P/pythonw.exe", "python3.12.exe", "/opt/py/bin/python3.11"):
+            self.assertDenied("%s %s %s" % (prog, wr, self.other))
+            self.assertAllowed("%s %s %s" % (prog, wr, self.out))
+
+    def test_direct_execution_of_a_writer(self):
+        self.plan(commands=("./externalized-memory/atomic-write.py", "env"))
+        self.assertDenied("./externalized-memory/atomic-write.py %s" % self.other)
+        self.assertAllowed("./externalized-memory/atomic-write.py %s" % self.out)
+        self.assertDenied("env -i ./externalized-memory/atomic-write.py %s" % self.other)
+        self.assertDenied("./externalized-memory/atomic-write.py")
+
+    def test_interpreter_options_with_values_and_combined_flags(self):
+        wr = self.WRITER
+        self.plan(commands=("python3", "py"))
+        for opts in ("--check-hash-based-pycs never", "-W ignore", "-Wignore", "-X dev",
+                     "-uX utf8", "-u -B -O", "-I -s -S -E", "-OO"):
+            self.assertDenied("python3 %s %s %s" % (opts, wr, self.other))
+            self.assertAllowed("python3 %s %s %s" % (opts, wr, self.out))
+        for opts in ("-3", "-3.11", "-V:3.11", "-V:ContinuumAnalytics/Anaconda3", "-3.11-64"):
+            self.assertDenied("py %s %s %s" % (opts, wr, self.other))
+            self.assertAllowed("py %s %s %s" % (opts, wr, self.out))
+        # -m / -c clusters are not script runs
+        for opts in ("-m pkg", "-um pkg", "-c code", "-uc code"):
+            self.assertAllowed("python3 %s %s %s" % (opts, wr, self.other))
+
+    # --- symlink + .. (H) ---
+
+    def _symlink_into_log_dir(self):
+        (self.logs / "sub").mkdir(parents=True)
+        link = self.work / "ldir"
+        try:
+            os.symlink(str(self.logs / "sub"), str(link), target_is_directory=True)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks unavailable")
+        return link
+
+    def test_dotdot_through_symlink_cannot_reach_log_dir_via_writer(self):
+        link = self._symlink_into_log_dir()
+        target = link.as_posix() + "/../x.txt"  # resolves to <logs>/x.txt
+        self.plan(paths=[self.out, target])
+        self.assertDenied("python3 %s %s" % (self.WRITER, target), log_dir=self.logs,
+                          contains="PLAN_GATE_LOG_DIR")
+
+    def test_dotdot_through_symlink_cannot_reach_log_dir_via_redirect(self):
+        link = self._symlink_into_log_dir()
+        target = link.as_posix() + "/../x.txt"
+        self.plan(commands=("echo",), paths=[self.out, target])
+        self.assertDenied("echo hi > %s" % target, log_dir=self.logs,
+                          contains="PLAN_GATE_LOG_DIR")
+
     # --- PowerShell ---
 
     def test_ps_allowed_and_denied_targets(self):
@@ -1413,6 +1582,128 @@ class WriterScriptTests(unittest.TestCase):
                           contains="PLAN_GATE_WRITER_SCRIPTS")
         self.assertAllowed("Get-ChildItem", tool="PowerShell",
                            extra_env={"PLAN_GATE_WRITER_SCRIPTS": "bad"})
+
+
+class PowerShellTests(unittest.TestCase):
+    """PowerShell read-only fast path and writer tokenizing."""
+
+    WRITER = "externalized-memory/atomic-write.py"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self.plans = self.root / "plans"
+        self.plans.mkdir()
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.out = (self.work / "STATE.md").as_posix()
+        self.other = (self.work / "OTHER.md").as_posix()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def plan(self, commands=("npm test",), paths=None):
+        paths = [self.out] if paths is None else paths
+        text = "---\nname: p\nstatus: active\nallowed_paths:\n"
+        text += "".join("  - %s\n" % p for p in paths)
+        text += "allowed_commands:\n" + "".join("  - %s\n" % c for c in commands)
+        text += "---\n\nbody\n"
+        (self.plans / "active.md").write_text(text, encoding="utf-8")
+
+    def ps(self, cmd, **kw):
+        kw.setdefault("cwd", self.work)
+        return run_gate({"tool_name": "PowerShell", "tool_input": {"command": cmd}},
+                        self.plans, **kw)
+
+    def test_read_only_fast_path_allows_a_single_simple_command(self):
+        self.plan()
+        for cmd in ("Get-ChildItem", "Get-ChildItem -Recurse C:/x", "Get-Content 'a b.txt'",
+                    "Test-Path $env:HOME", "Get-Location"):
+            self.assertEqual(decision(self.ps(cmd)), "allow", cmd)
+
+    def test_read_only_fast_path_refuses_anything_compound(self):
+        self.plan()
+        for cmd in ("Get-ChildItem; Remove-Item -Recurse C:\\x",
+                    "Get-ChildItem | Remove-Item", "Get-ChildItem && Remove-Item x",
+                    "Get-ChildItem & Remove-Item x", "Get-ChildItem\nRemove-Item x",
+                    "Get-ChildItem\r\nRemove-Item x", "Get-ChildItem $(Remove-Item x)",
+                    "Get-ChildItem (Remove-Item x)", "Get-ChildItem { Remove-Item x }",
+                    "Get-ChildItem `\nRemove-Item x", "Get-ChildItem > out.txt",
+                    "Get-Content a >> b.txt", "Get-ChildItemX", "Get-Content-Evil x"):
+            self.assertEqual(decision(self.ps(cmd)), "deny", cmd)
+
+    def test_each_segment_must_be_read_only_or_allowed(self):
+        self.plan(commands=("npm test", "Select-Object"))
+        deny = ("npm test; Remove-Item -Recurse C:/x", "npm test && evil", "npm test || evil",
+                "npm test | evil", "npm test & evil", "npm test\nevil", "evil; npm test",
+                "npm testing", "Get-ChildItem | Remove-Item")
+        for cmd in deny:
+            self.assertEqual(decision(self.ps(cmd)), "deny", cmd)
+        allow = ("npm test", "npm test; npm test", "npm test && npm test -- --x",
+                 "Get-ChildItem | Select-Object Name",       # read-only + allowed
+                 "Get-ChildItem; npm test", "npm test\nGet-Location",
+                 "Get-ChildItem | Select-Object Name; npm test")
+        for cmd in allow:
+            self.assertEqual(decision(self.ps(cmd)), "allow", cmd)
+
+    def test_two_allowed_segments_allow(self):
+        self.plan(commands=("npm test", "npm run build"))
+        self.assertEqual(decision(self.ps("npm test; npm run build")), "allow")
+        self.assertEqual(decision(self.ps("npm test && npm run build | evil")), "deny")
+
+    def test_unplaceable_constructs_deny_even_after_an_allowed_prefix(self):
+        self.plan(commands=("npm test", "Get-Content"))
+        for cmd in ("npm test $(evil)", "npm test @(evil)", 'npm test "$(evil)"',
+                    "npm test { evil }", "npm test (evil)", "npm test `; evil",
+                    "npm test > out.txt", "npm test >> out.txt", "npm test 2> err.txt",
+                    "npm test < in.txt", "npm test 'unterminated", "Get-Content (evil)",
+                    "Get-Content a > b", "npm test @{a=1}"):
+            p = self.ps(cmd)
+            self.assertEqual(decision(p), "deny", cmd)
+        p = self.ps("npm test $(evil)")
+        self.assertIn("Failing closed", p.stdout)
+
+    def test_quoted_separators_do_not_split(self):
+        self.plan(commands=("npm test",))
+        self.assertEqual(decision(self.ps("npm test 'a; evil' \"b | c\"")), "allow")
+
+    def test_unchecked_file_writing_cmdlets_deny(self):
+        self.plan(commands=("npm test", "Out-File", "Set-Content", "Copy-Item"))
+        for cmd in ("Out-File x.txt", "npm test | Out-File x.txt", "Set-Content x 1",
+                    "Add-Content x 1", "New-Item x", "Copy-Item a b", "Move-Item a b",
+                    "& Out-File x", "sc x 1", "cp a b"):
+            p = self.ps(cmd)
+            self.assertEqual(decision(p), "deny", cmd)
+        self.assertIn("cannot check", self.ps("Out-File x.txt").stdout)
+
+    def test_call_operator_segment_matches_an_ampersand_entry(self):
+        self.plan(commands=("& python3",))
+        self.assertEqual(decision(self.ps("& python3 tool.py")), "allow")
+        self.assertEqual(decision(self.ps("& python3 tool.py; & evil")), "deny")
+
+    def test_no_plan_read_only_chain_still_allowed(self):
+        self.assertEqual(decision(self.ps("Get-ChildItem; Get-Location | Get-Content x")), "allow")
+        self.assertEqual(decision(self.ps("Get-ChildItem; Remove-Item x")), "deny")
+
+    def test_doubled_quote_escapes_do_not_hide_a_writer(self):
+        self.plan(commands=("python3",))
+        # 'it''s' is one token; the writer target after it is still found.
+        self.assertEqual(decision(self.ps("python3 %s '%s'" % (self.WRITER, self.out))), "allow")
+        self.assertEqual(decision(self.ps("python3 %s '%s'" % (self.WRITER, self.other))), "deny")
+        # a doubled quote inside the target: target is the literal path with a quote
+        self.assertEqual(decision(self.ps("python3 %s 'a''b.md'" % self.WRITER)), "deny")
+        # "" inside "..." must not end the string early and expose a fake separator
+        self.assertEqual(
+            decision(self.ps('python3 %s "%s"; python3 %s "x"" ; ""y"' % (
+                self.WRITER, self.out, self.WRITER))), "deny")
+        # backtick inside double quotes in a command that mentions a writer: fail closed
+        self.assertEqual(decision(self.ps('python3 %s "a`"b"' % self.WRITER)), "deny")
+
+    def test_ps_wrapper_and_interpreter_forms(self):
+        self.plan(commands=("& python3", "python3", "py"))
+        self.assertEqual(decision(self.ps("& python3 %s %s" % (self.WRITER, self.out))), "allow")
+        self.assertEqual(decision(self.ps("& python3 %s %s" % (self.WRITER, self.other))), "deny")
+        self.assertEqual(decision(self.ps("py -3 %s %s" % (self.WRITER, self.other))), "deny")
 
 
 class SwitchValueTests(unittest.TestCase):
@@ -1460,6 +1751,11 @@ class SwitchValueTests(unittest.TestCase):
             p = run_gate(self.denied_payload, self.plans, cwd=self.work,
                          extra_env={"PLAN_GATE": v})
             self.assertEqual(decision(p), "allow", msg=f"PLAN_GATE={v!r}")
+
+    def test_bypass_reason_prints_the_actual_value(self):
+        p = run_gate(self.denied_payload, self.plans, cwd=self.work,
+                     extra_env={"PLAN_GATE_BYPASS": "Yes"})
+        self.assertIn("PLAN_GATE_BYPASS=Yes", p.stdout)
 
     def test_crash_path_honors_truthy_bypass(self):
         for v in ("yes", "1", "TRUE"):
@@ -1762,6 +2058,29 @@ class ScopeLeaseTests(unittest.TestCase):
         p = self.run_bash("python3 %s %s" % (self.WRITER, self.leased), "bob")
         self.assertEqual(decision(p), "deny", p.stdout)
         self.assertIn("alice", self.reason(p))
+
+    def test_powershell_writer_script_denied_when_held_by_other(self):
+        self.lease("alice", self.leased)
+        p = run_gate({"tool_name": "PowerShell", "tool_input": {
+            "command": "python3 %s '%s'" % (self.WRITER, self.leased)}},
+            self.plans, cwd=self.repo, extra_env=self.env("bob"))
+        self.assertEqual(decision(p), "deny", p.stdout)
+        self.assertIn("alice", self.reason(p))
+        p = run_gate({"tool_name": "PowerShell", "tool_input": {
+            "command": "python3 %s '%s'" % (self.WRITER, self.free)}},
+            self.plans, cwd=self.repo, extra_env=self.env("bob"))
+        self.assertEqual(decision(p), "allow", p.stdout)
+
+    def test_writer_through_wrappers_is_lease_checked(self):
+        self.lease("alice", self.leased)
+        self.write_plan(self.leased, self.free)
+        txt = (self.plans / "active.md").read_text()
+        (self.plans / "active.md").write_text(txt.replace(
+            "allowed_commands:\n", "allowed_commands:\n  - env\n  - timeout\n"))
+        for pre in ("env -i python3", "timeout 5 python3"):
+            p = self.run_bash("%s %s %s" % (pre, self.WRITER, self.leased), "bob")
+            self.assertEqual(decision(p), "deny", pre + p.stdout)
+            self.assertIn("alice", self.reason(p))
 
     def test_mcp_denied_when_held_by_other(self):
         self.lease("alice", self.leased)
@@ -2158,6 +2477,53 @@ class ApprovalTests(unittest.TestCase):
             p = self.bash(cmd)
             self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
             self.assertEqual(self.rows()[-1]["class"], "approve_self_protect", cmd)
+
+    def test_approve_denied_through_wrappers_and_interpreter_spellings(self):
+        gate = "/opt/strictlock/plan-gate/plan-gate.py"
+        for cmd in (
+            "env -i python3 %s approve p.md" % gate,
+            "env -- python3 %s approve p.md" % gate,
+            "env FOO=x python3 %s approve p.md" % gate,
+            "env -u FOO python3 %s approve p.md" % gate,
+            "time -p python3 %s approve p.md" % gate,
+            "sudo -u bob python3 %s approve p.md" % gate,
+            "nice -n 5 python3 %s approve p.md" % gate,
+            "timeout 5 python3 %s approve p.md" % gate,
+            "pythonw %s approve p.md" % gate,
+            "pypy3 %s approve p.md" % gate,
+            "python3.13t %s approve p.md" % gate,
+            "python3 --check-hash-based-pycs never %s approve p.md" % gate,
+            "python3 -uX utf8 %s approve p.md" % gate,
+            "env -S 'python3 %s approve p.md'" % gate,
+            "./plan-gate.py approve p.md",
+        ):
+            p = self.bash(cmd)
+            self.assertEqual(decision(p), "deny", cmd + " -> " + p.stdout)
+            self.assertEqual(self.rows()[-1]["class"], "approve_self_protect", cmd)
+
+    def test_powershell_segmented_approve_still_denied_before_fast_paths(self):
+        for cmd in ("Get-ChildItem | python plan-gate.py approve p.md",
+                    "Get-Location && py -3 plan-gate.py approve p.md",
+                    "Get-Content x; & python3 'C:/t/plan-gate.py' approve p.md"):
+            p = run_gate({"tool_name": "PowerShell", "tool_input": {"command": cmd}},
+                         self.plans, cwd=self.work, log_dir=self.logs,
+                         extra_env={"PLAN_GATE_REQUIRE_APPROVAL": ""})
+            self.assertEqual(decision(p), "deny", cmd)
+            self.assertEqual(self.rows()[-1]["class"], "approve_self_protect", cmd)
+
+    def test_mcp_without_a_check_stays_no_decision_with_approval_and_lease_on(self):
+        env = {"PLAN_GATE_REQUIRE_APPROVAL": "on", "PLAN_GATE_REQUIRE_LEASE": "on",
+               "PLAN_GATE_SCOPE_LEASE": str(SCOPE_LEASE)}
+        p = run_gate({"tool_name": "mcp__mail__send", "tool_input": {"to": "x"}},
+                     self.plans, cwd=self.work, log_dir=self.logs, extra_env=env)
+        self.assertEqual((p.returncode, p.stdout.strip()), (0, ""))
+        p = run_gate({"tool_name": "mcp__mail__send", "tool_input": {"to": "x"}},
+                     self.plans, cwd=self.work, log_dir=self.logs, gate_on=False, extra_env=env)
+        self.assertEqual((p.returncode, p.stdout.strip()), (0, ""))
+        p = run_gate({"tool_name": "mcp__mail__send", "tool_input": {"to": "x"}},
+                     self.plans, cwd=self.work, log_dir=self.logs,
+                     extra_env=dict(env, PLAN_GATE_BYPASS="on"))
+        self.assertEqual((p.returncode, p.stdout.strip()), (0, ""))
 
     def test_approve_denied_even_with_no_plan_and_approval_off(self):
         self.plan.unlink()

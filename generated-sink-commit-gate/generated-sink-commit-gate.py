@@ -308,19 +308,19 @@ def main() -> None:
     # of StrictLock: opt-in, no surprise behavior on import.
     if not _env_truthy(ENV_ENABLE):
         # Not enabled => allow (exit 0). No repo resolution needed.
-        print(f"generated-sink-commit-gate: {ENV_ENABLE} != 'on' — gate disabled.", file=sys.stderr)
+        print(f"generated-sink-commit-gate: {ENV_ENABLE} is not on/1/true/yes — gate disabled.", file=sys.stderr)
         sys.exit(EXIT_ALLOW)
 
     # Uniquely-named, single-use-by-convention, log-on-use bypass. Deliberately NOT a shared
     # bypass: disabling THIS gate must never collaterally disable a sibling gate.
     if _env_truthy(ENV_BYPASS):
         print(
-            f"generated-sink-commit-gate: {ENV_BYPASS}=1 — freshness gate DELIBERATELY "
+            f"generated-sink-commit-gate: {ENV_BYPASS}={os.environ.get(ENV_BYPASS, '').strip()} — freshness gate DELIBERATELY "
             f"bypassed for this commit (logged on use). Use only for a documented, "
             f"deliberately-shipped stale snapshot.",
             file=sys.stderr,
         )
-        _log(None, "bypass", f"{ENV_BYPASS}=1 explicit single-commit bypass")
+        _log(None, "bypass", f"{ENV_BYPASS}={os.environ.get(ENV_BYPASS, '').strip()} explicit single-commit bypass")
         sys.exit(EXIT_ALLOW)
 
     repo_root = resolve_repo_root()

@@ -267,7 +267,7 @@ def run_check(repo_root: Path) -> None:
 def main() -> None:
     # Master switch — inert unless explicitly enabled.
     if not _env_truthy(ENV_ENABLE):
-        print(f"generated-sink-prepush-gate: {ENV_ENABLE} != 'on' — gate disabled.", file=sys.stderr)
+        print(f"generated-sink-prepush-gate: {ENV_ENABLE} is not on/1/true/yes — gate disabled.", file=sys.stderr)
         sys.exit(EXIT_ALLOW)
 
     # Uniquely-named, single-push, log-on-use bypass. Distinct from the
@@ -275,12 +275,12 @@ def main() -> None:
     # must not collaterally disable the last line of defense.
     if _env_truthy(ENV_BYPASS):
         print(
-            f"generated-sink-prepush-gate: {ENV_BYPASS}=1 — backstop DELIBERATELY "
+            f"generated-sink-prepush-gate: {ENV_BYPASS}={os.environ.get(ENV_BYPASS, '').strip()} — backstop DELIBERATELY "
             f"bypassed for this push (logged on use). Use only for a documented, "
             f"deliberately-shipped stale snapshot.",
             file=sys.stderr,
         )
-        _log(None, "bypass", f"{ENV_BYPASS}=1 explicit single-push bypass")
+        _log(None, "bypass", f"{ENV_BYPASS}={os.environ.get(ENV_BYPASS, '').strip()} explicit single-push bypass")
         sys.exit(EXIT_ALLOW)
 
     repo_root = resolve_repo_root()

@@ -33,9 +33,10 @@ if [[ -z "$MSG_FILE" || ! -f "$MSG_FILE" ]]; then
   exit 1
 fi
 
-# Truthy (case-insensitive, whitespace-trimmed): on / 1 / true / yes. Lowercased with
-# tr (no ${var,,}: macOS ships bash 3.2). Anything else, including empty, is off.
-bypass_val="$(printf '%s' "${COMMIT_MSG_GATE_BYPASS:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+# Truthy (case-insensitive, leading/trailing whitespace trimmed): on / 1 / true / yes.
+# Lowercased with tr (no ${var,,}: macOS ships bash 3.2). Inner whitespace is kept, so
+# "o n" is NOT on. Anything else, including empty, is off.
+bypass_val="$(printf '%s' "${COMMIT_MSG_GATE_BYPASS:-}" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 if [[ "$bypass_val" == "on" || "$bypass_val" == "1" || "$bypass_val" == "true" || "$bypass_val" == "yes" ]]; then
   echo "commit-msg-gate: COMMIT_MSG_GATE_BYPASS=${COMMIT_MSG_GATE_BYPASS} — skipping gate." >&2
   exit 0
