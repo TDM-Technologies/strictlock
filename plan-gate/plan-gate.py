@@ -146,7 +146,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -3387,20 +3386,6 @@ _FC_RUNNER_RE = re.compile(
     r"(?<![\w./\\-])(?:g?cp|g?mv|g?install|g?tee|g?sed|g?dd)(?![\w-])")
 
 
-def _is_bsd_sed() -> bool:
-    """True only when `sed` on PATH is macOS's own BSD sed (darwin and /usr/bin/sed).
-    BSD `sed -i` takes the NEXT word as its backup suffix; GNU's does not. Anything
-    else (including a PATH that cannot be searched) is parsed GNU-style, which
-    reports a superset of the files and so only errs toward denying."""
-    if sys.platform != "darwin":
-        return False
-    try:
-        found = shutil.which("sed")
-        return bool(found) and os.path.realpath(found) in ("/usr/bin/sed", "/bin/sed")
-    except (OSError, ValueError):
-        return False
-
-
 def _fc_expands(s: str) -> bool:
     return any(ch in s for ch in _FC_EXPANSION)
 
@@ -3542,13 +3527,13 @@ def _fc_tee(args: list[str]):
     return out, None
 
 
-def _fc_sed(args: list[str], bsd: bool = False):
-    """Files `sed -i` edits. GNU syntax by default (`-i[SUFFIX]`, `--in-place[=SUFFIX]`;
-    the word after a bare `-i` is the script, so `sed -i '' s/a/b/ f` reports
-    `s/a/b/` too: a superset, which only errs toward denying). With bsd=True (macOS's
-    own sed) a bare `-i` consumes the next word as its suffix. Any long option that
-    is not an exact known name, and any unknown short option, is undetermined: it
-    might be an abbreviation of --in-place, --expression or --file."""
+def _fc_sed_parse(args: list[str], bsd: bool):
+    """One reading of a `sed` command line: None when it does not parse (an unknown
+    long option, which might be an abbreviation of --in-place / --expression /
+    --file, or an unknown short option), else (in_place, files). GNU: `-i[SUFFIX]`
+    (suffix attached only), `-l N`. BSD (macOS): `-i SUFFIX` and `-I SUFFIX` take the
+    next word when not attached, `-l` takes no value. `-I` is read as in-place in
+    both readings, and exact GNU long names are understood in both."""
     in_place = have_script = False
     positionals: list[str] = []
     i, after_dd = 0, False
@@ -3573,28 +3558,41 @@ def _fc_sed(args: list[str], bsd: bool = False):
                 if not eq:
                     i += 1
             elif name not in _FC_SED_LONG:
-                return [], f"unrecognized sed option {a[:40]!r}"
+                return None
             continue
         j = 1
         while j < len(a):
             ch = a[j]
-            if ch == "i":
+            if ch in "iI":
                 in_place = True
-                if bsd and a == "-i":
+                if (bsd or ch == "I") and j == len(a) - 1:
                     i += 1  # BSD: the next word is the suffix
                 break
-            if ch in "efl":
+            if ch in "efl" and not (ch == "l" and bsd):
                 if ch != "l":
                     have_script = True
                 if j == len(a) - 1:
                     i += 1
                 break
-            if ch not in _FC_SED_SHORT:
-                return [], f"unrecognized sed option -{ch}"
+            if ch not in _FC_SED_SHORT and ch != "l":
+                return None
             j += 1
-    if not in_place:
-        return [], None
-    files = positionals if have_script else positionals[1:]
+    return in_place, (positionals if have_script else positionals[1:])
+
+
+def _fc_sed(args: list[str]):
+    """Files `sed -i` / `-I` edits. Which sed runs (GNU or BSD) cannot be known from
+    the hook (its PATH can differ from the agent's shell), so the command line is read
+    BOTH ways and the destinations are the UNION: it can only over-include, which only
+    errs toward denying. If either reading does not parse, the destination is
+    undetermined."""
+    readings = [_fc_sed_parse(args, bsd) for bsd in (False, True)]
+    if any(r is None for r in readings):
+        return [], "an unrecognized sed option (a typo, a GNU abbreviation such as --expr=, or another version's)"
+    files: list[str] = []
+    for in_place, fs in readings:
+        if in_place:
+            files.extend(f for f in fs if f not in files)
     for f in files:
         if _fc_expands(f):
             return [], f"a variable, glob or brace in {f[:60]!r}"
@@ -3658,7 +3656,7 @@ def _collect_file_command_targets(raw_segs: list[str], shell: str, has_cd: bool)
         elif prog == "tee":
             dests, why = _fc_tee(args)
         elif prog == "sed":
-            dests, why = _fc_sed(args, bsd=(not gnu_alias and _is_bsd_sed()))
+            dests, why = _fc_sed(args)
         else:
             dests, why = _fc_dd(args)
         if why:

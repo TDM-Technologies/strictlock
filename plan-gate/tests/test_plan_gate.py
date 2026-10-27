@@ -3453,7 +3453,12 @@ class FileCommandLeaseTests(unittest.TestCase):
             "tee %s" % L,
             "tee -a %s %s" % (self.p(self.free), L),
             "echo hi | tee -- %s" % L,
-            "sed -i -e s/a/b/ %s" % L,      # same under GNU and BSD parsing
+            "sed -i s/a/b/ %s" % L,         # bare -i: GNU and BSD readings differ
+            "sed -i '' s/a/b/ %s" % L,      # macOS idiom
+            "sed -i -e s/a/b/ %s" % L,
+            "sed -I '' s/a/b/ %s" % L,      # BSD in-place with a suffix word
+            "sed -I.bak s/a/b/ %s" % L,
+            "sed -l -i '' s/a/b/ %s" % L,   # BSD -l has no value; GNU -l takes one
             "sed -i.bak s/a/b/ %s" % L,
             "sed --in-place=.bak -e s/a/b/ %s" % L,
             "sed -n -i -e p %s" % L,
@@ -3488,7 +3493,7 @@ class FileCommandLeaseTests(unittest.TestCase):
         self.lease("alice", self.leased)
         F, S = self.p(self.free), self.p(self.src)
         for cmd in ("cp %s %s" % (S, F), "mv %s %s" % (S, F), "tee %s" % F,
-                    "sed -i.bak s/a/b/ %s" % F, "install %s %s" % (S, F),
+                    "sed -i s/a/b/ %s" % F, "install %s %s" % (S, F),
                     "dd if=/dev/zero of=%s" % F):
             proc = self.run_bash(cmd)
             self.assertEqual(decision(proc), "allow", "%s -> %s" % (cmd, proc.stdout))
@@ -3532,7 +3537,8 @@ class FileCommandLeaseTests(unittest.TestCase):
     def test_require_lease_denies_an_unleased_destination(self):
         for cmd in ("cp %s %s" % (self.p(self.src), self.p(self.free)),
                     "tee %s" % self.p(self.free),
-                    "sed -i.bak s/a/b/ %s" % self.p(self.free),
+                    "sed -i s/a/b/ %s" % self.p(self.free),
+                    "sed -I '' s/a/b/ %s" % self.p(self.free),
                     "dd of=%s" % self.p(self.free)):
             proc = self.run_bash(cmd, PLAN_GATE_REQUIRE_LEASE="on")
             self.assertEqual(decision(proc), "deny", cmd)
@@ -3550,11 +3556,11 @@ class FileCommandLeaseTests(unittest.TestCase):
             "cp %s %s/{a,b}" % (self.p(self.src), self.p(self.repo)),
             "tee $F",
             "tee %s/*" % self.p(self.repo),
-            "sed -i.bak s/a/b/ %s/*.py" % self.p(self.repo),
-            "sed -i.bak --expr=s/a/b/ %s" % F,       # GNU abbreviation of --expression
-            "sed -i.bak --in-pl=.bak s/a/b/ %s" % F,
-            "sed -i.bak --frobnicate s/a/b/ %s" % F,
-            "sed -i.bak -Q s/a/b/ %s" % F,
+            "sed -i s/a/b/ %s/*.py" % self.p(self.repo),
+            "sed -i --expr=s/a/b/ %s" % F,           # GNU abbreviation of --expression
+            "sed -i --in-pl=.bak s/a/b/ %s" % F,
+            "sed -i --frobnicate s/a/b/ %s" % F,
+            "sed -i -Q s/a/b/ %s" % F,
             "gsed -i --fil=x.sed %s" % F,
             "cp --target=%s a b" % self.p(self.repo),   # GNU abbreviation of --target-directory
             "cp --frobnicate=x %s %s" % (self.p(self.src), F),
@@ -3588,7 +3594,7 @@ class FileCommandLeaseTests(unittest.TestCase):
         self.assertEqual(decision(proc), "deny")
         self.assertIn("PLAN_GATE_LOG_DIR", self.reason(proc))
         for cmd in ("tee %s/x" % self.p(self.logs), "dd of=%s/x" % self.p(self.logs),
-                    "sed -i.bak s/a/b/ %s/x" % self.p(self.logs)):
+                    "sed -i s/a/b/ %s/x" % self.p(self.logs)):
             proc = self.run_bash(cmd, leases=False, PLAN_GATE_LOG_DIR=str(self.logs),
                                  PLAN_GATE_REQUIRE_APPROVAL="off")
             self.assertEqual(decision(proc), "deny", cmd)
@@ -3603,7 +3609,7 @@ class FileCommandLeaseTests(unittest.TestCase):
         e = {"PLAN_GATE_SCOPE_LEASE": str(SCOPE_LEASE), "SCOPE_LEASE_OWNER": "bob",
              "SCOPE_LEASE_LOCK_ID": "", "PLAN_GATE_REQUIRE_LEASE": ""}
         proc = run_gate({"tool_name": "PowerShell",
-                         "tool_input": {"command": "sed -i.bak s/a/b/ '%s'" % self.leased}},
+                         "tool_input": {"command": "sed -i s/a/b/ '%s'" % self.leased}},
                         self.plans, cwd=self.repo, extra_env=e)
         self.assertEqual(decision(proc), "deny", proc.stdout)
         self.assertIn("alice", self.reason(proc))
@@ -3722,18 +3728,26 @@ class FileCommandParserTests(unittest.TestCase):
     def setUpClass(cls):
         cls.g = _load_gate_module()
 
-    def test_sed_bsd_and_gnu_forms_of_a_bare_dash_i(self):
-        args = ["-i", "", "s/a/b/", "/abs/f"]
-        # GNU: the '' is the script; the next word is then a file too (a superset)
-        self.assertEqual(self.g._fc_sed(args, bsd=False), (["s/a/b/", "/abs/f"], None))
-        # BSD (macOS's sed): '' is the backup suffix
-        self.assertEqual(self.g._fc_sed(args, bsd=True), (["/abs/f"], None))
-        self.assertEqual(self.g._fc_sed(["-i", ".bak", "s/a/b/", "/abs/f"], bsd=True),
-                         (["/abs/f"], None))
-        # attached suffix is the same in both
-        for bsd in (False, True):
-            self.assertEqual(self.g._fc_sed(["-i.bak", "s/a/b/", "/abs/f"], bsd=bsd),
-                             (["/abs/f"], None))
+    def test_sed_is_read_both_ways_and_the_union_is_reported(self):
+        f = "/abs/f"
+        # bare -i: GNU reads files [f]; BSD takes the next word as its suffix
+        for args in (["-i", "s/a/b/", f], ["-i", "", "s/a/b/", f], ["-i", ".bak", "s/a/b/", f],
+                     ["-i.bak", "s/a/b/", f], ["-I", "", "s/a/b/", f], ["-I.bak", "s/a/b/", f],
+                     ["-l", "-i", "", "s/a/b/", f],      # BSD -l has no value; GNU -l takes N
+                     ["-n", "-l", "5", "-i", "-e", "p", f], ["-ni", "p", f],
+                     ["--in-place=.bak", "-e", "s/a/b/", f], ["-E", "-i", "-e", "s/a/b/", f]):
+            targets, why = self.g._fc_sed(args)
+            self.assertIsNone(why, args)
+            self.assertIn(f, targets, args)
+
+    def test_sed_without_in_place_writes_nothing(self):
+        for args in (["s/a/b/", "/abs/f"], ["-n", "p", "/abs/f"], ["-l", "5", "-e", "p", "/abs/f"]):
+            self.assertEqual(self.g._fc_sed(args), ([], None), args)
+
+    def test_sed_union_over_includes_but_never_misses(self):
+        targets, why = self.g._fc_sed(["-i", "", "s/a/b/", "/abs/f"])
+        self.assertIsNone(why)
+        self.assertEqual(sorted(targets), ["/abs/f", "s/a/b/"])  # GNU reading adds the script word
 
     def test_sed_unknown_options_are_undetermined_even_without_dash_i(self):
         for args in (["-i", "--expr=s/a/b/", "/abs/f"], ["--in-pl", "s/a/b/", "/abs/f"],
