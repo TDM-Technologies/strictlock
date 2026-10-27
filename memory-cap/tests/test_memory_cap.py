@@ -30,6 +30,7 @@ def run_gate(payload: dict, gate_on: bool = True, **env_overrides):
     env["MEMORY_CAP_BYPASS"] = ""
     env["MEMORY_CAP_CHARS"] = ""
     for k in ("MEMORY_CAP_MAX_ENTRIES", "MEMORY_CAP_TOTAL_CHARS",
+              "MEMORY_CAP_MAX_LINES", "MEMORY_CAP_MAX_BYTES",
               "MEMORY_CAP_DECISION_LOG", "MEMORY_CAP_LOG_DIR"):
         env[k] = ""
     # Match any path ending in memory.md so tests can use a temp file.
@@ -280,8 +281,53 @@ class MemoryCapTests(unittest.TestCase):
 
     def test_total_caps_off_by_default(self):
         many = "".join(f"- e{i}\n" for i in range(500))
-        p = run_gate(self._write(self.index, many))
+        p = run_gate(self._write(self.index, many),
+                     MEMORY_CAP_MAX_LINES="off", MEMORY_CAP_MAX_BYTES="off")
         self.assertEqual(decision(p), "allow")
+
+    # --- whole-file caps matching the harness load limit (200 lines / 25KB) -----
+
+    def test_line_cap_default_denies_201_lines(self):
+        content = "# Index\n" + "".join(f"- e{i}\n" for i in range(200))
+        p = run_gate(self._write(self.index, content))
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("201 lines (cap 200", p.stdout)
+
+    def test_line_cap_default_allows_200_lines(self):
+        content = "# Index\n" + "".join(f"- e{i}\n" for i in range(199))
+        p = run_gate(self._write(self.index, content))
+        self.assertEqual(decision(p), "allow", msg=p.stdout)
+
+    def test_byte_cap_default_denies_over_25000_bytes(self):
+        content = "".join("- " + "y" * 190 + "\n" for _ in range(150))  # 28,950 bytes
+        p = run_gate(self._write(self.index, content))
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("bytes (cap 25000", p.stdout)
+
+    def test_whole_file_caps_already_over_not_wedged(self):
+        self.index.write_text("".join(f"- e{i}\n" for i in range(250)), encoding="utf-8")
+        level = run_gate(self._edit("- e0\n", "- renamed\n"))
+        self.assertEqual(decision(level), "allow", msg=level.stdout)
+        shrink = run_gate(self._edit("- e0\n", ""))
+        self.assertEqual(decision(shrink), "allow", msg=shrink.stdout)
+        grow = run_gate(self._edit("- e0\n", "- e0\n- more\n"))
+        self.assertEqual(decision(grow), "deny")
+
+    def test_whole_file_caps_off_and_custom(self):
+        content = "".join(f"- e{i}\n" for i in range(300))
+        off = run_gate(self._write(self.index, content), MEMORY_CAP_MAX_LINES="off")
+        self.assertEqual(decision(off), "allow", msg=off.stdout)
+        custom = run_gate(self._write(self.index, content), MEMORY_CAP_MAX_LINES="400")
+        self.assertEqual(decision(custom), "allow", msg=custom.stdout)
+        tight = run_gate(self._write(self.index, "- a\n- b\n- c\n"), MEMORY_CAP_MAX_BYTES="5")
+        self.assertEqual(decision(tight), "deny")
+
+    def test_whole_file_cap_invalid_value_keeps_default(self):
+        content = "".join(f"- e{i}\n" for i in range(201))
+        for bad in ("abc", "-4", "1e3"):
+            p = run_gate(self._write(self.index, content), MEMORY_CAP_MAX_LINES=bad)
+            self.assertEqual(decision(p), "deny")
+            self.assertIn("keeping the default 200", p.stderr)
 
     def test_max_entries_denies_new_write_over_cap(self):
         content = "".join(f"- e{i}\n" for i in range(6))

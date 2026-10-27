@@ -273,8 +273,9 @@ register credible.
 **Mechanism** ([`memory-cap`](memory-cap/)). A pre-action hook refuses any `Write`/`Edit`/`NotebookEdit` to the
 configured memory-*index* file (shell writes are not inspected; total caps are not evaluated for
 `NotebookEdit`) that would introduce an over-length index entry (default 200 chars per `- ` line)
-or, when the opt-in total caps are set (`MEMORY_CAP_MAX_ENTRIES`, `MEMORY_CAP_TOTAL_CHARS`), grow the
-index past an entry-count or total-size limit (never wedging an index that is already over: only a
+or grow the whole file past the harness's load limit (default 200 lines and 25,000 bytes, matching
+Claude Code's 200-line / 25KB auto-memory read limit) or, when the opt-in total caps are set
+(`MEMORY_CAP_MAX_ENTRIES`, `MEMORY_CAP_TOTAL_CHARS`), past an entry-count or total-size limit (never wedging an index that is already over: only a
 write that is over the cap *and* larger than before is refused),
 denying at the boundary before the bad write lands — the same fail-closed posture as the rest of the
 suite, applied to a different resource (bounded per-session context cost). Its bypass variable is
