@@ -3809,6 +3809,7 @@ class CaseProbeTests(unittest.TestCase):
         finally:
             self.g._FOLD_CACHE.clear()
 
+    @unittest.skipIf(os.name == "nt", "mount-boundary case logic is POSIX-only; Windows folds all")
     def test_a_new_name_directly_below_a_mount_point_does_not_fold(self):
         # "/" (dev 1) is case-insensitive, "/m" is a case-SENSITIVE volume mounted on it
         tree = {"/vol": (2, 2), "/vol/plans2": (3, 2)}
@@ -3820,6 +3821,7 @@ class CaseProbeTests(unittest.TestCase):
         e, f = self.keys_on(tree, {"/"}, "/VOL/plans2/x", "/vol/plans2/x")
         self.assertEqual(e, f)
 
+    @unittest.skipIf(os.name == "nt", "mount-boundary case logic is POSIX-only; Windows folds all")
     def test_below_a_probed_component_inside_the_mount_folding_follows_that_volume(self):
         # inside the sensitive volume: "Sub" exists and is not foldable -> stays exact
         tree = {"/vol": (2, 2), "/vol/Sub": (3, 2), "/vol/sub": (4, 2)}
@@ -3840,6 +3842,40 @@ class CaseProbeTests(unittest.TestCase):
             ka = self.g._real_key(os.path.join(real, "CaseProbe", "New.txt"))
             kb = self.g._real_key(os.path.join(real, "caseprobe", "new.txt"))
             self.assertEqual(ka == kb, expected)
+
+
+class DotDotAfterLinkTests(unittest.TestCase):
+    """`..` after a link is ambiguous between Win32 (lexical) and POSIX/MSYS (through
+    the link) resolution. _real_key treats it as never matching on Windows only."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.g = _load_gate_module()
+
+    def test_detects_dotdot_after_a_link_and_only_then(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            os.mkdir(os.path.join(d, "a"))
+            os.mkdir(os.path.join(d, "a", "sub"))
+            os.mkdir(os.path.join(d, "out"))
+            _symlink(os.path.join(d, "a", "lnk"), os.path.join(d, "out"))
+            j = lambda *p: os.sep.join((d,) + p)
+            self.assertTrue(self.g._dotdot_after_link(j("a", "lnk", "..", "f.txt")))
+            self.assertTrue(self.g._dotdot_after_link(j("a", "lnk", "sub", "..", "..", "f")))
+            self.assertFalse(self.g._dotdot_after_link(j("a", "sub", "..", "f.txt")))
+            self.assertFalse(self.g._dotdot_after_link(j("a", "lnk", "f.txt")))  # no ..
+            self.assertFalse(self.g._dotdot_after_link(j("a", "..", "a", "lnk")))  # .. BEFORE the link
+            self.assertFalse(self.g._dotdot_after_link(j("a", "missing", "..", "f")))
+
+    @unittest.skipUnless(os.name == "nt", "the ambiguous-.. rule applies on Windows only")
+    def test_real_key_refuses_such_a_path_on_windows(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            os.mkdir(os.path.join(d, "a"))
+            os.mkdir(os.path.join(d, "out"))
+            _symlink(os.path.join(d, "a", "lnk"), os.path.join(d, "out"))
+            self.assertIsNone(self.g._real_key(os.path.join(d, "a", "lnk", "..", "f.txt")))
+            self.assertIsNotNone(self.g._real_key(os.path.join(d, "a", "f.txt")))
 
 
 class FileCommandParserTests(unittest.TestCase):
@@ -4321,10 +4357,14 @@ class PathResolutionTests(unittest.TestCase):
         deep.mkdir(parents=True)
         _symlink(a / "lnk", deep)
         write_active_plan(self.plans, str(a / "f.txt"))
-        p = self.bash("npm test > %s/lnk/../f.txt" % a)
+        # (forward-slash paths: bash would read the backslashes of a Windows path as escapes)
+        p = self.bash("npm test > %s/lnk/../f.txt" % a.as_posix())
         self.assertEqual(decision(p), "deny")
-        p = self.bash("npm test > %s/f.txt" % a)
-        self.assertEqual(decision(p), "allow")
+        # the reason is the plan match, not some earlier failure
+        self.assertIn("NOT in allowed_paths", json.loads(p.stdout)["hookSpecificOutput"]
+                      ["permissionDecisionReason"])
+        p = self.bash("npm test > %s/f.txt" % a.as_posix())
+        self.assertEqual(decision(p), "allow", p.stdout)
 
     def test_symlinked_directory_in_front_of_target_is_resolved_both_sides(self):
         real = self.work / "real"
@@ -4410,12 +4450,15 @@ class PathResolutionTests(unittest.TestCase):
 
     def test_bash_redirect_through_symlink_in_always_writable_dir_is_denied(self):
         aw, out, env = self.aw_setup()
-        p = self.bash("echo hi > %s/lnk/z.txt" % aw, extra_env=env)
-        self.assertEqual(decision(p), "deny")
-        p = self.bash("echo hi > %s/lnk/../z.txt" % aw, extra_env=env)
-        self.assertEqual(decision(p), "deny")
-        p = self.bash("echo hi > %s/z.txt" % aw, extra_env=env)
-        self.assertEqual(decision(p), AW_OK)
+        # (forward-slash paths: bash would read the backslashes of a Windows path as escapes)
+        for tail in ("lnk/z.txt", "lnk/../z.txt"):
+            p = self.bash("echo hi > %s/%s" % (aw.as_posix(), tail), extra_env=env)
+            self.assertEqual(decision(p), "deny", tail)
+            # denied by the plan check (not always-writable), not by an earlier failure
+            self.assertIn("NOT in allowed_paths", json.loads(p.stdout)["hookSpecificOutput"]
+                          ["permissionDecisionReason"], tail)
+        p = self.bash("echo hi > %s/z.txt" % aw.as_posix(), extra_env=env)
+        self.assertEqual(decision(p), AW_OK, p.stdout)
 
     def test_symlink_inside_always_writable_dir_pointing_inside_it_is_fine(self):
         aw, out, env = self.aw_setup()

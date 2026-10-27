@@ -1202,6 +1202,48 @@ def _name_folds_uncached(parent: str, name: str):
     return True
 
 
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_link_or_reparse(path: str) -> bool:
+    """A symlink, or on Windows any reparse point (junction, mount point, ...)."""
+    try:
+        if os.path.islink(path):
+            return True
+        junction = getattr(os.path, "isjunction", None)  # Python 3.12+ on Windows
+        if junction is not None and junction(path):
+            return True
+        attrs = getattr(os.lstat(path), "st_file_attributes", 0)
+        return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
+    except (OSError, ValueError):
+        return False
+
+
+def _dotdot_after_link(s: str) -> bool:
+    """True when the absolute path `s` has a `..` component that comes AFTER an existing
+    prefix that is a symlink / junction / reparse point. POSIX resolves such a `..`
+    from the link's target; Windows (Win32 path normalization, which the file APIs and
+    os.path.realpath go through) collapses `..` lexically BEFORE following links, and
+    which one a given tool (Edit/Write, or a bash redirect under Git Bash / MSYS) applies
+    is not something this gate can confirm. See _real_key."""
+    drive, rest = os.path.splitdrive(s)
+    parts = re.split(r"[\\/]+", rest) if os.name == "nt" else rest.split("/")
+    prefix = drive + os.sep
+    seen_link = False
+    for comp in parts:
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            if seen_link:
+                return True
+            prefix = os.path.dirname(prefix.rstrip("/\\")) or (drive + os.sep)
+            continue
+        prefix = os.path.join(prefix, comp)
+        if _is_link_or_reparse(prefix):
+            seen_link = True
+    return False
+
+
 def _real_key(p: str):
     """Comparison key for an allow-type match, or None when the path cannot be
     resolved (never matches). An absolute path is resolved with realpath on the RAW
@@ -1214,6 +1256,13 @@ def _real_key(p: str):
     s = str(p)
     if not os.path.isabs(s):
         return norm(os.path.normpath(s))
+    if os.name == "nt" and _dotdot_after_link(s):
+        # Windows: ambiguous `..` after a link. Win32 normalizes `a\lnk\..\f` to
+        # `a\f` before touching the file system, but a bash redirect (Git Bash / MSYS)
+        # may resolve it through the link as POSIX does, and the gate cannot tell which
+        # tool will open the path. Fail closed: the path never matches an allow-type
+        # grant (allowed_paths, always-writable), so the call is denied.
+        return None
     try:
         real = os.path.realpath(s)
     except (OSError, ValueError):
