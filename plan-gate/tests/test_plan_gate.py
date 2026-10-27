@@ -3635,8 +3635,8 @@ class CaseProbeTests(unittest.TestCase):
         cls.g = _load_gate_module()
 
     class _Stat(object):
-        def __init__(self, ino):
-            self.st_dev, self.st_ino = 1, ino
+        def __init__(self, ino, dev=1):
+            self.st_dev, self.st_ino = dev, ino
 
     def fake_fs(self, entries, insensitive):
         """entries: {dirpath: {name: ino}}. insensitive: lookups fold case."""
@@ -3708,6 +3708,59 @@ class CaseProbeTests(unittest.TestCase):
     def test_names_without_letters_and_errors_are_inconclusive(self):
         self.assertIsNone(self.folds({"/m": {"123": 1}}, True, "/m", "123"))
         self.assertIsNone(self.folds({"/m": {}}, True, "/m", "gone"))
+
+    def keys_on(self, tree, insens_dirs, *paths):
+        """_real_key for `paths` on a simulated tree {path: (ino, dev)}; directories in
+        insens_dirs fold case on lookup."""
+        from unittest import mock
+        _Stat = self._Stat
+
+        def lookup(path):
+            if path in tree:
+                return tree[path]
+            d = os.path.dirname(path)
+            if d in insens_dirs:
+                for k, v in tree.items():
+                    if os.path.dirname(k) == d and os.path.basename(k).lower() == os.path.basename(path).lower():
+                        return v
+            return None
+
+        def lstat(path):
+            if path == "/":
+                return _Stat(1, 1)
+            v = lookup(path)
+            if v is None:
+                raise FileNotFoundError(path)
+            return _Stat(*v)
+
+        self.g._FOLD_CACHE.clear()
+        try:
+            with mock.patch.object(self.g.os, "lstat", lstat), \
+                    mock.patch.object(self.g.os.path, "realpath", lambda p: p):
+                return [self.g._real_key(p) for p in paths]
+        finally:
+            self.g._FOLD_CACHE.clear()
+
+    def test_a_new_name_directly_below_a_mount_point_does_not_fold(self):
+        # "/" (dev 1) is case-insensitive, "/m" is a case-SENSITIVE volume mounted on it
+        tree = {"/vol": (2, 2), "/vol/plans2": (3, 2)}
+        a, b, c, d = self.keys_on(tree, {"/"}, "/vol/NEW.txt", "/vol/new.txt",
+                                  "/vol/PLANS2/new.txt", "/vol/plans2/new.txt")
+        self.assertNotEqual(a, b)   # was equal: the parent's answer leaked across the mount
+        self.assertNotEqual(c, d)
+        # the mount point's own name is spelled in the insensitive parent, so it folds
+        e, f = self.keys_on(tree, {"/"}, "/VOL/plans2/x", "/vol/plans2/x")
+        self.assertEqual(e, f)
+
+    def test_below_a_probed_component_inside_the_mount_folding_follows_that_volume(self):
+        # inside the sensitive volume: "Sub" exists and is not foldable -> stays exact
+        tree = {"/vol": (2, 2), "/vol/Sub": (3, 2), "/vol/sub": (4, 2)}
+        a, b = self.keys_on(tree, {"/"}, "/vol/Sub/New", "/vol/sub/New")
+        self.assertNotEqual(a, b)
+        # same device, insensitive all the way down: a new name still folds
+        tree2 = {"/vol": (2, 1), "/vol/Sub": (3, 1)}
+        a, b = self.keys_on(tree2, {"/", "/vol"}, "/vol/SUB/New.txt", "/vol/sub/new.txt")
+        self.assertEqual(a, b)
 
     def test_real_filesystem_matches_an_independent_probe(self):
         with tempfile.TemporaryDirectory() as d:

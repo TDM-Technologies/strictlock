@@ -1219,20 +1219,32 @@ def _real_key(p: str):
     if os.name == "nt":
         return real.replace("\\", "/").lower().rstrip("/")
     cur, fold, out = "/", False, []
+    try:
+        cur_dev = os.lstat("/").st_dev
+    except OSError:
+        cur_dev = None
     for comp in real.split("/"):
         if not comp:
             continue
         child = os.path.join(cur, comp)
         try:
-            exists = os.path.lexists(child)
+            st = os.lstat(child)
         except (OSError, ValueError):
-            return None
-        if exists:
+            st = None
+        if st is not None:
             f = _name_folds(cur, comp)
             if f is not None:
                 fold = f
-        cur = child
         out.append(comp.lower() if fold else comp)
+        if st is not None:
+            if st.st_dev != cur_dev:
+                # A mount boundary: what lies INSIDE is a different file system whose
+                # case rules this probe has not seen, so do not fold below it until a
+                # component in there has been probed (a new name directly below the
+                # mount point therefore stays case-exact).
+                fold = False
+            cur_dev = st.st_dev
+        cur = child
     return ("/" + "/".join(out)).rstrip("/")
 
 
