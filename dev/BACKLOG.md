@@ -296,12 +296,13 @@ left a stray uncommitted `git merge` in main — zero loss, aborted.)
 Built-but-narrower or deliberately not built in PR 2; each keeps its interim wording where a claim depends on it.
 - **plan-gate PowerShell segment + redirect handling** — *built in round 2 (PR #22)*: segment-by-segment
   checking, parentheses/script blocks/backticks/redirections denied, file-writing cmdlets denied even if listed.
-- **plan-gate Edit/Write always-writable check** — re-check whether a symlink inside an always-writable dir
-  can escape it (paths are normalized; a `..` escape did not reproduce on 2026-10-16). Unverified; investigate before acting.
+- **plan-gate Edit/Write always-writable check** — *reproduced 2026-10-27 and fixed* (batch 2026-10-27, lane A):
+  a symlink inside an always-writable dir did escape it; paths are now compared resolved.
 - **plan-gate bypass-hunt, wider families** — a hand probe on 2026-10-16 (~70 payloads: chain/pipe/newline/
   background/substitution/heredoc/redirect, `eval`, `bash -c`, env prefixes, `xargs`, `git -c`, `find -exec`,
   `rg --pre`) found no smuggle; a dedicated adversarial pass (unicode, very long input, `git` config-driven
-  execution such as `--ext-diff`/textconv) is still worth running.
+  execution such as `--ext-diff`/textconv) is still worth running. *Not run* in batch 2026-10-27 (the agent was
+  stopped by a safety check before any payload); those families remain UNTESTED.
 - **scope-lease denied-acquire logging** — a decision, not built; denied acquires still write no row.
 - **sink-resolver no-conflict `resolve` and dry-run rows** — not built; they still write no row.
 - **memory-cap total caps for `NotebookEdit`** — not evaluated (a notebook edit carries one cell, not the file).
@@ -324,14 +325,14 @@ Promote `no-tautological-assertions` + `no-unasserted-result` to `error` in `rec
 ## Open after round 2 (2026-10-17)
 Follow-ups from the claims-true round 2 build and its adversarial verification. The spec is
 [`CLAIMS-TRUE-ROUND-2-SPEC.md`](CLAIMS-TRUE-ROUND-2-SPEC.md).
-- **`allow()` skips the harness prompt** — plan-gate emits `permissionDecision: "allow"`, which skips Claude
-  Code's own permission prompt for Edit/Bash when the gate is off, on bypass, or for read-only commands.
-  Pre-existing. Consider emitting no decision there, as was done for unlisted MCP tools.
-- **Lexical `allowed_paths` matching** — a symlink plus `..` can escape for Edit, and `norm()` lowercases on
-  Linux, where paths are case-sensitive.
-- **`worktree_bypass:` accepts only `true`** — other truthy spellings are ignored.
-- **`cp` / `mv` / `tee` / `sed -i` are not lease-checked** — files written by commands admitted through
-  `allowed_commands` are not looked up, even with `PLAN_GATE_REQUIRE_LEASE=on`.
+- *Fixed in batch 2026-10-27 (lane A) — see [Done](#done):* `allow()` skipping the harness prompt; lexical
+  `allowed_paths` matching; `worktree_bypass:` spellings; `cp`/`mv`/`tee`/`sed -i` not lease-checked.
+- **Other file writers still not lease-checked** — `touch`, `rm`, `truncate`, `ln`, `rsync`, `patch`, `chmod`,
+  git writers, a sed script's `w` command / `s///w`, `perl -i`, `python -c`, build tools.
+- **Path aliases not normalized** — Unicode normalization (HFS+/APFS), Windows 8.3 short names, hardlinks; a
+  one-cased-letter component never case-folds (fails closed: a different-case spelling is denied).
+- **Relative `sed -i` names without a payload `cwd`** — with no payload `cwd` and no `CLAUDE_PROJECT_DIR`, a file
+  that exists only in the agent shell's directory is invisible to the existence check.
 - **Lease lookup cost** — about 65 ms added per write tool call when `PLAN_GATE_SCOPE_LEASE` is set.
 - **Rotating the decision log voids approvals** — approval rows live in the log; rotation, truncation or
   archiving means every plan must be approved again.
@@ -339,6 +340,15 @@ Follow-ups from the claims-true round 2 build and its adversarial verification. 
   Windows when the interpreter path is quoted; not yet exercised on a real Windows console.
 
 ## Done
+- **2026-10-27** — **plan-gate hardening** (batch 2026-10-27, lane A; four Opus review rounds): `allowed_paths`,
+  always-writable and the REQUIRE_LEASE exemption compare resolved paths (an always-writable symlink escape was
+  reproduced and fixed); case folds only on case-insensitive file systems, per path component, never across a
+  mount boundary. `worktree_bypass` honors only literal `true`; literal `false` = off; other values are refused,
+  only for plans that count for the session (Tim 2026-10-27). An explicit `allow` only when the active plan
+  approved the call; gate off, bypass, read-only, `cd`, ungoverned tools and always-writable writes defer to the
+  harness (logged `defer`). `cp`/`mv`/`install`/`tee`/`sed -i`/`dd of=` (and `g`-prefixed names) destinations get
+  the lease lookup; sed is read both GNU- and BSD-style; unknown/abbreviated long options and undeterminable
+  destinations deny under REQUIRE_LEASE. Tests 274 → 346.
 - **2026-10-27** — **`spill-gate` shipped** (batch 2026-10-27, lane B): fail-closed pre-commit / pre-push gate
   plus `scan-tree`, for private keys, tokens, stray UUIDs and machine paths; allowlist read from git (index at
   commit, each pushed commit's own copy at push — Tim 2026-10-27); two Opus review rounds closed 5 spill-through

@@ -40,7 +40,17 @@ Read the full argument in [`paper.md`](paper.md).
   per script is checked.
 - **Plan approval and leases:** see [Known limits](#known-limits-today) below.
 - Emits `{"hookSpecificOutput": {"permissionDecision": "allow"|"deny", ...}}` on **stdout**.
-- Appends every decision, allow and deny, to a hash-chained decision log (when
+  An `allow` is emitted only when the active plan approved the call (`allowed_paths` /
+  `allowed_commands`), because it skips Claude Code's own permission prompt. When the gate is
+  off, on `PLAN_GATE_BYPASS`, for tools it does not govern, for read-only commands, a bare `cd`
+  and writes into an always-writable directory, it emits **no decision** (exit 0, empty stdout)
+  and Claude Code's normal permission flow decides. A `deny` is always explicit. Details:
+  [`CONFIG.md`](CONFIG.md#which-calls-get-an-explicit-allow).
+- Compares **resolved paths** when granting a write (symlinks followed, `link/..` applied as the
+  OS does; case folded only on case-insensitive file systems), so a symlink cannot carry a
+  write out of an `allowed_paths` entry or an always-writable directory.
+  See [`CONFIG.md`](CONFIG.md#path-resolution-notes).
+- Appends every decision (`allow`, `deny`, and `defer` for the no-decision cases above) to a hash-chained decision log (when
   `PLAN_GATE_LOG_DIR` is set) — your audit trail. `plan-gate.py verify-log` proves the
   chain, and the gate never authorizes a gated write to the log itself.
 
@@ -210,12 +220,15 @@ is [`CONFIG.md`](CONFIG.md).
 - **Leases.** With `PLAN_GATE_SCOPE_LEASE` set to the path of
   [`scope-lease.py`](../scope-lease/scope-lease.py), a gated agent's write to a file another
   agent holds a lease on is denied, on the write surfaces plan-gate parses (Edit/Write/
-  NotebookEdit, Bash redirects, writer scripts, MCP path arguments), checking both the spelled
-  path and the real path. Agents are told apart by `SCOPE_LEASE_OWNER`, else by the session's
-  git branch, so agents sharing a branch count as one. With `PLAN_GATE_REQUIRE_LEASE=on`, every
-  such write must hold a lease. Not covered: `cp`/`mv`/`tee`/`sed -i` or build tools admitted
-  through `allowed_commands`, hardlinks, nested repos or submodules, and code the agent
-  controls. A human's own edits are never blocked.
+  NotebookEdit, Bash redirects, writer scripts, MCP path arguments, and the destinations of
+  `cp`/`mv`/`install`/`tee`/`sed -i`/`dd of=`), checking both the spelled path and the real path.
+  Agents are told apart by `SCOPE_LEASE_OWNER`, else by the session's git branch, so agents
+  sharing a branch count as one. With `PLAN_GATE_REQUIRE_LEASE=on`, every such write must hold a
+  lease, and one of those six commands whose destination cannot be determined (a variable, glob,
+  or brace) is denied. Not covered: other writers admitted through `allowed_commands` (`touch`,
+  `rm`, `truncate`, `ln`, `rsync`, `patch`, git writers, a `w` command inside a sed script,
+  `perl -i`, build tools), hardlinks, nested repos or submodules, and code the agent controls.
+  A human's own edits are never blocked.
 - **A hook that does not start does not gate** (see the install section above).
 
 ## Targets & portability

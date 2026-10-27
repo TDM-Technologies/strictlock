@@ -66,7 +66,8 @@ is the worked example, not the only supported target.
 
 **Mechanism** ([`plan-gate`](plan-gate/)). Before an agent edits a file or runs a
 command, a pre-action hook reads the single active plan and decides allow/deny. An
-`Edit`/`Write` target must *exactly* match an `allowed_paths` entry — a directory entry
+`Edit`/`Write` target must *exactly* match an `allowed_paths` entry (compared on resolved
+paths — symlinks followed; case-sensitive except on a case-insensitive file system) — a directory entry
 authorizes **nothing** inside it; each file is enumerated. A `Bash`/`PowerShell` command
 must *start with* an `allowed_commands` prefix (or be a known read-only command). A `Bash`
 command is split into segments (`&&`, `||`, `;`, `|`, a lone `&`, newlines, and the bodies of
@@ -101,9 +102,10 @@ of silent wildcard access is itself observable.
 ### B. Append-only decision log → SOC 2 CC7 (system monitoring / security logging)
 
 **Mechanism** ([`plan-gate`](plan-gate/)). When a decision-log directory is configured
-(`PLAN_GATE_LOG_DIR`), the gate appends every decision it makes on a gated surface — allow
-and deny alike — with timestamp, target, command, decision class, and the governing plan
-(`PLAN_GATE_LOG_DECISIONS=deny` opts down to denials plus emergency-bypass rows). Each row
+(`PLAN_GATE_LOG_DIR`), the gate appends every decision it makes on a gated surface — allow, deny, and `defer` (a call it
+leaves to the harness's own permission flow) — with timestamp, target, command, decision class, and the governing plan
+(`PLAN_GATE_LOG_DECISIONS=deny` opts down to denials plus emergency-bypass rows; `allow` is written only when the active plan
+approved the call). Each row
 is hash-chained to the previous one and a bundled verifier (`plan-gate.py verify-log`)
 re-proves the chain; the gate refuses to authorize gated file-writes into its own log
 directory, no matter what a plan enumerates. The log is written by the gate as it decides, and it is

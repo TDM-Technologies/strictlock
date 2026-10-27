@@ -8,7 +8,7 @@ everything.
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `PLAN_GATE` | yes | Set to `on` / `1` / `true` / `yes` (case-insensitive, whitespace-trimmed) to enable the gate. Anything else makes the hook inert (allow-all). |
+| `PLAN_GATE` | yes | Set to `on` / `1` / `true` / `yes` (case-insensitive, whitespace-trimmed) to enable the gate. Anything else makes the hook inert: it emits no decision for any tool, so the harness's own permission flow applies (see [Which calls get an explicit allow](#which-calls-get-an-explicit-allow)). |
 | `PLAN_GATE_PLANS_DIR` | yes | Directory holding plan files. Exactly one plan may be `status: active` at a time (scoped per git worktree). |
 | `PLAN_GATE_ALWAYS_WRITABLE` | no | `os.pathsep`-separated list of directories that are *always* writable regardless of plan state. Intended for the plans dir itself and any agent-memory dir that never ships. Same blast radius as plan files — keep it tight. Putting the plans dir here lets a gated agent write a plan with `status: active` and have it take effect at once; leave it out if a human should write the plans. |
 | `PLAN_GATE_LOG_DIR` | no (recommended) | Directory for the append-only, hash-chained decision log (`plan-gate-decisions.log`). This log is your audit trail and it is opt-in: if unset, no log is written. Setting it also turns on plan approval (see `PLAN_GATE_REQUIRE_APPROVAL`). |
@@ -42,7 +42,8 @@ everything.
   JSON on stdout), so the harness keeps its own permission prompt. That covers MCP tools not
   listed here (a row with class `mcp_unconfigured` is written when logging is on, subject to
   `PLAN_GATE_LOG_DECISIONS`), and any MCP call while the gate is off or `PLAN_GATE_BYPASS` is
-  set. An `allow` decision would skip that prompt.
+  set. An `allow` decision would skip that prompt. The same rule now covers every tool: see
+  [Which calls get an explicit allow](#which-calls-get-an-explicit-allow).
 - The hook only sees MCP calls if the harness matcher routes them to it. The example
   `settings.json` matcher is `^(Edit|Write|NotebookEdit|Bash|PowerShell)$|^mcp__`: the anchors
   matter, because a matcher with punctuation is an unanchored regular expression (a bare
@@ -133,6 +134,63 @@ a redirection (`>`, `>>`, `2>`, `<`), or an unterminated quote. It also refuses 
 Edit/Write, which is gated by `allowed_paths`. Earlier versions matched the whole command against
 `allowed_commands` by prefix, so an allowed prefix followed by `; other-command` was admitted;
 that no longer works.
+
+## File-writing commands: cp, mv, install, tee, sed -i, dd
+
+A command admitted through `allowed_commands` writes wherever its arguments say. For six common
+programs the gate reads the destination(s) off the command line (behind the same `VAR=val` /
+`env` / `sudo` / `time` ... wrappers as writer scripts, in Bash segments, `$(...)` bodies and
+PowerShell segments) and applies the **scope-lease** lookup and the **log-directory
+self-protection** to them, exactly as for a `>` redirect:
+
+| Program | Destinations checked |
+|---|---|
+| `cp`, `install` | the last argument; or `DIR/<basename of each source>` when it is an existing directory, ends in `/`, there are several sources, or `-t DIR` / `--target-directory` is used; `install -d` : every argument |
+| `mv` | the same destinations, **and each source** (a move removes it) |
+| `tee` | every file argument (`/dev/null` and friends are ignored; no file argument writes only stdout) |
+| `sed` | the file arguments that exist and are not directories, only when `-i` / `-i SUFFIX` / `-I SUFFIX` / `--in-place[=SUFFIX]` is present; without it `sed` writes to stdout and is not a write. Also the backup copy `<file><suffix>` for a non-empty suffix (it does not exist yet, so it is not filtered) |
+| `dd` | every `of=` operand |
+
+With `PLAN_GATE_REQUIRE_LEASE=on`, a destination that **cannot be determined statically**
+denies the call (class `scope_lease`, "cannot be determined"): a variable, glob or brace in a
+path, a relative path after a `cd` in the same command, **any long option that is not an exact
+known option name** (so GNU abbreviations such as `--target=`, `--expr=`, `--in-pl` are refused,
+as are typos and options from other versions; the full names `--target-directory`,
+`--in-place`, `--expression`, ... are understood), an unknown short `sed` option, a source named
+`.` or `..`, or a shell/`xargs`/`find`-style runner line that mentions one of the six programs
+(`bash -c 'cp a b'`). The GNU/coreutils `g` names (`gcp`, `gmv`, `ginstall`, `gsed`, `gtee`,
+`gdd`) are the same programs. `install` also reads BSD `-B suffix` and `-f flags` as value
+options. `sed` is read **both ways**, GNU and BSD (macOS), and the destinations are the union,
+because the hook's PATH can differ from the agent's shell and so cannot say which `sed` runs:
+GNU `-i[SUFFIX]` / `--in-place`, `-l N`; BSD `-i SUFFIX` and `-I SUFFIX` (the next word is the
+suffix) and a value-less `-l`. `sed -I '' ...` and `sed -l -i '' ...` are in-place edits. A
+reading can report words that are not files (`sed -i '' s/a/b/ f` reads the script `s/a/b/`
+as a file under GNU rules), so a reported name is kept only if `sed -i` could write it: it
+**exists** and is **not a directory**. `sed -i` cannot create a file or edit a directory, so
+nonexistent names and directories are dropped. A **symlink is always kept**, whatever it
+points at (GNU `sed -i` replaces a symlink with a regular file). A relative name is tried under
+every directory the agent might be in: the `cwd` the harness reports in the hook payload,
+`$CLAUDE_PROJECT_DIR`, and the hook's own working directory. It is dropped only if it is absent
+(or a directory) under all of them, and where it exists it is reported as that absolute path.
+After a `cd` in the same command a relative name cannot be resolved and is kept
+(so the destination stays undetermined, as before). A name containing a variable, glob or
+brace is undetermined and is checked before this filter, so a script word such as `s/x*/y/`
+in the `-i ''` idiom also makes the destination undetermined. The backup copy `<file><suffix>`
+(`-i.bak`, `--in-place=.bak`, BSD `-i .bak` / `-I .bak`; with a bare GNU `-i -e ...` the BSD
+reading's suffix is `-e`) is reported to the lease lookup as well; under
+`PLAN_GATE_REQUIRE_LEASE` it needs its own lease. An empty suffix writes no backup, and a
+suffix with `*` is undetermined. If either reading does not parse (an unknown long option, an unknown short option) the
+destination is undetermined. With leases merely configured (not required), an undetermined
+destination is not checked, as before; a determined one is looked up and a path held by
+another agent denies.
+
+These destinations are **not** matched against `allowed_paths`: `allowed_commands` still decides
+whether the command may run at all, as before. Not covered (still unchecked by the lease lookup):
+`touch`, `rm`, `truncate`, `ln`, `rsync`, `patch`, `chmod`, `git mv` / `git checkout` and other
+git writers, a `w` command or `s///w` flag inside a sed script, `perl -i`, `python -c`, build
+tools, and anything launched through a launcher the gate does not read (`uv run`, a script file).
+A destination under `PLAN_GATE_LOG_DIR` is denied (class `log_self_protect`) even when no lease
+is configured.
 
 ## Plan approval
 
@@ -248,15 +306,19 @@ all the lookups of a call**, not per repo:
   (decision class `scope_lease`). Each target is looked up both as the lexical absolute path
   and, when it differs, its realpath, and either being held denies (this covers `lnk/../x.py`
   through a symlinked directory, and a symlink in one repo pointing at a leased file in
-  another). Not covered: hardlinks, and a file inside a nested repo or submodule that was
-  leased through the outer repo;
+  another). The write surfaces include the destinations of `cp` / `mv` / `install` / `tee` /
+  `sed -i` / `dd of=` (see [File-writing commands](#file-writing-commands-cp-mv-install-tee-sed--i-dd)).
+  Not covered: hardlinks, a file inside a nested repo or submodule that was leased through the
+  outer repo, and the commands listed as uncovered in that section;
 - a lookup that errors, times out, exhausts the budget, returns something unreadable (empty
   output, a wrong row count, an unknown status, exit 5 with no held row), or whose script is
   missing or relative is **denied** (fail closed) with the bypass how-to;
 - free, expired and mine fall through to the normal plan decision;
 - `PLAN_GATE_REQUIRE_LEASE=on` additionally denies a path with no live lease (or an expired
   one): "acquire it first". Targets under `PLAN_GATE_ALWAYS_WRITABLE` (plans, memory) are
-  exempt from that rule only, so drafting plans keeps working.
+  exempt from that rule only, so drafting plans keeps working (judged on the resolved path, so a
+  symlink inside such a directory does not carry the exemption out of it). A `cp` / `mv` / `tee` /
+  `sed -i` / `dd of=` whose destination cannot be determined is denied under this setting.
 
 **The agent cannot choose its identity (and plan-gate refuses the direct routes).** Because
 the command line is agent-controlled, a gated Bash/PowerShell command is **denied** (class
@@ -355,6 +417,77 @@ Set the variables in the `env` block and register the hook in `hooks.PreToolUse`
   active plan" text. This catches the "wrote to the wrong tree" failure. Opt out for
   deliberately cross-tree work with `worktree_bypass: true` in the plan (see
   [SCHEMA.md](SCHEMA.md)).
+- **`worktree_bypass` takes exactly two spellings.** The unquoted, lowercase YAML booleans
+  `true` (bypass on) and `false` (off, the same as omitting the field). Any other value (`yes`,
+  `True`, `1`, `on`, a quoted `"true"` or `"false"`, or an empty value) is **refused**: while a
+  plan with such a value is `status: active` **and counts for this session** (approved, when
+  approval is on, and claiming this worktree through an absolute `allowed_paths` entry), the gate
+  denies every call that reaches the plan check (class `worktree_bypass_invalid`), with a
+  message naming the field and the accepted values. Another worktree's plan, or an unapproved
+  one, never blocks this session. It does not guess what was meant, and it does not treat the
+  plan as "no bypass" either, because that would silently change which sessions the plan
+  collides with. Fix it by writing `worktree_bypass: true`, or `false`, or deleting the line
+  (with approval on, the edit voids the approval; a human approves again). The plans directory
+  stays writable **if it is listed in `PLAN_GATE_ALWAYS_WRITABLE`** (as the example settings
+  do); otherwise the plan has to be fixed outside the gated session. Earlier versions also
+  honored `True` / `TRUE` / a quoted `"true"`.
+- **Allow-type path matching compares resolved paths.** What *grants* a write (an
+  `allowed_paths` entry, an always-writable directory, the `PLAN_GATE_REQUIRE_LEASE` exemption
+  for always-writable directories) is judged on the **real** path: symlinks are followed in both
+  the target and the entry, a not-yet-existing target is resolved through its deepest existing
+  parent, and `..` is applied the way the OS applies it (after a symlink, from the link's
+  target). So `<allowed-dir>/link/../x` no longer matches an entry for `<allowed-dir>/x`, and a
+  symlink inside an always-writable directory that points out of it no longer carries a write
+  out. A symlink *alias* of an allowed file matches the entry (it is the same file). If an entry
+  is itself a symlink, the plan authorizes writes to what it points at. A path that cannot be
+  resolved never matches.
+- **Case.** On Windows, and for each path component whose directory a probe shows to be
+  case-insensitive (macOS's default APFS volume, case-insensitive Linux mounts), names compare
+  case-insensitively. Everywhere else comparison is **case-sensitive**: on a case-sensitive file
+  system `/Plans/x` is a different file from `/plans/x` and does not match an entry for it. The
+  probe looks up the case-swapped spelling of each existing component, and a third case variant,
+  with `lstat` (no directory listing), and folds only if all resolve to the very same inode (so
+  a case-swapped symlink, or hardlinked twins, never make a case-sensitive volume look
+  insensitive; a name with a single cased letter never folds). A component that does not exist yet inherits its parent's answer; an
+  inconclusive probe means no folding, which only ever denies. Deny-type checks (log-directory
+  protection, plan-to-plan path collisions, lease ref-store paths) still fold case always,
+  because over-matching there only denies. Not handled: Unicode normalization differences
+  (macOS HFS+/APFS normalization-insensitivity), 8.3 short names, and hardlinks. Known
+  limits of the case probe, all in the denying direction or needing write access to the
+  directory already: a path component with a single cased letter never folds (it has no third
+  spelling to probe); below a mount point (a component on a different device than its parent)
+  folding is off until a component inside the new volume has been probed, so a new name
+  directly under a mount point is case-exact; and the hardlink-twin check can be beaten only by
+  someone who can already create entries in that directory.
+
+## Which calls get an explicit allow
+
+An explicit `permissionDecision: "allow"` makes Claude Code skip its own permission prompt for
+that call. plan-gate emits one **only when the active plan was checked and approved the call**
+(decision classes `allowed_paths` and `allowed_command`): an Edit/Write/NotebookEdit target or
+MCP target that matches `allowed_paths`, or a Bash/PowerShell command whose segments are read-only
+or admitted by `allowed_commands`, with any redirection/writer/MCP targets in `allowed_paths`.
+
+Every other case where the gate does not deny emits **no decision** (exit 0, empty stdout), so the
+harness's own permission rules and prompts decide:
+
+| Case | Decision-log class |
+|---|---|
+| gate off (`PLAN_GATE` not on), for any tool | (no row) |
+| `PLAN_GATE_BYPASS` on, including the gate-fault path | `emergency_bypass` |
+| a tool outside the gated set (`Read`, `Grep`, an unconfigured MCP tool, ...) | `mcp_unconfigured` for MCP tools, else no row |
+| a read-only Bash/PowerShell command (or a compound of only read-only segments) | `read_only_bypass` |
+| a bare `cd` | `navigation` |
+| a write into an always-writable directory (Edit/Write, redirect-only command, MCP targets all always-writable) | `always_writable` |
+
+The log row for those cases reads `decision: defer` (new in this version; earlier rows read
+`allow`): it records that the gate did not object and left the decision to the harness, not that
+it approved. Rows for plan-approved calls read `allow`, denials `deny`. `verify-log` and plan
+approval only look at the hash chain and `approve` rows, so they are unaffected;
+`PLAN_GATE_LOG_DECISIONS=deny` skips `defer` rows along with `allow` rows (bypass rows are still
+kept). A deny is unchanged. Consequence for operators: writes to the plans
+and memory directories, and read-only commands, now go through Claude Code's normal permission
+prompt unless your own `permissions.allow` rules cover them.
 
 ## Bash commands: segments and redirections
 
@@ -385,7 +518,7 @@ make the gate deny.)
 ## Decision log
 
 When `PLAN_GATE_LOG_DIR` is set, every decision on a gated surface appends a JSON line to
-`plan-gate-decisions.log`: a UTC timestamp, the decision (`allow`/`deny`), the surface
+`plan-gate-decisions.log`: a UTC timestamp, the decision (`allow` / `deny` / `defer`; `defer` = the gate did not object and emitted no decision), the surface
 (`file`/`bash`/`ps`/`mcp`/`gate`), the tool, the command/target, a decision class (e.g.
 `allowed_paths`, `allowed_command`, `read_only_bypass`, `navigation`, `emergency_bypass`,
 `log_self_protect`, `silent_drift`, `unparseable_command`, `gate_error`, `scope_lease`,

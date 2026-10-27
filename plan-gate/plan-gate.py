@@ -9,7 +9,8 @@ published as the reference implementation for the `plan-gate` paper (see
 
 WHAT IT DOES
   Reads tool-use JSON from stdin, consults the single active "plan" file in a
-  configured plans directory, and emits an allow/deny decision on stdout. An
+  configured plans directory, and emits an allow/deny decision on stdout (or no
+  decision at all when the plan did not approve the call and it is not denied). An
   agent may only modify the exact files and run commands matching the command
   prefixes an approved plan enumerates. Anything else is denied BEFORE it runs.
   The gate fails closed on policy AND on its own faults: when in doubt, deny.
@@ -17,6 +18,10 @@ WHAT IT DOES
 HOOK CONTRACT (typical agentic-harness PreToolUse convention)
   - Exit 0 with JSON {"hookSpecificOutput": {"permissionDecision": "allow|deny", ...}}
                         every decision, INCLUDING the gate's own faults.
+  - Exit 0 with NO stdout => no opinion: the harness runs its own permission flow.
+                        "allow" is emitted only when the active plan approved the
+                        call; gate off, bypass, ungoverned tools, read-only commands,
+                        a bare cd and always-writable writes emit no decision.
   - Exit 1 + stderr  => non-blocking warning: the harness lets the action
                         proceed. Deliberately UNUSED — a gate that exits 1 on its
                         own crash fails open.
@@ -109,7 +114,8 @@ RULES
     the active-plan check (so a session with no active plan can still inspect
     state with `git log`, `pwd`, `Get-ChildItem`, etc.). Plan-scoped checks run
     AFTER the active-plan check.
-  - Every decision on a gated surface (allow AND deny) appends a hash-chained
+  - Every decision on a gated surface (allow, deny AND defer = no decision
+    emitted, the harness decides) appends a hash-chained
     JSONL row to the decision log; `plan-gate.py verify-log [path]` checks the
     chain. Best-effort; a logging failure NEVER changes a decision. The gate
     never authorizes a gated file-write into PLAN_GATE_LOG_DIR itself (log
@@ -356,8 +362,11 @@ def deny(reason: str) -> None:
 def no_decision() -> None:
     """Exit 0 with NO stdout JSON: the hook has no opinion, so the harness runs
     its normal permission flow (an "allow" decision would SKIP the user's
-    permission prompt). Used for MCP tools plan-gate does not affirmatively
-    check: unconfigured ones, and any MCP call while the gate is off or bypassed."""
+    permission prompt). Used wherever the gate did not affirmatively check the call
+    against a plan: gate off, emergency bypass, a tool outside the gated set
+    (including unconfigured MCP tools), read-only commands, bare `cd`, and writes
+    into an always-writable directory. An explicit "allow" is emitted only when the
+    active plan's allowed_paths / allowed_commands approved the call."""
     sys.exit(0)
 
 
@@ -376,10 +385,20 @@ def _peek_tool_name() -> str:
 
 
 def _allow_or_defer(reason: str, tool: str) -> None:
-    """allow(), except an MCP tool gets no decision (see no_decision)."""
-    if tool.startswith("mcp__"):
-        no_decision()
-    allow(reason)
+    """The gate is inert (off) or bypassed: it has no opinion, so it emits NO
+    decision for any tool and the harness runs its normal permission flow. (It used
+    to emit "allow" for non-MCP tools, which skipped the user's own permission
+    prompt for a call the gate never checked.) `reason` and `tool` are kept for the
+    call sites' readability only."""
+    no_decision()
+
+
+# gated_allow classes where the gate did NOT approve the call against a plan: a
+# read-only command, a bare `cd`, a write into an always-writable directory. The
+# gate lets these through (it does not deny) but defers to the harness's permission
+# flow instead of emitting "allow". Every other allow class (allowed_paths,
+# allowed_command) means the active plan was checked and approved the call.
+_DEFER_CLASSES = frozenset({"read_only_bypass", "navigation", "always_writable"})
 
 
 def _canonical_row_hash(prev: str, row_without_h: dict) -> str:
@@ -550,7 +569,7 @@ def _log_decision(
     if DECISIONS_LOG is None:
         return
     if (
-        decision == "allow"
+        decision in ("allow", "defer")
         and LOG_DECISIONS_MODE == "deny"
         and class_ != "emergency_bypass"
     ):
@@ -1122,7 +1141,183 @@ def _gate_record_cli(kind: str, argv: list[str]) -> int:
 
 
 def norm(p: str) -> str:
+    """Lexical, case-folded, slash-normalized form. Used where over-matching is the
+    SAFE direction (deny-type checks: log self-protection, plan collision, lease
+    ref-store paths). Allow-type matching uses _real_key instead."""
     return p.replace("\\", "/").lower().rstrip("/")
+
+
+# --- allow-type path matching: real paths, case-folded only where the FS folds ---
+# Every check that GRANTS a write (allowed_paths equality, always-writable dirs, the
+# lease-requirement exemption) compares RESOLVED paths:
+#   * symlinks are followed in both the target and the allowed entry, so
+#     `<allowed-dir>/link/../x` (which the OS opens beside the link's target, not
+#     inside the allowed dir) and a symlink inside an always-writable dir that points
+#     out of it cannot ride a lexical prefix. A target that does not exist yet is
+#     resolved through its deepest existing ancestor (os.path.realpath is non-strict).
+#   * case is folded ONLY on a file system that is case-insensitive (probed per path
+#     component by inode identity, below).
+#     Folding on a case-sensitive FS would let `/Plans/x` pass for `/plans/x`; not
+#     folding on a case-insensitive one only denies a legitimate spelling. So an
+#     inconclusive probe means "do not fold": the fail-closed direction for a grant.
+# Deny-type checks keep norm() (always lowercased): over-matching there only denies.
+def _name_folds(parent: str, name: str):
+    """Does directory `parent` match the existing entry `name` case-insensitively?
+    True / False, or None when this name cannot tell (no cased letters, or an error).
+    The case-swapped spelling must resolve (by lstat, so a symlink named like that is
+    its OWN inode, not the file it points at) to the very same inode, and so must a
+    THIRD case variant of the name: on a case-sensitive FS two hardlinked entries
+    `a.txt` / `A.TXT` would match each other but `A.txt` would not exist. (No listing
+    of the directory: it can be huge.) A name with no third variant (one cased
+    letter) or anything unexpected -> False: never fold on doubt."""
+    key = (parent, name)
+    if key in _FOLD_CACHE:
+        return _FOLD_CACHE[key]
+    _FOLD_CACHE[key] = res = _name_folds_uncached(parent, name)
+    return res
+
+
+_FOLD_CACHE: dict = {}
+
+
+def _name_folds_uncached(parent: str, name: str):
+    swapped = name.swapcase()
+    if swapped == name:
+        return None
+    try:
+        a = os.lstat(os.path.join(parent, name))
+    except OSError:
+        return None
+    thirds = sorted({name.lower(), name.upper(), name.capitalize(), name.title()}
+                    - {name, swapped})
+    if not thirds:
+        return False
+    for variant in [swapped, thirds[0]]:
+        try:
+            b = os.lstat(os.path.join(parent, variant))
+        except OSError:
+            return False
+        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+            return False
+    return True
+
+
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_link_or_reparse(path: str) -> bool:
+    """A symlink, or on Windows any reparse point (junction, mount point, ...)."""
+    try:
+        if os.path.islink(path):
+            return True
+        junction = getattr(os.path, "isjunction", None)  # Python 3.12+ on Windows
+        if junction is not None and junction(path):
+            return True
+        attrs = getattr(os.lstat(path), "st_file_attributes", 0)
+        return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
+    except (OSError, ValueError):
+        return False
+
+
+def _dotdot_after_link(s: str) -> bool:
+    """True when the absolute path `s` has a `..` component that comes AFTER an existing
+    prefix that is a symlink / junction / reparse point. POSIX resolves such a `..`
+    from the link's target; Windows (Win32 path normalization, which the file APIs and
+    os.path.realpath go through) collapses `..` lexically BEFORE following links, and
+    which one a given tool (Edit/Write, or a bash redirect under Git Bash / MSYS) applies
+    is not something this gate can confirm. See _real_key."""
+    drive, rest = os.path.splitdrive(s)
+    parts = re.split(r"[\\/]+", rest) if os.name == "nt" else rest.split("/")
+    prefix = drive + os.sep
+    seen_link = False
+    for comp in parts:
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            if seen_link:
+                return True
+            prefix = os.path.dirname(prefix.rstrip("/\\")) or (drive + os.sep)
+            continue
+        prefix = os.path.join(prefix, comp)
+        if _is_link_or_reparse(prefix):
+            seen_link = True
+    return False
+
+
+def _real_key(p: str):
+    """Comparison key for an allow-type match, or None when the path cannot be
+    resolved (never matches). An absolute path is resolved with realpath on the RAW
+    string (not pre-collapsed: `link/..` must step up from the link's target, as the
+    OS does). Case is folded per path COMPONENT, and only where that component's
+    directory is shown (_name_folds) to be case-insensitive; a component that does not
+    exist yet inherits its parent's answer. On Windows everything folds. A relative
+    path has no resolvable location and keeps the old lexical form (it can only equal
+    another relative path, never an absolute one)."""
+    s = str(p)
+    if not os.path.isabs(s):
+        return norm(os.path.normpath(s))
+    if os.name == "nt" and _dotdot_after_link(s):
+        # Windows: ambiguous `..` after a link. Win32 normalizes `a\lnk\..\f` to
+        # `a\f` before touching the file system, but a bash redirect (Git Bash / MSYS)
+        # may resolve it through the link as POSIX does, and the gate cannot tell which
+        # tool will open the path. Fail closed: the path never matches an allow-type
+        # grant (allowed_paths, always-writable), so the call is denied.
+        return None
+    try:
+        real = os.path.realpath(s)
+    except (OSError, ValueError):
+        return None
+    if os.name == "nt":
+        return real.replace("\\", "/").lower().rstrip("/")
+    cur, fold, out = "/", False, []
+    try:
+        cur_dev = os.lstat("/").st_dev
+    except OSError:
+        cur_dev = None
+    for comp in real.split("/"):
+        if not comp:
+            continue
+        child = os.path.join(cur, comp)
+        try:
+            st = os.lstat(child)
+        except (OSError, ValueError):
+            st = None
+        if st is not None:
+            f = _name_folds(cur, comp)
+            if f is not None:
+                fold = f
+        out.append(comp.lower() if fold else comp)
+        if st is not None:
+            if st.st_dev != cur_dev:
+                # A mount boundary: what lies INSIDE is a different file system whose
+                # case rules this probe has not seen, so do not fold below it until a
+                # component in there has been probed (a new name directly below the
+                # mount point therefore stays case-exact).
+                fold = False
+            cur_dev = st.st_dev
+        cur = child
+    return ("/" + "/".join(out)).rstrip("/")
+
+
+def _path_matches_allowed(target: str, resolved_paths) -> bool:
+    """True when `target` is, after resolving symlinks on both sides, one of the
+    plan's (already anchored) allowed_paths entries."""
+    tk = _real_key(target)
+    if tk is None:
+        return False
+    return any(_real_key(rp) == tk for rp in resolved_paths)
+
+
+def _under_dirs_real(target: str, dirs) -> bool:
+    """True when `target`, resolved, sits under (or equals) any of `dirs`, resolved."""
+    tk = _real_key(target)
+    if tk is None:
+        return False
+    for d in dirs:
+        dk = _real_key(str(d))
+        if dk is not None and (tk == dk or tk.startswith(dk + "/")):
+            return True
+    return False
 
 
 _WORD_END = " \t\n;&|<>()"
@@ -1915,7 +2110,7 @@ def parse_frontmatter(text: str) -> dict:
     if not m:
         return {}
     body = m.group(1)
-    result: dict = {}
+    result = _Frontmatter()
     current_key: str | None = None
     for raw in body.splitlines():
         line = raw.rstrip()
@@ -1928,6 +2123,7 @@ def parse_frontmatter(text: str) -> dict:
         if ":" in line and not line.startswith((" ", "\t")):
             key, _, value = line.partition(":")
             key = key.strip()
+            value_raw = value
             value = _strip_scalar(value)
             if value == "" or value == "[]":
                 # Empty scalar OR inline empty array -> a REAL empty list.
@@ -1939,7 +2135,85 @@ def parse_frontmatter(text: str) -> dict:
             else:
                 result[key] = value
                 current_key = None
+                if key == "worktree_bypass":
+                    # _strip_scalar drops the quotes; remember whether there were
+                    # any, because only the unquoted YAML boolean `true` is honored.
+                    # Kept as an attribute, NOT a key: a plan line cannot set it.
+                    result.bypass_quoted = value_raw.strip()[:1] in ("'", '"')
     return result
+
+
+class _Frontmatter(dict):
+    """The parsed frontmatter (keys come from the plan file) plus parser-side facts
+    that the plan text must not be able to set."""
+    bypass_quoted = False
+
+
+def _bypass_state(fm: dict):
+    """worktree_bypass of one parsed plan: None (field absent), True (honored), or
+    False (present but not the literal `true`: REFUSED, see invalid_bypass_plans).
+    Only the unquoted, lowercase YAML boolean `true` is honored; `True`, `yes`, `1`,
+    `on`, a quoted "true", `false`, and an empty value are all refused rather than
+    guessed at.
+    An unquoted, lowercase `false` is accepted and means "off", the same as the field
+    being absent (maintainer ruling 2026-10-27)."""
+    if "worktree_bypass" not in fm:
+        return None
+    if fm["worktree_bypass"] == "false" and not getattr(fm, "bypass_quoted", False):
+        return None
+    if fm["worktree_bypass"] == "true" and not getattr(fm, "bypass_quoted", False):
+        return True
+    return False
+
+
+def _bypass_shown(fm: dict) -> str:
+    v = fm.get("worktree_bypass")
+    if getattr(fm, "bypass_quoted", False):
+        return '"%s"' % _safe_str(str(v), 40)
+    return _safe_str(str(v) if isinstance(v, str) and v else "(empty)", 40)
+
+
+def _claims_by_absolute(fm: dict, worktree_root: Path) -> bool:
+    """True when one of the plan's ABSOLUTE allowed_paths resolves under the worktree."""
+    wt_norm = norm(str(worktree_root)) + "/"
+    for ap in fm.get("allowed_paths") or []:
+        if not Path(str(ap)).is_absolute():
+            continue
+        resolved = resolve_allowed_path(str(ap), repo_root=None, worktree_root=worktree_root)
+        if norm(resolved).startswith(wt_norm):
+            return True
+    return False
+
+
+def invalid_bypass_plans(worktree_root: Path | None = None) -> list[tuple[str, str]]:
+    """[(plan file name, shown value)] for the `status: active` plans whose
+    worktree_bypass is present but not the literal `true` AND that would count for
+    THIS session: approved (when approval is on) and, inside a worktree, claiming it
+    through an absolute allowed_paths entry. A plan that is unapproved, or that
+    belongs to another worktree, cannot affect this session, so it never blocks it.
+    Such a plan is not honored as a bypass and the gate denies while it is active: a
+    mis-spelled opt-out must be fixed, not silently turned into a different scope."""
+    if PLANS_DIR is None or not PLANS_DIR.is_dir():
+        return []
+    approval_required, _cfg_err = _approval_mode()
+    bad: list[tuple[str, str]] = []
+    for md in sorted(PLANS_DIR.glob("*.md")):
+        try:
+            raw = md.read_bytes()
+        except OSError:
+            continue
+        text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+        fm = parse_frontmatter(text)
+        if str(fm.get("status", "")).strip().lower() != "active":
+            continue
+        if _bypass_state(fm) is not False:
+            continue
+        if worktree_root is not None and not _claims_by_absolute(fm, worktree_root):
+            continue
+        if approval_required and _approved_set().get(md.name) != hashlib.sha256(raw).hexdigest():
+            continue
+        bad.append((md.name, _bypass_shown(fm)))
+    return bad
 
 
 def find_active_plans(
@@ -2001,7 +2275,7 @@ def find_active_plans(
         claimed = False
         if worktree_root is None:
             claimed = True
-        elif str(fm.get("worktree_bypass", "")).strip().lower() == "true":
+        elif _bypass_state(fm) is True:
             claimed = True
         else:
             for ap in fm.get("allowed_paths") or []:
@@ -2212,9 +2486,13 @@ def _classify_redirect(target: str, has_cd: bool, what: str = "redirection targe
             f"plan-gate: {what} {t} is under PLAN_GATE_LOG_DIR; the "
             f"gate never authorizes gated writes to its own decision log."
         )
-    if _under_any(norm(t), ALWAYS_WRITABLE_DIRS):
-        return "always", t
-    return "plan", t
+    # The grant checks resolve symlinks from the UN-collapsed path (t_raw): a `..`
+    # after a symlink must step up from the link's target, not from the link.
+    # The returned value is the un-collapsed path for the same reason (the
+    # allowed_paths match and the lease lookup resolve it themselves).
+    if _under_dirs_real(t_raw, ALWAYS_WRITABLE_DIRS):
+        return "always", t_raw
+    return "plan", t_raw
 
 
 # --- writer scripts (a script whose job is to write a file) -----------------------
@@ -2959,15 +3237,9 @@ def _lease_check(targets: list[str]):
     if require:
         # The exemption for plans / memory directories is judged on the REAL file:
         # compare against the directories as given and as resolved.
-        always_dirs = list(ALWAYS_WRITABLE_DIRS)
-        for d in ALWAYS_WRITABLE_DIRS:
-            try:
-                always_dirs.append(Path(os.path.realpath(str(d))))
-            except (OSError, ValueError):
-                pass
         for r in results:
             if (r["_real"] and r.get("status") == "free"
-                    and not _under_any(norm(r["_target"]), always_dirs)):
+                    and not _under_dirs_real(r["_target"], ALWAYS_WRITABLE_DIRS)):
                 why = "its lease has expired" if r.get("expired") else "no lease is held on it"
                 return (
                     f"plan-gate: {r['_target']}: {why} (PLAN_GATE_REQUIRE_LEASE is on). "
@@ -3136,6 +3408,409 @@ def _collect_writer_targets(raw_segs: list[str], shell: str, has_cd: bool):
     return plan_targets, None, all_targets
 
 
+# --- file-writing commands: cp, mv, install, tee, sed -i, dd of= ---------------------
+# A command admitted through allowed_commands (`cp`, `sed`, ...) writes wherever its
+# arguments say, and used to bypass the scope-lease lookup that Edit/Write, redirects
+# and writer scripts get. The destination(s) of these six programs are extracted from
+# the command line and fed to the same lease lookup (and the log-directory
+# self-protection). A destination that cannot be determined statically (a variable,
+# glob or brace, a relative path after a `cd`, an option the parser does not know)
+# is "undetermined": with PLAN_GATE_REQUIRE_LEASE on that DENIES (fail closed); with
+# leases merely configured it is not checked. Only the lease/log checks apply here:
+# allowed_commands still decides whether the command may run at all, and these
+# destinations are NOT matched against allowed_paths.
+#
+# Not covered (still unchecked): touch, rm, truncate, ln, rsync, patch, chmod,
+# `git mv/checkout/...`, a `w` command inside a sed script, `perl -i`, `python -c`.
+_FC_PROGS = ("cp", "mv", "install", "tee", "sed", "dd")
+# Short options that take a value (BSD install adds -B suffix and -f flags).
+_FC_VALUE_SHORT = {"cp": "tS", "mv": "tS", "install": "tSmogBf"}
+# Homebrew / coreutils "g" names are the GNU tools under another name.
+_FC_ALIASES = {"gcp": "cp", "gmv": "mv", "ginstall": "install", "gsed": "sed",
+               "gtee": "tee", "gdd": "dd"}
+_FC_SED_LONG = frozenset((
+    "--binary", "--debug", "--follow-symlinks", "--help", "--null-data",
+    "--zero-terminated", "--posix", "--quiet", "--silent", "--regexp-extended",
+    "--sandbox", "--separate", "--unbuffered", "--version"))
+_FC_SED_SHORT = "nEersuzbaI"
+_FC_VALUE_LONG = ("--target-directory", "--suffix", "--mode", "--owner", "--group",
+                  "--strip-program")
+_FC_BOOL_LONG = frozenset((
+    "--archive", "--attributes-only", "--copy-contents", "--dereference", "--force",
+    "--interactive", "--link", "--no-clobber", "--no-dereference", "--no-target-directory",
+    "--one-file-system", "--parents", "--recursive", "--remove-destination",
+    "--strip-trailing-slashes", "--symbolic-link", "--update", "--verbose", "--debug",
+    "--preserve", "--backup", "--reflink", "--sparse", "--context", "--compare",
+    "--directory", "--create-leading-dirs", "--preserve-timestamps", "--strip",
+    "--keep-directory-symlink", "--exchange", "--progress-bar", "--no-copy",
+    "--no-preserve", "--preserve-context", "--help", "--version",
+    "--dereference", "--no-dereference", "--update", "--force", "--interactive",
+))
+_FC_EXPANSION = "$`*?[{"
+_FC_RUNNER_RE = re.compile(
+    r"(?<![\w./\\-])(?:g?cp|g?mv|g?install|g?tee|g?sed|g?dd)(?![\w-])")
+
+
+def _fc_expands(s: str) -> bool:
+    return any(ch in s for ch in _FC_EXPANSION)
+
+
+def _fc_base(src: str):
+    b = os.path.basename(src.rstrip("/"))
+    return None if b in ("", ".", "..") else b
+
+
+def _fc_cp_like(prog: str, args: list[str], has_cd: bool):
+    """(targets, problem) for cp / mv / install. mv's sources count as writes (they
+    are removed); cp's and install's are only read."""
+    short_val = _FC_VALUE_SHORT[prog]
+    positionals: list[str] = []
+    target_dir = None
+    no_target_dir = False
+    mkdirs = False
+    i, after_dd = 0, False
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if after_dd or not a.startswith("-") or a == "-":
+            positionals.append(a)
+            continue
+        if a == "--":
+            after_dd = True
+            continue
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name == "--target-directory":
+                if eq:
+                    target_dir = val
+                elif i < len(args):
+                    target_dir = args[i]
+                    i += 1
+                else:
+                    return [], "option --target-directory has no value"
+            elif name in _FC_VALUE_LONG:
+                if not eq:
+                    i += 1
+            elif name == "--no-target-directory":
+                no_target_dir = True
+            elif name == "--directory":
+                mkdirs = True
+            elif name in _FC_BOOL_LONG:
+                pass
+            else:
+                # Not an exact known name (a typo, a GNU abbreviation such as
+                # --target=, or an option from another version): it could be the
+                # target-directory option, so the destination is undetermined.
+                return [], f"unrecognized option {a[:40]!r}"
+            continue
+        j = 1
+        while j < len(a):
+            ch = a[j]
+            if ch in short_val:
+                val = a[j + 1:]
+                if not val:
+                    if i >= len(args):
+                        return [], f"option -{ch} has no value"
+                    val = args[i]
+                    i += 1
+                if ch == "t":
+                    target_dir = val
+                break
+            if ch == "T":
+                no_target_dir = True
+            elif ch == "d" and prog == "install":
+                mkdirs = True
+            j += 1
+    for tok in positionals + ([target_dir] if target_dir is not None else []):
+        if _fc_expands(tok):
+            return [], f"a variable, glob or brace in {tok[:60]!r}"
+        if not tok.strip():
+            return [], "an empty path argument"
+
+    def home(p):
+        return os.path.expanduser(p) if p.startswith("~") else p
+
+    positionals = [home(p) for p in positionals]
+    if target_dir is not None:
+        target_dir = home(target_dir)
+    if mkdirs:
+        return (positionals, None) if positionals else ([], "install -d without a directory")
+
+    def into(dest, sources):
+        out = []
+        for s in sources:
+            b = _fc_base(s)
+            if b is None:
+                return None
+            out.append(dest.rstrip("/") + "/" + b)
+        return out
+
+    if target_dir is not None:
+        if not positionals:
+            return [], f"{prog} -t without a source"
+        targets = into(target_dir, positionals)
+        if targets is None:
+            return [], "a source named . or .."
+        sources = positionals
+    else:
+        if len(positionals) < 2:
+            return [], f"{prog} needs a source and a destination"
+        sources, dest = positionals[:-1], positionals[-1]
+        is_dir = dest.endswith("/") or len(sources) > 1
+        if not is_dir and not no_target_dir:
+            if not os.path.isabs(dest):
+                if has_cd:
+                    return [], (f"{dest!r} is relative and the command changes "
+                                f"directory, so whether it is a directory is unknown")
+                try:
+                    probe = os.path.join(os.getcwd(), dest)
+                except OSError:
+                    return [], "the working directory cannot be determined"
+            else:
+                probe = dest
+            is_dir = os.path.isdir(probe)
+        if is_dir and not no_target_dir:
+            targets = into(dest, sources)
+            if targets is None:
+                return [], "a source named . or .."
+        else:
+            targets = [dest]
+    if prog == "mv":
+        targets = targets + sources
+    return targets, None
+
+
+def _fc_tee(args: list[str]):
+    out, after_dd = [], False
+    for a in args:
+        if not after_dd and a == "--":
+            after_dd = True
+        elif after_dd or not a.startswith("-") or a == "-":
+            if _fc_expands(a):
+                return [], f"a variable, glob or brace in {a[:60]!r}"
+            out.append(os.path.expanduser(a) if a.startswith("~") else a)
+    return out, None
+
+
+def _fc_sed_parse(args: list[str], bsd: bool):
+    """One reading of a `sed` command line: None when it does not parse (an unknown
+    long option, which might be an abbreviation of --in-place / --expression /
+    --file, or an unknown short option), else (in_place, files). GNU: `-i[SUFFIX]`
+    (suffix attached only), `-l N`. BSD (macOS): `-i SUFFIX` and `-I SUFFIX` take the
+    next word when not attached, `-l` takes no value. `-I` is read as in-place in
+    both readings, and exact GNU long names are understood in both."""
+    in_place = have_script = False
+    positionals: list[str] = []
+    suffixes: list[str] = []
+    i, after_dd = 0, False
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if after_dd or not a.startswith("-") or a == "-":
+            positionals.append(a)
+            continue
+        if a == "--":
+            after_dd = True
+            continue
+        if a.startswith("--"):
+            name, eq, _val = a.partition("=")
+            if name == "--in-place":
+                in_place = True
+                if eq and _val:
+                    suffixes.append(_val)
+            elif name in ("--expression", "--file"):
+                have_script = True
+                if not eq:
+                    i += 1
+            elif name == "--line-length":
+                if not eq:
+                    i += 1
+            elif name not in _FC_SED_LONG:
+                return None
+            continue
+        j = 1
+        while j < len(a):
+            ch = a[j]
+            if ch in "iI":
+                in_place = True
+                rest = a[j + 1:]
+                if rest:
+                    suffixes.append(rest)       # attached: -i.bak
+                elif (bsd or ch == "I") and i < len(args):
+                    suffixes.append(args[i])    # BSD: the next word is the suffix
+                    i += 1
+                break
+            if ch in "efl" and not (ch == "l" and bsd):
+                if ch != "l":
+                    have_script = True
+                if j == len(a) - 1:
+                    i += 1
+                break
+            if ch not in _FC_SED_SHORT and ch != "l":
+                return None
+            j += 1
+    return in_place, (positionals if have_script else positionals[1:]), suffixes
+
+
+def _fc_sed_names(path: str, has_cd: bool) -> list[str]:
+    """The destination name(s) to report for one word a `sed -i` reading calls a file;
+    [] drops it. `sed -i` edits an existing file (or replaces a symlink with a regular
+    file); it cannot create a file or edit a directory. So a name that does not exist,
+    or is a directory, is not a destination (the readings report the script word, `''`,
+    and so on as files). A symlink is kept whatever it points at.
+    A RELATIVE name could be relative to the agent's shell directory, which is not
+    necessarily the hook's: it is tried under every candidate base (the payload `cwd`,
+    $CLAUDE_PROJECT_DIR, the hook's cwd) and dropped only when it is absent (or a
+    directory) under ALL of them; where it exists it is reported as that absolute path.
+    A name that cannot be resolved here (relative after a `cd`, no base) is kept as is,
+    so the caller's undetermined handling applies."""
+    p = os.path.expanduser(path) if path.startswith("~") else path
+
+    def writable(q):
+        try:
+            if os.path.islink(q):
+                return True
+            return os.path.lexists(q) and not os.path.isdir(q)
+        except (OSError, ValueError):
+            return True
+
+    if os.path.isabs(p):
+        return [p] if writable(p) else []
+    if has_cd:
+        return [p]
+    bases: list[str] = []
+    for cand in (str(_CALL_CTX.get("payload_cwd") or "").strip(),
+                 os.environ.get("CLAUDE_PROJECT_DIR", "").strip()):
+        if cand and os.path.isabs(cand) and os.path.isdir(cand):
+            bases.append(cand)
+    try:
+        bases.append(os.getcwd())
+    except OSError:
+        pass
+    if not bases:
+        return [p]
+    found: list[str] = []
+    for base in bases:
+        q = os.path.join(base, p)
+        if writable(q) and q not in found:
+            found.append(q)
+    return found
+
+
+def _fc_sed(args: list[str], has_cd: bool = False):
+    """Files `sed -i` / `-I` edits, plus the backup copy it writes (`<file><suffix>`;
+    an empty suffix means no backup). Which sed runs (GNU or BSD) cannot be known from
+    the hook (its PATH can differ from the agent's shell), so the command line is read
+    BOTH ways and the destinations are the UNION. A reported name that sed could not
+    write (it does not exist, or it is a directory: see _fc_sed_names) is dropped,
+    which leaves the over-included script word out. If either reading does not parse,
+    the destination is undetermined."""
+    readings = [_fc_sed_parse(args, bsd) for bsd in (False, True)]
+    if any(r is None for r in readings):
+        return [], "an unrecognized sed option (a typo, a GNU abbreviation such as --expr=, or another version's)"
+    files: list[str] = []
+    for in_place, fs, suffixes in readings:
+        if not in_place:
+            continue
+        for f in fs:
+            if _fc_expands(f):
+                return [], f"a variable, glob or brace in {f[:60]!r}"
+            for name in _fc_sed_names(f, has_cd):
+                if name not in files:
+                    files.append(name)
+                for suf in suffixes:
+                    if "*" in suf or _fc_expands(suf):
+                        return [], f"a backup suffix pattern {suf[:40]!r}"
+                    if suf and name + suf not in files:
+                        files.append(name + suf)
+    return [os.path.expanduser(f) if f.startswith("~") else f for f in files], None
+
+
+def _fc_dd(args: list[str]):
+    out = []
+    for a in args:
+        if a.startswith("of="):
+            v = a[3:]
+            if not v.strip():
+                return [], "an empty of= operand"
+            if _fc_expands(v):
+                return [], f"a variable, glob or brace in {v[:60]!r}"
+            out.append(os.path.expanduser(v) if v.startswith("~") else v)
+    return out, None
+
+
+def _collect_file_command_targets(raw_segs: list[str], shell: str, has_cd: bool):
+    """Destinations written by cp / mv / install / tee / sed -i / dd of= among
+    `raw_segs`. Returns (log_reason, lease_targets, undetermined): log_reason is a
+    deny reason when a destination is under PLAN_GATE_LOG_DIR (else None);
+    lease_targets are the absolute destinations for the lease lookup (not
+    including /dev/null-style sinks); undetermined lists a reason per command whose
+    destination cannot be determined."""
+    token_segs: list[list[str]] = []
+    undetermined: list[str] = []
+    for raw in raw_segs:
+        try:
+            if shell == "ps":
+                token_segs.extend(_tokenize_ps(raw))
+            else:
+                token_segs.append(shlex.split(raw))
+        except ValueError:
+            if _FC_RUNNER_RE.search(raw.lower()):
+                undetermined.append(f"cannot tokenize {raw[:80]!r}")
+    if shell == "ps":
+        has_cd = has_cd or any(t and t[0].lower() in _PS_CD_WORDS for t in token_segs)
+    lease_targets: list[str] = []
+    for toks in token_segs:
+        i = _program_index(toks)
+        if i >= len(toks):
+            continue
+        prog = _basename_lc(toks[i])
+        if prog.endswith(".exe"):
+            prog = prog[:-4]
+        args = toks[i + 1:]
+        if prog in _RUNNER_PROGS:
+            if _FC_RUNNER_RE.search(" ".join(toks[i + 1:]).lower()):
+                undetermined.append(
+                    f"`{prog}` runs a command line that mentions one of "
+                    f"{'/'.join(_FC_PROGS)}")
+            continue
+        prog = _FC_ALIASES.get(prog, prog)
+        if prog not in _FC_PROGS:
+            continue
+        if prog in ("cp", "mv", "install"):
+            dests, why = _fc_cp_like(prog, args, has_cd)
+        elif prog == "tee":
+            dests, why = _fc_tee(args)
+        elif prog == "sed":
+            dests, why = _fc_sed(args, has_cd)
+        else:
+            dests, why = _fc_dd(args)
+        if why:
+            undetermined.append(f"{prog}: {why}")
+            continue
+        for d in dests:
+            kind, v = _classify_redirect(d, has_cd, f"{prog} destination")
+            if kind == "null":
+                continue
+            if kind == "error":
+                undetermined.append(f"{prog}: {v.split(': ', 1)[-1][:160]}")
+            elif kind == "log":
+                return v, lease_targets, undetermined
+            else:
+                lease_targets.append(v)
+    return None, lease_targets, undetermined
+
+
+def _undetermined_deny_reason(undetermined: list[str]) -> str:
+    return (
+        "plan-gate: PLAN_GATE_REQUIRE_LEASE is on, but where this command writes "
+        f"cannot be determined ({'; '.join(undetermined[:3])}), so its scope-lease "
+        "cannot be checked. Failing closed. Name each destination literally (no "
+        "variables, globs or braces; an absolute path after any `cd`), or use "
+        "Edit/Write. " + _BYPASS_HOWTO
+    )
+
+
 def _writer_cfg_deny_reason() -> str:
     return (
         f"plan-gate: PLAN_GATE_WRITER_SCRIPTS is malformed ({_WRITER_CFG_ERROR}). "
@@ -3189,7 +3864,7 @@ def _handle_crash(exc: BaseException) -> None:
         reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
                   f"— emergency bypass (gate fault path).")
         _log_decision(
-            "allow", "gate", "emergency_bypass", _CALL_CTX["tool"],
+            "defer", "gate", "emergency_bypass", _CALL_CTX["tool"],
             _CALL_CTX["tool_input"], reason, None,
         )
         _allow_or_defer(reason, _CALL_CTX["tool"])
@@ -3226,7 +3901,7 @@ def main() -> None:
             pass
         b_reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
                     f"— emergency bypass.")
-        _log_decision("allow", "gate", "emergency_bypass", b_tool, b_input, b_reason, None)
+        _log_decision("defer", "gate", "emergency_bypass", b_tool, b_input, b_reason, None)
         _allow_or_defer(b_reason, b_tool if isinstance(b_tool, str) else "")
 
     try:
@@ -3272,7 +3947,13 @@ def main() -> None:
         deny(reason)
 
     def gated_allow(reason: str, class_: str) -> None:
-        """allow() + a unified-log row (subject to PLAN_GATE_LOG_DECISIONS)."""
+        """A unified-log row (subject to PLAN_GATE_LOG_DECISIONS), then either an
+        explicit allow (the active plan approved the call) or NO decision (the gate
+        merely did not object; see _DEFER_CLASSES). The row says "allow" for the
+        first and "defer" for the second."""
+        if class_ in _DEFER_CLASSES:
+            _log_decision("defer", _surface(), class_, tool, tool_input, reason, plan_name)
+            no_decision()
         _log_decision("allow", _surface(), class_, tool, tool_input, reason, plan_name)
         allow(reason)
 
@@ -3283,11 +3964,12 @@ def main() -> None:
             # is logged so every MCP call the hook sees is on the record.
             # NO decision (not "allow"): an allow would skip the harness's own
             # permission prompt for a tool this gate did not actually check.
-            _log_decision("allow", "mcp", "mcp_unconfigured", tool, tool_input,
+            _log_decision("defer", "mcp", "mcp_unconfigured", tool, tool_input,
                           f"plan-gate: MCP tool {tool!r} is not in "
                           f"PLAN_GATE_MCP_WRITE_TOOLS.", None)
             no_decision()
-        allow(f"plan-gate: tool {tool!r} is outside the gated set.")
+        # Not a tool this gate governs: no opinion, so the harness decides.
+        no_decision()
 
     # === Bypasses BEFORE active-plan check ===
     # For Edit/Write/NotebookEdit: the always-writable bypass runs before the
@@ -3302,9 +3984,9 @@ def main() -> None:
                 f"plan-gate: no file_path in tool_input for {tool}.",
                 class_="empty_input",
             )
-        # Collapse `..` / `.` lexically so `<always-writable>/../x` cannot ride
-        # the directory prefix out of it (same treatment as redirect targets).
-        target_n = norm(os.path.normpath(str(target)))
+        # Grants compare RESOLVED paths (symlinks followed, case folded only on a
+        # case-insensitive FS; see _real_key), so neither `<always-writable>/../x`
+        # nor a symlink inside an always-writable dir can ride the prefix out.
         # Log self-protection — runs BEFORE the always-writable bypass and
         # before allowed_paths matching, so neither can shadow it: the gate
         # never authorizes a gated write to its own decision log (raw AND
@@ -3320,7 +4002,7 @@ def main() -> None:
         lease_reason = _extra_write_target_checks([str(target)])
         if lease_reason:
             gated_deny(lease_reason, class_="scope_lease")
-        if _under_any(target_n, ALWAYS_WRITABLE_DIRS):
+        if _under_dirs_real(str(target), ALWAYS_WRITABLE_DIRS):
             gated_allow(
                 "plan-gate: target is under an always-writable directory.",
                 "always_writable",
@@ -3385,7 +4067,15 @@ def main() -> None:
             all_segs, "bash", has_cd)
         if w_problem:
             gated_deny(w_problem[0], class_=w_problem[1])
-        lease_reason = _extra_write_target_checks(lease_targets + w_all)
+        # cp / mv / install / tee / sed -i / dd of=: destinations get the same
+        # log-dir protection and lease lookup as a redirect target.
+        fc_log, fc_targets, fc_undet = _collect_file_command_targets(
+            all_segs, "bash", has_cd)
+        if fc_log:
+            gated_deny(fc_log, class_="log_self_protect")
+        if fc_undet and _env_truthy("PLAN_GATE_REQUIRE_LEASE"):
+            gated_deny(_undetermined_deny_reason(fc_undet), class_="scope_lease")
+        lease_reason = _extra_write_target_checks(lease_targets + w_all + fc_targets)
         if lease_reason:
             gated_deny(lease_reason, class_="scope_lease")
         # Pre-plan read-only bypass: a compound is read-only only if EVERY
@@ -3463,7 +4153,12 @@ def main() -> None:
             ps_segs, "ps", False)
         if w_problem:
             gated_deny(w_problem[0], class_=w_problem[1])
-        lease_reason = _extra_write_target_checks(ps_w_all)
+        fc_log, fc_targets, fc_undet = _collect_file_command_targets(ps_segs, "ps", False)
+        if fc_log:
+            gated_deny(fc_log, class_="log_self_protect")
+        if fc_undet and _env_truthy("PLAN_GATE_REQUIRE_LEASE"):
+            gated_deny(_undetermined_deny_reason(fc_undet), class_="scope_lease")
+        lease_reason = _extra_write_target_checks(ps_w_all + fc_targets)
         if lease_reason:
             gated_deny(lease_reason, class_="scope_lease")
 
@@ -3500,7 +4195,7 @@ def main() -> None:
                 gated_deny(extra_reason, class_="scope_lease")
             mcp_plan_targets = [
                 mt for mt in mcp_targets
-                if not _under_any(norm(os.path.normpath(mt)), ALWAYS_WRITABLE_DIRS)
+                if not _under_dirs_real(mt, ALWAYS_WRITABLE_DIRS)
             ]
             if not mcp_plan_targets:
                 gated_allow(
@@ -3524,6 +4219,18 @@ def main() -> None:
     approval_required, approval_cfg_error = _approval_mode()
     if approval_cfg_error:
         gated_deny(approval_cfg_error, class_="approval_config")
+    bad_bypass = invalid_bypass_plans(worktree_root)
+    if bad_bypass:
+        shown = "; ".join(f"{n}: worktree_bypass: {v}" for n, v in bad_bypass[:5])
+        gated_deny(
+            f"plan-gate: an active plan has a worktree_bypass value the gate refuses "
+            f"({shown}). The only accepted values are the unquoted, lowercase literals "
+            f"`true` (bypass on) and `false` (off); yes, True, 1, on, \"true\", "
+            f"\"false\" and an empty value are refused, not guessed at. Set it to "
+            f"`true` or `false`, or delete the line. If plan approval is on, the edit voids the approval: a human "
+            f"approves the plan again.",
+            class_="worktree_bypass_invalid",
+        )
     actives = find_active_plans(worktree_root=worktree_root)
     if not actives and approval_required:
         # A plan can say `status: active` and still not count: nobody approved
@@ -3574,7 +4281,7 @@ def main() -> None:
         name_parts: list[str] = []
         bypass_count = 0
         for p, f in actives:
-            if str(f.get("worktree_bypass", "")).strip().lower() == "true":
+            if _bypass_state(f) is True:
                 name_parts.append(f"{p.name} (worktree_bypass: true)")
                 bypass_count += 1
             else:
@@ -3627,7 +4334,7 @@ def main() -> None:
     # allowed_paths entry resolving under worktree_root, so any plan that
     # reaches this point already satisfies the guard's condition. The silent-
     # drift diagnostic now fires from the no-claim path above.)
-    bypass = str(fm.get("worktree_bypass", "")).strip().lower() == "true"
+    bypass = _bypass_state(fm) is True
 
     # === Disjoint paths check ===
     # Skipped when MY plan is `worktree_bypass: true` (bypass plans are cross-tree
@@ -3640,13 +4347,12 @@ def main() -> None:
             gated_deny(reason, class_="disjoint_paths")
 
     if tool in ("Edit", "Write", "NotebookEdit"):
-        # target / target_n already computed above (early-bypass block).
-        for rp in resolved_paths:
-            if norm(rp) == target_n:
-                gated_allow(
-                    f"plan-gate: {target} matches allowed_paths entry {rp!r}.",
-                    "allowed_paths",
-                )
+        # target already computed above (early-bypass block).
+        if _path_matches_allowed(str(target), resolved_paths):
+            gated_allow(
+                f"plan-gate: {target} matches an allowed_paths entry.",
+                "allowed_paths",
+            )
         gated_deny(
             f"plan-gate: {target} is NOT in allowed_paths of active plan "
             f"({plan_path.name}). Update the plan or stop."
@@ -3668,7 +4374,7 @@ def main() -> None:
                 f"<(...)) are checked segment by segment. Command: {cmd[:200]}"
             )
         for tgt in plan_targets:
-            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+            if not _path_matches_allowed(tgt, resolved_paths):
                 gated_deny(
                     f"plan-gate: redirection target {tgt} is NOT in "
                     f"allowed_paths of active plan ({plan_path.name}). A "
@@ -3676,7 +4382,7 @@ def main() -> None:
                     f"like Edit/Write. Command: {cmd[:200]}"
                 )
         for tgt, script in writer_plan_targets:
-            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+            if not _path_matches_allowed(tgt, resolved_paths):
                 gated_deny(
                     f"plan-gate: {script} target {tgt} is NOT in allowed_paths "
                     f"of active plan ({plan_path.name}). A writer script's "
@@ -3713,7 +4419,7 @@ def main() -> None:
                 )
             used_ps_cmd = True
         for tgt, script in ps_writer_plan_targets:
-            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+            if not _path_matches_allowed(tgt, resolved_paths):
                 gated_deny(
                     f"plan-gate: {script} target {tgt} is NOT in "
                     f"allowed_paths of active plan ({plan_path.name}). "
@@ -3726,9 +4432,8 @@ def main() -> None:
         )
 
     if tool in MCP_TOOL_ARGS:
-        resolved_n = {norm(rp) for rp in resolved_paths}
         for mt in mcp_plan_targets:
-            if norm(os.path.normpath(mt)) not in resolved_n:
+            if not _path_matches_allowed(mt, resolved_paths):
                 gated_deny(
                     f"plan-gate: MCP tool {tool!r} target {mt} is NOT in "
                     f"allowed_paths of active plan ({plan_path.name}). An MCP "
