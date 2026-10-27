@@ -160,11 +160,13 @@ as are typos and options from other versions; the full names `--target-directory
 `.` or `..`, or a shell/`xargs`/`find`-style runner line that mentions one of the six programs
 (`bash -c 'cp a b'`). The GNU/coreutils `g` names (`gcp`, `gmv`, `ginstall`, `gsed`, `gtee`,
 `gdd`) are the same programs. `install` also reads BSD `-B suffix` and `-f flags` as value
-options. For `sed -i` the syntax is GNU's (the word after a bare `-i` is the script, so
-`sed -i '' s/a/b/ f` reports `s/a/b/` as well: a superset, which can only deny more), except
-when `sed` on PATH is macOS's own `/usr/bin/sed`: there a bare `-i` takes the next word as its
-backup suffix, so `sed -i '' s/a/b/ f` resolves to `f` and routine edits work under
-`PLAN_GATE_REQUIRE_LEASE`. With leases merely configured (not required), an undetermined
+options. `sed` is read **both ways**, GNU and BSD (macOS), and the destinations are the union,
+because the hook's PATH can differ from the agent's shell and so cannot say which `sed` runs:
+GNU `-i[SUFFIX]` / `--in-place`, `-l N`; BSD `-i SUFFIX` and `-I SUFFIX` (the next word is the
+suffix) and a value-less `-l`. So `sed -i '' s/a/b/ f` reports `f` and also `s/a/b/` (a
+superset, which can only deny more); `sed -I '' ...` and `sed -l -i '' ...` are in-place edits.
+If either reading does not parse (an unknown long option, an unknown short option) the
+destination is undetermined. With leases merely configured (not required), an undetermined
 destination is not checked, as before; a determined one is looked up and a path held by
 another agent denies.
 
@@ -436,7 +438,13 @@ Set the variables in the `env` block and register the hook in `hooks.PreToolUse`
   inconclusive probe means no folding, which only ever denies. Deny-type checks (log-directory
   protection, plan-to-plan path collisions, lease ref-store paths) still fold case always,
   because over-matching there only denies. Not handled: Unicode normalization differences
-  (macOS HFS+/APFS normalization-insensitivity), 8.3 short names, and hardlinks.
+  (macOS HFS+/APFS normalization-insensitivity), 8.3 short names, and hardlinks. Known
+  limits of the case probe, all in the denying direction or needing write access to the
+  directory already: a path component with a single cased letter never folds (it has no third
+  spelling to probe); below a mount point (a component on a different device than its parent)
+  folding is off until a component inside the new volume has been probed, so a new name
+  directly under a mount point is case-exact; and the hardlink-twin check can be beaten only by
+  someone who can already create entries in that directory.
 
 ## Which calls get an explicit allow
 

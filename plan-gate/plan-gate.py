@@ -9,7 +9,8 @@ published as the reference implementation for the `plan-gate` paper (see
 
 WHAT IT DOES
   Reads tool-use JSON from stdin, consults the single active "plan" file in a
-  configured plans directory, and emits an allow/deny decision on stdout. An
+  configured plans directory, and emits an allow/deny decision on stdout (or no
+  decision at all when the plan did not approve the call and it is not denied). An
   agent may only modify the exact files and run commands matching the command
   prefixes an approved plan enumerates. Anything else is denied BEFORE it runs.
   The gate fails closed on policy AND on its own faults: when in doubt, deny.
@@ -113,7 +114,8 @@ RULES
     the active-plan check (so a session with no active plan can still inspect
     state with `git log`, `pwd`, `Get-ChildItem`, etc.). Plan-scoped checks run
     AFTER the active-plan check.
-  - Every decision on a gated surface (allow AND deny) appends a hash-chained
+  - Every decision on a gated surface (allow, deny AND defer = no decision
+    emitted, the harness decides) appends a hash-chained
     JSONL row to the decision log; `plan-gate.py verify-log [path]` checks the
     chain. Best-effort; a logging failure NEVER changes a decision. The gate
     never authorizes a gated file-write into PLAN_GATE_LOG_DIR itself (log
@@ -3392,6 +3394,8 @@ _FC_BOOL_LONG = frozenset((
     "--preserve", "--backup", "--reflink", "--sparse", "--context", "--compare",
     "--directory", "--create-leading-dirs", "--preserve-timestamps", "--strip",
     "--keep-directory-symlink", "--exchange", "--progress-bar", "--no-copy",
+    "--no-preserve", "--preserve-context", "--help", "--version",
+    "--dereference", "--no-dereference", "--update", "--force", "--interactive",
 ))
 _FC_EXPANSION = "$`*?[{"
 _FC_RUNNER_RE = re.compile(
@@ -4113,7 +4117,7 @@ def main() -> None:
             f"({shown}). The only accepted values are the unquoted, lowercase literals "
             f"`true` (bypass on) and `false` (off); yes, True, 1, on, \"true\", "
             f"\"false\" and an empty value are refused, not guessed at. Set it to "
-            f"`true`, or delete the line. If plan approval is on, the edit voids the approval: a human "
+            f"`true` or `false`, or delete the line. If plan approval is on, the edit voids the approval: a human "
             f"approves the plan again.",
             class_="worktree_bypass_invalid",
         )

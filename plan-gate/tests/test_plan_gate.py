@@ -3488,6 +3488,13 @@ class FileCommandLeaseTests(unittest.TestCase):
         self.assertHeld("cp --preserve=mode --backup=numbered %s %s" % (S, L))
         self.assertHeld("sed --quiet --in-place=.bak --expression=s/a/b/ %s" % L)
         self.assertHeld("sed -i --regexp-extended -e s/a/b/ %s" % L)
+        # routine GNU long options of cp / mv / install are known, so they resolve
+        # (and are looked up) instead of being treated as undetermined
+        for cmd in ("cp --no-preserve=mode --update %s %s" % (S, L),
+                    "cp --update=none --dereference --no-dereference %s %s" % (S, L),
+                    "mv --update --no-clobber --verbose %s %s" % (S, L),
+                    "install --preserve-context --verbose --compare %s %s" % (S, L)):
+            self.assertHeld(cmd)
 
     def test_the_same_commands_on_a_free_path_are_allowed_by_the_plan(self):
         self.lease("alice", self.leased)
@@ -3986,6 +3993,7 @@ class WorktreeBypassValueTests(unittest.TestCase):
             r = self.reason(p)
             self.assertIn("worktree_bypass", r, msg=value)
             self.assertIn("`true`", r, msg=value)
+            self.assertIn("Set it to `true` or `false`, or delete the line", r, msg=value)
         rows = [json.loads(x) for x in
                 (self.logs / "plan-gate-decisions.log").read_text(encoding="utf-8").splitlines()]
         self.assertEqual({r["class"] for r in rows}, {"worktree_bypass_invalid"})
