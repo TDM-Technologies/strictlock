@@ -22,8 +22,9 @@ decision, which is the kind of evidence SOC 2 and ISO audits ask for.
 
 > **Fail closed** means: when the gate is unsure, it refuses. The opposite, failing open, is
 > what advisory prose does. Two limits to know up front. A gate that never starts does not
-> gate (see [what is and isn't enforced today](#what-is-and-isnt-enforced-today)), and
-> recorded plan approval needs a decision-log directory to be set.
+> gate unless its hook sets `"onFailure": "block"` (see
+> [what is and isn't enforced today](#what-is-and-isnt-enforced-today)), and recorded plan
+> approval needs a decision-log directory to be set.
 
 **Terms used below.** The *harness* is the agent tool you run, such as Claude Code. A *hook* is
 a small program the harness runs at a set point; a `PreToolUse` hook runs just before each tool
@@ -98,10 +99,22 @@ in [`plan-gate/CONFIG.md`](plan-gate/CONFIG.md) and [`scope-lease/CONFIG.md`](sc
   or submodules, and code the agent controls.
 - **PowerShell** commands are checked segment by segment; parentheses, script blocks,
   backticks and redirections are denied, and file-writing cmdlets are denied even if listed.
-- **A hook that cannot start does not gate.** A missing interpreter (for example `python` where
-  only `python3` exists) makes the harness proceed without the check. A wrong script path makes
-  every tool call fail with a "can't open file" error instead. Verify the gate after wiring it
-  (below).
+- **A hook that cannot start does not gate, unless it sets `"onFailure": "block"`.** On Claude
+  Code 2.1.295 or later, that field on the hook entry makes a hook that cannot start, times out,
+  or prints unreadable output block the tool call. The example settings set it. Without it (or on
+  an older Claude Code, which ignores the field), a missing interpreter (for example `python`
+  where only `python3` exists) makes the harness proceed without the check. Verify the gate after
+  wiring it (below).
+- **A command admitted through `allowed_commands` writes wherever its arguments say.** The gate
+  checks no plan paths for it: for `cp`, `mv`, `install`, `tee`, `sed -i` and `dd` it reads the
+  destination for the lease and log-directory checks only, and a script or build tool is not
+  read at all. Claude Code's
+  [sandbox](https://code.claude.com/docs/en/sandboxing) is the layer for those: it confines
+  every shell command and its child processes to the working directory at the operating-system
+  level. Turn it on with `"sandbox": {"enabled": true, "failIfUnavailable": true,
+  "allowUnsandboxedCommands": false}` in settings. It covers shell commands only (plan-gate
+  covers Edit/Write and MCP), allows the whole directory rather than listed files, and does not
+  run on native Windows (WSL2 works).
 
 ## The thesis, in four moves
 
@@ -134,15 +147,18 @@ In short:
 4. Write a plan with **absolute** `allowed_paths`; a plan with only relative paths cannot claim
    a git worktree, and the gate then denies every file write and every command outside the
    read-only set there.
-5. Wire the hook (see [`plan-gate/examples/settings.json`](plan-gate/examples/settings.json)).
+5. Wire the hook (see [`plan-gate/examples/settings.json`](plan-gate/examples/settings.json)),
+   keeping its `"onFailure": "block"` line (Claude Code 2.1.295 or later).
 6. **Check the gate is live:** ask the agent to edit a file that is not in the plan. You should
    see a `plan-gate:` deny and a new row in the decision log.
 
-**Why step 6 is not optional.** If the interpreter named in the hook command does not exist
-(for example `python` on a system that only has `python3`), Claude Code treats the "command not
-found" as a non-blocking error, so the agent's action proceeds with no deny and no log row. If
-the script path is wrong, the interpreter exits with "can't open file", which blocks every tool
-call. Either way the gate is not deciding anything. It fails closed only once it is running.
+**Why step 6 is not optional.** Without `"onFailure": "block"`, or on a Claude Code older than
+2.1.295, a missing interpreter (for example `python` on a system that only has `python3`) is a
+non-blocking error, so the agent's action proceeds with no deny and no log row. With it, the same
+mistake blocks every tool call, which is loud but still not the gate deciding anything. A wrong
+script path blocks every tool call either way. A settings file that never loads, or a matcher
+that misses a tool, gates nothing in any version. Step 6 is how you see that the gate is the
+thing deciding.
 
 Full configuration (all `PLAN_GATE_*` variables, on Windows, Linux and macOS) is in
 [`plan-gate/CONFIG.md`](plan-gate/CONFIG.md).
@@ -176,7 +192,8 @@ and `sink-resolver` run unless their switch is set to something other than those
 
 - **Fail closed.** When in doubt, deny. If plan-gate's own code crashes or receives a payload
   it cannot parse, it denies with a loud message (the emergency bypass is still honored, and
-  logged). This covers a gate that is running; a hook that fails to start does not gate.
+  logged). This covers a gate that is running; a hook that fails to start gates only if it
+  sets `"onFailure": "block"`.
 - **Least privilege by construction.** Exact-path, enumerated-command-prefix authorization,
   scoped per unit of work and then retired.
 - **Evidence from the gate itself.** With `PLAN_GATE_LOG_DIR` set, each decision is written to

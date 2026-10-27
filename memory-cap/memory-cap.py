@@ -9,8 +9,10 @@ WHY THIS EXISTS
   files") — but conventions are advisory and quietly rot. This hook makes the
   convention STRUCTURAL: any Write/Edit to the index file whose new content
   contains an index entry (a `- ` line) longer than a configurable cap is REFUSED
-  at the tool boundary, before it lands. Optional total caps (entry count, summed
-  entry characters) bound the index as a whole. Only the lines a write introduces
+  at the tool boundary, before it lands. Whole-file caps on lines and bytes default
+  to Claude Code's auto-memory load limit (first 200 lines or 25KB; anything past it
+  is silently not loaded), and optional total caps (entry count, summed entry
+  characters) bound the index entries as a whole. Only the lines a write introduces
   or modifies are judged (a pre-existing over-cap line is never re-flagged), so
   the index cannot self-wedge through Write, Edit or NotebookEdit.
 
@@ -18,9 +20,10 @@ WHY THIS EXISTS
   no other module required.
 
 WHAT COUNTS
-  Only `- ` (dash + space) lines — the index-entry convention — are measured.
-  Heading lines, blockquote callouts, blank lines, and any other prose pass
-  unconditionally. Only the configured index file is checked; every other file
+  The per-entry cap and the opt-in total caps measure only `- ` (dash + space)
+  lines — the index-entry convention. Heading lines, blockquote callouts, blank
+  lines, and any other prose pass them unconditionally. The whole-file line and
+  byte caps count every line, as the harness does when it truncates the load. Only the configured index file is checked; every other file
   (including topic files in the same directory) is exempt — those are the
   intended offload destination.
 
@@ -46,9 +49,15 @@ CONFIGURATION (all via environment)
                         target path. Default matches a Claude Code per-project
                         memory index:
                             /.claude/projects/<project>/memory/memory.md
+  MEMORY_CAP_MAX_LINES  cap on the number of lines in the whole index file. Default 200
+                        (Claude Code loads only the first 200 lines). `off` or `0`
+                        turns it off; any other non-integer keeps the default.
+  MEMORY_CAP_MAX_BYTES  cap on the UTF-8 size of the whole index file. Default 25000
+                        (Claude Code loads only the first 25KB; 25000 stays under it
+                        whether KB means 1000 or 1024). `off`/`0` turns it off.
   MEMORY_CAP_MAX_ENTRIES  opt-in cap on the number of `- ` entries in the index.
   MEMORY_CAP_TOTAL_CHARS  opt-in cap on the summed length of the `- ` entries.
-                        Both are judged in the same changed-region pass: a write is
+                        All four are judged in the same changed-region pass: a write is
                         refused only if the result is over the cap AND larger than
                         the pre-existing file, so an index already over a cap is
                         never wedged (shrinking / level edits pass). Not evaluated
@@ -121,6 +130,32 @@ def _opt_in_limit(name: str):
 # Opt-in total-size caps over the index's `- ` entries (both off by default).
 MAX_ENTRIES = _opt_in_limit("MEMORY_CAP_MAX_ENTRIES")
 TOTAL_CHARS = _opt_in_limit("MEMORY_CAP_TOTAL_CHARS")
+
+
+def _default_limit(name: str, default: int):
+    """Whole-file limit that is ON by default; None only when explicitly set to
+    `off` or `0`. Any other unusable value keeps the default (fail closed) and says so."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    if raw.lower() in ("off", "0"):
+        return None
+    try:
+        val = int(raw)
+    except ValueError:
+        val = 0
+    if val <= 0:
+        print(f"memory-cap: {name}={raw!r} is not a positive integer or `off`; "
+              f"keeping the default {default}.", file=sys.stderr)
+        return default
+    return val
+
+
+# Whole-file caps matching Claude Code's auto-memory load limit: MEMORY.md is read
+# only up to its first 200 lines or 25KB, and everything past that is dropped on load
+# even though the write itself succeeds. On by default; set `off` to disable.
+MAX_LINES = _default_limit("MEMORY_CAP_MAX_LINES", 200)
+MAX_BYTES = _default_limit("MEMORY_CAP_MAX_BYTES", 25000)
 
 # Predicate matching the index file to cap. Configurable; the default targets a
 # Claude Code per-project memory index. Falls back to the default on an invalid
@@ -468,16 +503,28 @@ def _index_totals(content: str) -> tuple:
 
 
 def total_cap_violations(existing_content: str, new_content: str) -> list:
-    """Opt-in total-size caps, judged on the same delta as the per-line cap.
+    """Whole-file and opt-in total-size caps, judged on the same delta as the per-line cap.
 
     A cap is violated only when the result is over it AND larger than the
     pre-existing file on that measure: an index already over a cap is never
     wedged — edits that keep it level or shrink it pass, so the way out
     (compressing / removing entries) always stays open. A write that newly
     exceeds the cap, or grows an already-over index, is refused. Returns a list
-    of human-readable violation strings (empty when both caps are off or met).
+    of human-readable violation strings (empty when every cap is off or met).
     """
     out = []
+    old_l, new_l = len(existing_content.splitlines()), len(new_content.splitlines())
+    old_b, new_b = len(existing_content.encode("utf-8")), len(new_content.encode("utf-8"))
+    if MAX_LINES is not None and new_l > MAX_LINES and new_l > old_l:
+        out.append(
+            f"{new_l} lines (cap {MAX_LINES}, the harness's load limit; "
+            f"index had {old_l} before this write)"
+        )
+    if MAX_BYTES is not None and new_b > MAX_BYTES and new_b > old_b:
+        out.append(
+            f"{new_b} bytes (cap {MAX_BYTES}, the harness's load limit; "
+            f"index had {old_b} before this write)"
+        )
     old_n, old_c = _index_totals(existing_content)
     new_n, new_c = _index_totals(new_content)
     if MAX_ENTRIES is not None and new_n > MAX_ENTRIES and new_n > old_n:

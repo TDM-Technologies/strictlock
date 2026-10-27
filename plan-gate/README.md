@@ -179,22 +179,54 @@ the next section).
 
 A full allowed-vs-denied walkthrough is in [`examples/README.md`](examples/README.md).
 
-### The gate fails closed once it runs, but it cannot protect you if it never starts
+### The gate fails closed once it runs; set `onFailure` so it also fails closed if it never starts
 
-Everything above about failing closed describes a gate that is running. A hook command that
-cannot launch fails in one of two ways, depending on what is wrong:
+Everything above about failing closed describes a gate that is running. On Claude Code 2.1.295
+or later, `"onFailure": "block"` on the hook entry (the example settings set it) makes a hook
+that cannot start, times out, or prints unreadable output block the tool call instead of letting
+it through. Older versions ignore the field. Without it, a hook command that cannot launch fails
+in one of two ways, depending on what is wrong:
 
 - **The interpreter is missing** (for example `python` on a system that only has `python3`).
   The shell reports "command not found" (exit 127), which Claude Code treats as a non-blocking
   error, so the agent's action proceeds. The symptoms: an out-of-plan action is not blocked,
-  and the decision log gets no rows. This is a silent fail-open.
+  and the decision log gets no rows. This is a silent fail-open, and `onFailure: block` turns
+  it into a loud block of every tool call.
 - **The script path is wrong** (a mistyped or relative path that does not resolve). Python
   reports "can't open file" and exits 2, which Claude Code treats as a blocking error for a
   `PreToolUse` hook, so **every** tool call is blocked with a "can't open file" message. This
   is loud, not silent, but it is not the gate deciding anything.
 
-This is why step 6 is part of the install, and why it is worth repeating whenever you change the
-hook command, the interpreter, or the location of the code.
+Either way the gate is not deciding anything, and a settings file that never loads or a matcher
+that misses a tool gates nothing in any version. This is why step 6 is part of the install, and
+why it is worth repeating whenever you change the hook command, the interpreter, or the location
+of the code.
+
+### Pair it with Claude Code's sandbox for writes the gate cannot parse
+
+plan-gate checks a shell command's redirect and writer-script targets against the plan. A
+program admitted through `allowed_commands` writes wherever its arguments say: for `cp`, `mv`,
+`install`, `tee`, `sed -i` and `dd` the gate reads the destination for the lease and
+log-directory checks only (see [`CONFIG.md`](CONFIG.md#file-writing-commands-cp-mv-install-tee-sed--i-dd)),
+and a script or build tool can write files the gate never sees. Claude
+Code's [sandbox](https://code.claude.com/docs/en/sandboxing) closes that gap at the operating
+system level: every shell command and its child processes may write only to the working
+directory, temp and added directories. The two layers do different jobs. plan-gate allows the
+exact files a plan lists, on every tool. The sandbox allows a whole directory, on shell commands
+only. A starting configuration:
+
+```json
+"sandbox": {
+  "enabled": true,
+  "failIfUnavailable": true,
+  "allowUnsandboxedCommands": false
+}
+```
+
+`failIfUnavailable` stops Claude Code at startup instead of silently running unsandboxed when
+the sandbox cannot start. `allowUnsandboxedCommands: false` removes the retry that runs a failed
+command outside the sandbox. The sandbox runs on macOS, Linux and WSL2, not on native Windows,
+and hooks themselves run outside it.
 
 ## Known limits today
 

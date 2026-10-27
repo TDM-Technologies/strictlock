@@ -48,7 +48,7 @@ even when the instructions are forgotten. [As of v0.x: the "approved envelope" i
 With a decision-log directory set, a plan takes effect only after `plan-gate.py approve` records
 who (self-declared), when and the plan's sha256: tamper-evident, not authentication. Without a
 log directory, `status: active` alone activates a plan. And a gate whose hook never starts does
-not gate.]
+not gate, unless the hook sets Claude Code's `onFailure: block` (2.1.295+).]
 
 This is not a hypothesis. The patterns described here were extracted from a working system built
 to run agents against a HIPAA-regulated product — and that origin is the one piece of local color
@@ -179,7 +179,7 @@ unapproved, or surprised, the action does not happen.
 Two systems can describe their governance with the identical sentence — "the agent asks before
 it acts" — and be worlds apart. In one, that sentence is a hope pinned on the agent's behavior;
 it fails open the first time the agent is busy. In the other, it is a property of the
-infrastructure; it fails closed by construction (while the hook is running; a hook that never starts does not gate). Everything in §5 — the catalog of how these
+infrastructure; it fails closed by construction (while the hook is running; a hook that never starts gates only if it sets `onFailure: block`). Everything in §5 — the catalog of how these
 agents actually break — is evidence for a single claim: when the enforcement is structural, the
 failures that would have shipped under prose governance get *stopped at the gate* instead.
 

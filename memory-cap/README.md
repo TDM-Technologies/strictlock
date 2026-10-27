@@ -9,9 +9,11 @@ line" — is a convention, and conventions quietly rot.
 
 The index grows two ways: longer entries and more entries. `memory-cap` makes the convention
 **structural**: it's a `PreToolUse` hook that refuses any Write/Edit to the index file that
-would introduce an over-length index entry, and (opt-in) any write that grows the index past a
-total entry-count or total-characters cap. Same posture as the rest of StrictLock — fail
-closed, deny at the boundary, before the bad write lands.
+would introduce an over-length index entry, or grow the file past what the harness actually
+loads. Claude Code reads only the first 200 lines or 25KB of `MEMORY.md`; the write itself still
+succeeds, and everything past the limit is silently dropped at the next session start. Opt-in
+caps on the total entry count or total entry characters go further. Same posture as the rest of
+StrictLock — fail closed, deny at the boundary, before the bad write lands.
 
 ## What it does
 
@@ -26,12 +28,19 @@ closed, deny at the boundary, before the bad write lands.
   write that merely retains it is allowed and the index cannot self-wedge. A brand-new or
   unreadable file has an empty baseline, so a fresh over-cap write is still denied.
 - The **per-entry** cap is on by default (200 characters per `- ` line).
+- Two **whole-file caps** are on by default and match Claude Code's auto-memory load limit:
+  200 lines (`MEMORY_CAP_MAX_LINES`) and 25,000 bytes of UTF-8 (`MEMORY_CAP_MAX_BYTES`; 25,000
+  stays under the limit whether 25KB means 1,000 or 1,024 bytes per KB). They count every line,
+  headings and blank lines included, because the harness does. They follow the same no-wedge
+  rule as the total caps below: an index already over a cap can still be edited level or
+  smaller, and only a write that grows it is refused. Set either to `off` (or `0`) to turn it
+  off, for example when capping an index for a harness with different limits.
 - Two **opt-in total caps** (`MEMORY_CAP_MAX_ENTRIES`, `MEMORY_CAP_TOTAL_CHARS`) bound the
   index as a whole, counting only `- ` entries (total chars = sum of each entry's length
   excluding trailing whitespace). They use the same changed-region logic: a write is refused
   only if the result is over the cap **and** larger than the pre-existing file on that
   measure. An index already over a cap is never wedged — edits that keep it level or shrink
-  it pass; edits that grow it are refused. Total caps are not evaluated for `NotebookEdit`
+  it pass; edits that grow it are refused. Total and whole-file caps are not evaluated for `NotebookEdit`
   (it carries one cell's source, not the whole file).
 - If a write introduces or modifies an index entry that exceeds the cap (default **200**
   characters, whole line excluding trailing whitespace), the write is **denied** with a
@@ -42,8 +51,9 @@ closed, deny at the boundary, before the bad write lands.
 ## Install
 
 Wire `memory-cap.py` as a `PreToolUse` hook in your agent harness (same mechanism as
-[`plan-gate`](../plan-gate/) — see its `examples/settings.json` for the Claude Code shape),
-then turn it on:
+[`plan-gate`](../plan-gate/) — see its `examples/settings.json` for the Claude Code shape,
+including `"onFailure": "block"`, which on Claude Code 2.1.295 or later makes a hook that
+cannot start block the write instead of letting it through), then turn it on:
 
 ```bash
 export MEMORY_CAP=on
@@ -57,6 +67,8 @@ export MEMORY_CAP=on
 | `MEMORY_CAP_CHARS` | Integer cap on a `- ` line (whole line, excluding trailing whitespace). Default `200`. |
 | `MEMORY_CAP_PATH_RE` | Regex (matched case-insensitively against the forward-slash form of the target path) identifying the index file to cap. Default matches a Claude Code per-project memory index: `/.claude/projects/<project>/memory/memory.md`. An invalid regex falls back to the default; a valid-but-wrong pattern still matches the wrong file, so check yours. |
 | `MEMORY_CAP_BYPASS` | `on`, `1`, `true` or `yes` (any case) bypasses the cap. Single-use by convention; every use is logged (on stderr), so a lingering bypass is visible in the trail. The hook is started by the harness, so the variable must be in the environment the harness was launched with, or its settings `env` block; `export` in the agent's own Bash tool, or an inline prefix on the agent's command, does not reach it. A distinct bypass per gate is deliberate. |
+| `MEMORY_CAP_MAX_LINES` | Cap on the number of lines in the whole index file. Default `200` (Claude Code's load limit). `off` or `0` turns it off; any other non-integer or `<= 0` keeps the default, announced on stderr. |
+| `MEMORY_CAP_MAX_BYTES` | Cap on the UTF-8 size of the whole index file. Default `25000` (under Claude Code's 25KB load limit). Same `off` and invalid-value handling as `MEMORY_CAP_MAX_LINES`. |
 | `MEMORY_CAP_MAX_ENTRIES` | Opt-in. Positive integer cap on the number of `- ` entries. Unset = off; non-numeric / `<= 0` = off, announced on stderr. |
 | `MEMORY_CAP_TOTAL_CHARS` | Opt-in. Positive integer cap on the summed length of all `- ` entries. Unset = off; non-numeric / `<= 0` = off, announced on stderr. |
 | `MEMORY_CAP_DECISION_LOG` | Opt-in. `on`/`1`/`true`/`yes` records every decision on the capped index (allow, deny, bypass) to a hash-chained decision log. Needs `MEMORY_CAP_LOG_DIR`. |
