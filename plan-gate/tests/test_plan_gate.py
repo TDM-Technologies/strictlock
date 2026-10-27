@@ -3753,6 +3753,67 @@ class WorktreeBypassValueTests(unittest.TestCase):
             encoding="utf-8")
         self.assertEqual(decision(self.edit()), "allow")
 
+    # --- scope: only a plan that would count for THIS session can block it ---
+
+    def two_worktrees(self):
+        main = self.root / "main"
+        wts = {}
+        for name in ("a", "b"):
+            (main / ".git" / "worktrees" / name).mkdir(parents=True)
+            wt = self.root / ("wt_" + name)
+            wt.mkdir()
+            (wt / ".git").write_text(
+                "gitdir: %s\n" % (main / ".git" / "worktrees" / name), encoding="utf-8")
+            wts[name] = wt
+        return wts
+
+    def write_plan(self, name, wt, extra=""):
+        (self.plans / name).write_text(
+            "---\nname: %s\nstatus: active\n%sallowed_paths:\n  - %s\n---\n"
+            % (name, extra, wt / "f.txt"), encoding="utf-8")
+
+    def test_another_worktrees_bad_bypass_plan_does_not_block_this_one(self):
+        wts = self.two_worktrees()
+        self.write_plan("a.md", wts["a"])
+        self.write_plan("b.md", wts["b"], "worktree_bypass: yes\n")
+        p = self.edit(wts["a"] / "f.txt", cwd=wts["a"])
+        self.assertEqual(decision(p), "allow", p.stdout)
+        # ...while the session that plan DOES belong to is told.
+        (self.plans / "a.md").unlink()
+        p = self.edit(wts["b"] / "f.txt", cwd=wts["b"])
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("worktree_bypass", self.reason(p))
+
+    def test_an_unapproved_bad_bypass_plan_does_not_block_anyone(self):
+        wts = self.two_worktrees()
+        logs = self.root / "logs"
+        env = dict(os.environ, PLAN_GATE_LOG_DIR=str(logs), PLAN_GATE_REQUIRE_APPROVAL="",
+                   _PLAN_GATE_TEST_PLANS_DIR=str(self.plans))
+        def approve(name):
+            return subprocess.run(
+                [sys.executable, str(GATE), "approve", str(self.plans / name), "--no-tty-check"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env, cwd=str(wts["a"]))
+        self.write_plan("a.md", wts["a"])
+        # b.md claims worktree A by path but nobody approved it
+        self.write_plan("b.md", wts["a"] / "sub", "worktree_bypass: yes\n")
+        self.assertEqual(approve("a.md").returncode, 0)
+        envx = {"PLAN_GATE_REQUIRE_APPROVAL": ""}
+        p = self.edit(wts["a"] / "f.txt", cwd=wts["a"], log_dir=logs, extra_env=envx)
+        self.assertEqual(decision(p), "allow", p.stdout)
+        # once approved it is in play, and it is refused
+        self.assertEqual(approve("b.md").returncode, 0)
+        p = self.edit(wts["a"] / "f.txt", cwd=wts["a"], log_dir=logs, extra_env=envx)
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("worktree_bypass", self.reason(p))
+
+    def test_plan_text_cannot_forge_the_quoted_marker(self):
+        # a line named like the parser's own bookkeeping changes nothing
+        self.plan('worktree_bypass: "true"\n_worktree_bypass_quoted:')
+        self.assertEqual(decision(self.edit()), "deny")
+        self.plan("worktree_bypass: true\n_worktree_bypass_quoted: yes")
+        self.assertEqual(decision(self.edit()), "allow")
+
     def test_the_plan_can_still_be_fixed_through_an_always_writable_plans_dir(self):
         self.plan("worktree_bypass: yes")
         p = self.edit(self.plans / "active.md",

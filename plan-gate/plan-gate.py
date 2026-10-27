@@ -2023,7 +2023,7 @@ def parse_frontmatter(text: str) -> dict:
     if not m:
         return {}
     body = m.group(1)
-    result: dict = {}
+    result = _Frontmatter()
     current_key: str | None = None
     for raw in body.splitlines():
         line = raw.rstrip()
@@ -2051,9 +2051,15 @@ def parse_frontmatter(text: str) -> dict:
                 if key == "worktree_bypass":
                     # _strip_scalar drops the quotes; remember whether there were
                     # any, because only the unquoted YAML boolean `true` is honored.
-                    result["_worktree_bypass_quoted"] = (
-                        value_raw.strip()[:1] in ("'", '"'))
+                    # Kept as an attribute, NOT a key: a plan line cannot set it.
+                    result.bypass_quoted = value_raw.strip()[:1] in ("'", '"')
     return result
+
+
+class _Frontmatter(dict):
+    """The parsed frontmatter (keys come from the plan file) plus parser-side facts
+    that the plan text must not be able to set."""
+    bypass_quoted = False
 
 
 def _bypass_state(fm: dict):
@@ -2061,41 +2067,63 @@ def _bypass_state(fm: dict):
     False (present but not the literal `true`: REFUSED, see invalid_bypass_plans).
     Only the unquoted, lowercase YAML boolean `true` is honored; `True`, `yes`, `1`,
     `on`, a quoted "true", `false`, and an empty value are all refused rather than
-    guessed at."""
+    guessed at.
+    ONE-LINER to accept an explicit `false` as "off" (pending a ruling): return None
+    instead of False when `fm["worktree_bypass"] == "false"` and not quoted."""
     if "worktree_bypass" not in fm:
         return None
-    if fm["worktree_bypass"] == "true" and not fm.get("_worktree_bypass_quoted"):
+    if fm["worktree_bypass"] == "true" and not getattr(fm, "bypass_quoted", False):
         return True
     return False
 
 
 def _bypass_shown(fm: dict) -> str:
     v = fm.get("worktree_bypass")
-    if fm.get("_worktree_bypass_quoted"):
+    if getattr(fm, "bypass_quoted", False):
         return '"%s"' % _safe_str(str(v), 40)
     return _safe_str(str(v) if isinstance(v, str) and v else "(empty)", 40)
 
 
-def invalid_bypass_plans() -> list[tuple[str, str]]:
-    """[(plan file name, shown value)] for every `status: active` plan in the plans
-    directory whose worktree_bypass is present but not the literal `true`. Such a
-    plan is not honored as a bypass AND the gate denies while it is active: a
-    mis-spelled opt-out must be fixed, not silently turned into a different scope
-    (it would otherwise change every session's single-active invariant)."""
+def _claims_by_absolute(fm: dict, worktree_root: Path) -> bool:
+    """True when one of the plan's ABSOLUTE allowed_paths resolves under the worktree."""
+    wt_norm = norm(str(worktree_root)) + "/"
+    for ap in fm.get("allowed_paths") or []:
+        if not Path(str(ap)).is_absolute():
+            continue
+        resolved = resolve_allowed_path(str(ap), repo_root=None, worktree_root=worktree_root)
+        if norm(resolved).startswith(wt_norm):
+            return True
+    return False
+
+
+def invalid_bypass_plans(worktree_root: Path | None = None) -> list[tuple[str, str]]:
+    """[(plan file name, shown value)] for the `status: active` plans whose
+    worktree_bypass is present but not the literal `true` AND that would count for
+    THIS session: approved (when approval is on) and, inside a worktree, claiming it
+    through an absolute allowed_paths entry. A plan that is unapproved, or that
+    belongs to another worktree, cannot affect this session, so it never blocks it.
+    Such a plan is not honored as a bypass and the gate denies while it is active: a
+    mis-spelled opt-out must be fixed, not silently turned into a different scope."""
     if PLANS_DIR is None or not PLANS_DIR.is_dir():
         return []
+    approval_required, _cfg_err = _approval_mode()
     bad: list[tuple[str, str]] = []
     for md in sorted(PLANS_DIR.glob("*.md")):
         try:
-            text = md.read_bytes().decode("utf-8", "replace").replace(
-                "\r\n", "\n").replace("\r", "\n")
+            raw = md.read_bytes()
         except OSError:
             continue
+        text = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
         fm = parse_frontmatter(text)
         if str(fm.get("status", "")).strip().lower() != "active":
             continue
-        if _bypass_state(fm) is False:
-            bad.append((md.name, _bypass_shown(fm)))
+        if _bypass_state(fm) is not False:
+            continue
+        if worktree_root is not None and not _claims_by_absolute(fm, worktree_root):
+            continue
+        if approval_required and _approved_set().get(md.name) != hashlib.sha256(raw).hexdigest():
+            continue
+        bad.append((md.name, _bypass_shown(fm)))
     return bad
 
 
@@ -4003,7 +4031,7 @@ def main() -> None:
     approval_required, approval_cfg_error = _approval_mode()
     if approval_cfg_error:
         gated_deny(approval_cfg_error, class_="approval_config")
-    bad_bypass = invalid_bypass_plans()
+    bad_bypass = invalid_bypass_plans(worktree_root)
     if bad_bypass:
         shown = "; ".join(f"{n}: worktree_bypass: {v}" for n, v in bad_bypass[:5])
         gated_deny(
