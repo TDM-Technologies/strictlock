@@ -3287,6 +3287,312 @@ def _collect_writer_targets(raw_segs: list[str], shell: str, has_cd: bool):
     return plan_targets, None, all_targets
 
 
+# --- file-writing commands: cp, mv, install, tee, sed -i, dd of= ---------------------
+# A command admitted through allowed_commands (`cp`, `sed`, ...) writes wherever its
+# arguments say, and used to bypass the scope-lease lookup that Edit/Write, redirects
+# and writer scripts get. The destination(s) of these six programs are extracted from
+# the command line and fed to the same lease lookup (and the log-directory
+# self-protection). A destination that cannot be determined statically (a variable,
+# glob or brace, a relative path after a `cd`, an option the parser does not know)
+# is "undetermined": with PLAN_GATE_REQUIRE_LEASE on that DENIES (fail closed); with
+# leases merely configured it is not checked. Only the lease/log checks apply here:
+# allowed_commands still decides whether the command may run at all, and these
+# destinations are NOT matched against allowed_paths.
+#
+# Not covered (still unchecked): touch, rm, truncate, ln, rsync, patch, chmod,
+# `git mv/checkout/...`, a `w` command inside a sed script, `perl -i`, `python -c`.
+_FC_PROGS = ("cp", "mv", "install", "tee", "sed", "dd")
+_FC_VALUE_SHORT = {"cp": "tS", "mv": "tS", "install": "tSmog"}
+_FC_VALUE_LONG = ("--target-directory", "--suffix", "--mode", "--owner", "--group",
+                  "--strip-program")
+_FC_BOOL_LONG = frozenset((
+    "--archive", "--attributes-only", "--copy-contents", "--dereference", "--force",
+    "--interactive", "--link", "--no-clobber", "--no-dereference", "--no-target-directory",
+    "--one-file-system", "--parents", "--recursive", "--remove-destination",
+    "--strip-trailing-slashes", "--symbolic-link", "--update", "--verbose", "--debug",
+    "--preserve", "--backup", "--reflink", "--sparse", "--context", "--compare",
+    "--directory", "--create-leading-dirs", "--preserve-timestamps", "--strip",
+    "--keep-directory-symlink", "--exchange", "--progress-bar", "--no-copy",
+))
+_FC_EXPANSION = "$`*?[{"
+_FC_RUNNER_RE = re.compile(r"(?<![\w./\\-])(?:cp|mv|install|tee|sed|dd)(?![\w-])")
+
+
+def _fc_expands(s: str) -> bool:
+    return any(ch in s for ch in _FC_EXPANSION)
+
+
+def _fc_base(src: str):
+    b = os.path.basename(src.rstrip("/"))
+    return None if b in ("", ".", "..") else b
+
+
+def _fc_cp_like(prog: str, args: list[str], has_cd: bool):
+    """(targets, problem) for cp / mv / install. mv's sources count as writes (they
+    are removed); cp's and install's are only read."""
+    short_val = _FC_VALUE_SHORT[prog]
+    positionals: list[str] = []
+    target_dir = None
+    no_target_dir = False
+    mkdirs = False
+    i, after_dd = 0, False
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if after_dd or not a.startswith("-") or a == "-":
+            positionals.append(a)
+            continue
+        if a == "--":
+            after_dd = True
+            continue
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name == "--target-directory":
+                if eq:
+                    target_dir = val
+                elif i < len(args):
+                    target_dir = args[i]
+                    i += 1
+                else:
+                    return [], "option --target-directory has no value"
+            elif name in _FC_VALUE_LONG:
+                if not eq:
+                    i += 1
+            elif name == "--no-target-directory":
+                no_target_dir = True
+            elif name == "--directory":
+                mkdirs = True
+            elif eq or name in _FC_BOOL_LONG:
+                pass
+            else:
+                return [], f"unrecognized option {a[:40]!r}"
+            continue
+        j = 1
+        while j < len(a):
+            ch = a[j]
+            if ch in short_val:
+                val = a[j + 1:]
+                if not val:
+                    if i >= len(args):
+                        return [], f"option -{ch} has no value"
+                    val = args[i]
+                    i += 1
+                if ch == "t":
+                    target_dir = val
+                break
+            if ch == "T":
+                no_target_dir = True
+            elif ch == "d" and prog == "install":
+                mkdirs = True
+            j += 1
+    for tok in positionals + ([target_dir] if target_dir is not None else []):
+        if _fc_expands(tok):
+            return [], f"a variable, glob or brace in {tok[:60]!r}"
+        if not tok.strip():
+            return [], "an empty path argument"
+
+    def home(p):
+        return os.path.expanduser(p) if p.startswith("~") else p
+
+    positionals = [home(p) for p in positionals]
+    if target_dir is not None:
+        target_dir = home(target_dir)
+    if mkdirs:
+        return (positionals, None) if positionals else ([], "install -d without a directory")
+
+    def into(dest, sources):
+        out = []
+        for s in sources:
+            b = _fc_base(s)
+            if b is None:
+                return None
+            out.append(dest.rstrip("/") + "/" + b)
+        return out
+
+    if target_dir is not None:
+        if not positionals:
+            return [], f"{prog} -t without a source"
+        targets = into(target_dir, positionals)
+        if targets is None:
+            return [], "a source named . or .."
+        sources = positionals
+    else:
+        if len(positionals) < 2:
+            return [], f"{prog} needs a source and a destination"
+        sources, dest = positionals[:-1], positionals[-1]
+        is_dir = dest.endswith("/") or len(sources) > 1
+        if not is_dir and not no_target_dir:
+            if not os.path.isabs(dest):
+                if has_cd:
+                    return [], (f"{dest!r} is relative and the command changes "
+                                f"directory, so whether it is a directory is unknown")
+                try:
+                    probe = os.path.join(os.getcwd(), dest)
+                except OSError:
+                    return [], "the working directory cannot be determined"
+            else:
+                probe = dest
+            is_dir = os.path.isdir(probe)
+        if is_dir and not no_target_dir:
+            targets = into(dest, sources)
+            if targets is None:
+                return [], "a source named . or .."
+        else:
+            targets = [dest]
+    if prog == "mv":
+        targets = targets + sources
+    return targets, None
+
+
+def _fc_tee(args: list[str]):
+    out, after_dd = [], False
+    for a in args:
+        if not after_dd and a == "--":
+            after_dd = True
+        elif after_dd or not a.startswith("-") or a == "-":
+            if _fc_expands(a):
+                return [], f"a variable, glob or brace in {a[:60]!r}"
+            out.append(os.path.expanduser(a) if a.startswith("~") else a)
+    return out, None
+
+
+def _fc_sed(args: list[str]):
+    """Files `sed -i` edits. Assumes GNU option syntax (`-i[SUFFIX]`,
+    `--in-place[=SUFFIX]`); BSD's separate suffix word is recognized only as an
+    empty string (`-i ''`), which is ambiguous between the flavors -> undetermined."""
+    in_place = have_script = ambiguous = False
+    positionals: list[str] = []
+    i, after_dd = 0, False
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if after_dd or not a.startswith("-") or a == "-":
+            positionals.append(a)
+            continue
+        if a == "--":
+            after_dd = True
+            continue
+        if a.startswith("--"):
+            name, eq, _val = a.partition("=")
+            if name == "--in-place":
+                in_place = True
+            elif name in ("--expression", "--file"):
+                have_script = True
+                if not eq:
+                    i += 1
+            elif name == "--line-length" and not eq:
+                i += 1
+            continue
+        j = 1
+        while j < len(a):
+            ch = a[j]
+            if ch == "i":
+                in_place = True
+                if a == "-i" and i < len(args) and args[i] == "":
+                    ambiguous = True
+                break
+            if ch in "efl":
+                if ch != "l":
+                    have_script = True
+                if j == len(a) - 1:
+                    i += 1
+                break
+            j += 1
+    if not in_place:
+        return [], None
+    if ambiguous:
+        return [], "`sed -i ''` (a separate empty suffix word) is read differently by GNU and BSD sed"
+    files = positionals if have_script else positionals[1:]
+    for f in files:
+        if _fc_expands(f):
+            return [], f"a variable, glob or brace in {f[:60]!r}"
+    return [os.path.expanduser(f) if f.startswith("~") else f for f in files], None
+
+
+def _fc_dd(args: list[str]):
+    out = []
+    for a in args:
+        if a.startswith("of="):
+            v = a[3:]
+            if not v.strip():
+                return [], "an empty of= operand"
+            if _fc_expands(v):
+                return [], f"a variable, glob or brace in {v[:60]!r}"
+            out.append(os.path.expanduser(v) if v.startswith("~") else v)
+    return out, None
+
+
+def _collect_file_command_targets(raw_segs: list[str], shell: str, has_cd: bool):
+    """Destinations written by cp / mv / install / tee / sed -i / dd of= among
+    `raw_segs`. Returns (log_reason, lease_targets, undetermined): log_reason is a
+    deny reason when a destination is under PLAN_GATE_LOG_DIR (else None);
+    lease_targets are the absolute destinations for the lease lookup (not
+    including /dev/null-style sinks); undetermined lists a reason per command whose
+    destination cannot be determined."""
+    token_segs: list[list[str]] = []
+    undetermined: list[str] = []
+    for raw in raw_segs:
+        try:
+            if shell == "ps":
+                token_segs.extend(_tokenize_ps(raw))
+            else:
+                token_segs.append(shlex.split(raw))
+        except ValueError:
+            if _FC_RUNNER_RE.search(raw.lower()):
+                undetermined.append(f"cannot tokenize {raw[:80]!r}")
+    if shell == "ps":
+        has_cd = has_cd or any(t and t[0].lower() in _PS_CD_WORDS for t in token_segs)
+    lease_targets: list[str] = []
+    for toks in token_segs:
+        i = _program_index(toks)
+        if i >= len(toks):
+            continue
+        prog = _basename_lc(toks[i])
+        if prog.endswith(".exe"):
+            prog = prog[:-4]
+        args = toks[i + 1:]
+        if prog in _RUNNER_PROGS:
+            if _FC_RUNNER_RE.search(" ".join(toks[i + 1:]).lower()):
+                undetermined.append(
+                    f"`{prog}` runs a command line that mentions one of "
+                    f"{'/'.join(_FC_PROGS)}")
+            continue
+        if prog not in _FC_PROGS:
+            continue
+        if prog in ("cp", "mv", "install"):
+            dests, why = _fc_cp_like(prog, args, has_cd)
+        elif prog == "tee":
+            dests, why = _fc_tee(args)
+        elif prog == "sed":
+            dests, why = _fc_sed(args)
+        else:
+            dests, why = _fc_dd(args)
+        if why:
+            undetermined.append(f"{prog}: {why}")
+            continue
+        for d in dests:
+            kind, v = _classify_redirect(d, has_cd, f"{prog} destination")
+            if kind == "null":
+                continue
+            if kind == "error":
+                undetermined.append(f"{prog}: {v.split(': ', 1)[-1][:160]}")
+            elif kind == "log":
+                return v, lease_targets, undetermined
+            else:
+                lease_targets.append(v)
+    return None, lease_targets, undetermined
+
+
+def _undetermined_deny_reason(undetermined: list[str]) -> str:
+    return (
+        "plan-gate: PLAN_GATE_REQUIRE_LEASE is on, but where this command writes "
+        f"cannot be determined ({'; '.join(undetermined[:3])}), so its scope-lease "
+        "cannot be checked. Failing closed. Name each destination literally (no "
+        "variables, globs or braces; an absolute path after any `cd`), or use "
+        "Edit/Write. " + _BYPASS_HOWTO
+    )
+
+
 def _writer_cfg_deny_reason() -> str:
     return (
         f"plan-gate: PLAN_GATE_WRITER_SCRIPTS is malformed ({_WRITER_CFG_ERROR}). "
@@ -3541,7 +3847,15 @@ def main() -> None:
             all_segs, "bash", has_cd)
         if w_problem:
             gated_deny(w_problem[0], class_=w_problem[1])
-        lease_reason = _extra_write_target_checks(lease_targets + w_all)
+        # cp / mv / install / tee / sed -i / dd of=: destinations get the same
+        # log-dir protection and lease lookup as a redirect target.
+        fc_log, fc_targets, fc_undet = _collect_file_command_targets(
+            all_segs, "bash", has_cd)
+        if fc_log:
+            gated_deny(fc_log, class_="log_self_protect")
+        if fc_undet and _env_truthy("PLAN_GATE_REQUIRE_LEASE"):
+            gated_deny(_undetermined_deny_reason(fc_undet), class_="scope_lease")
+        lease_reason = _extra_write_target_checks(lease_targets + w_all + fc_targets)
         if lease_reason:
             gated_deny(lease_reason, class_="scope_lease")
         # Pre-plan read-only bypass: a compound is read-only only if EVERY
@@ -3619,7 +3933,12 @@ def main() -> None:
             ps_segs, "ps", False)
         if w_problem:
             gated_deny(w_problem[0], class_=w_problem[1])
-        lease_reason = _extra_write_target_checks(ps_w_all)
+        fc_log, fc_targets, fc_undet = _collect_file_command_targets(ps_segs, "ps", False)
+        if fc_log:
+            gated_deny(fc_log, class_="log_self_protect")
+        if fc_undet and _env_truthy("PLAN_GATE_REQUIRE_LEASE"):
+            gated_deny(_undetermined_deny_reason(fc_undet), class_="scope_lease")
+        lease_reason = _extra_write_target_checks(ps_w_all + fc_targets)
         if lease_reason:
             gated_deny(lease_reason, class_="scope_lease")
 

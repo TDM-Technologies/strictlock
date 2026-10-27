@@ -3356,6 +3356,223 @@ class ApprovalTests(unittest.TestCase):
         self.assertLess(time.time() - t0, 10.0)
 
 
+class FileCommandLeaseTests(unittest.TestCase):
+    """cp / mv / install / tee / sed -i / dd of= admitted through allowed_commands
+    are looked up in the scope-lease like any other write; with
+    PLAN_GATE_REQUIRE_LEASE a destination that cannot be determined denies."""
+
+    PROGS = ("cp", "mv", "install", "tee", "sed", "dd", "env", "bash", "xargs", "cd")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name).resolve()
+        self.root = root
+        self.plans = root / "plans"
+        self.plans.mkdir()
+        self.repo = root / "repo"
+        self.repo.mkdir()
+        _git(self.repo, "init", "-q")
+        _git(self.repo, "config", "user.email", "t@example.com")
+        _git(self.repo, "config", "user.name", "T")
+        (self.repo / "seed.txt").write_text("x\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "seed")
+        self.leased = self.repo / "leased.txt"
+        self.free = self.repo / "free.txt"
+        self.src = self.repo / "src.txt"
+        self.logs = root / "logs"
+        (self.plans / "active.md").write_text(
+            "---\nname: fc\nstatus: active\nallowed_paths:\n  - %s\n  - %s\n"
+            "allowed_commands:\n%s---\n" % (
+                self.leased, self.free, "".join("  - %s\n" % c for c in self.PROGS)),
+            encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def lease(self, owner, *paths):
+        env = dict(os.environ, SCOPE_LEASE_OWNER=owner)
+        args = [sys.executable, str(SCOPE_LEASE), "acquire", "--root", str(self.repo),
+                "--source", "paths", "--lock-id", "lock-" + owner, "--paths"]
+        args += [str(p) for p in paths]
+        proc = subprocess.run(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def run_bash(self, cmd, owner="bob", leases=True, **more):
+        e = {"PLAN_GATE_SCOPE_LEASE": str(SCOPE_LEASE) if leases else "",
+             "SCOPE_LEASE_OWNER": owner, "SCOPE_LEASE_LOCK_ID": "",
+             "PLAN_GATE_REQUIRE_LEASE": ""}
+        e.update(more)
+        return run_gate({"tool_name": "Bash", "tool_input": {"command": cmd.replace("\\", "/")}},
+                        self.plans, cwd=self.repo, extra_env=e)
+
+    def reason(self, proc):
+        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def p(self, path):
+        return Path(path).as_posix()
+
+    def assertHeld(self, cmd, **kw):
+        proc = self.run_bash(cmd, **kw)
+        self.assertEqual(decision(proc), "deny", "%s -> %s" % (cmd, proc.stdout))
+        self.assertIn("leased by another agent", self.reason(proc), cmd)
+        self.assertIn("alice", self.reason(proc), cmd)
+
+    def test_each_program_is_denied_when_its_destination_is_held_by_another_agent(self):
+        self.lease("alice", self.leased)
+        L, S = self.p(self.leased), self.p(self.src)
+        for cmd in (
+            "cp %s %s" % (S, L),
+            "cp -f -- %s %s" % (S, L),
+            "cp -rp %s %s" % (S, L),
+            "cp --force --target-directory=%s %s" % (self.p(self.repo),
+                                                    self.p(self.root / "x" / "leased.txt")),
+            "cp -t %s %s" % (self.p(self.repo), self.p(self.root / "x" / "leased.txt")),
+            "cp -vt%s %s" % (self.p(self.repo), self.p(self.root / "x" / "leased.txt")),
+            "cp %s %s/" % (self.p(self.root / "x" / "leased.txt"), self.p(self.repo)),
+            "cp %s %s %s" % (S, self.p(self.root / "x" / "leased.txt"), self.p(self.repo)),
+            "mv %s %s" % (S, L),
+            "mv %s %s" % (L, self.p(self.free)),            # the SOURCE of a mv is written
+            "mv -T %s %s" % (S, L),
+            "install -m 644 %s %s" % (S, L),
+            "install -D %s %s" % (S, L),
+            "install -d %s" % L,
+            "tee %s" % L,
+            "tee -a %s %s" % (self.p(self.free), L),
+            "echo hi | tee -- %s" % L,
+            "sed -i s/a/b/ %s" % L,
+            "sed -i.bak s/a/b/ %s" % L,
+            "sed --in-place=.bak -e s/a/b/ %s" % L,
+            "sed -n -i -e p %s" % L,
+            "sed -ni p %s" % L,
+            "sed -E -i -f script.sed %s" % L,
+            "dd if=/dev/zero of=%s bs=1 count=1" % L,
+            "dd of=%s" % L,
+            "env FOO=1 cp %s %s" % (S, L),
+            "echo a && cp %s %s" % (S, L),
+            "cp %s %s/sub/../leased.txt" % (S, self.p(self.repo)),
+        ):
+            self.assertHeld(cmd)
+
+    def test_the_same_commands_on_a_free_path_are_allowed_by_the_plan(self):
+        self.lease("alice", self.leased)
+        F, S = self.p(self.free), self.p(self.src)
+        for cmd in ("cp %s %s" % (S, F), "mv %s %s" % (S, F), "tee %s" % F,
+                    "sed -i s/a/b/ %s" % F, "install %s %s" % (S, F),
+                    "dd if=/dev/zero of=%s" % F):
+            proc = self.run_bash(cmd)
+            self.assertEqual(decision(proc), "allow", "%s -> %s" % (cmd, proc.stdout))
+
+    def test_a_lease_held_by_me_is_fine(self):
+        self.lease("bob", self.leased)
+        proc = self.run_bash("cp %s %s" % (self.p(self.src), self.p(self.leased)))
+        self.assertEqual(decision(proc), "allow", proc.stdout)
+
+    def test_non_writing_forms_are_not_lease_checked(self):
+        self.lease("alice", self.leased)
+        L = self.p(self.leased)
+        for cmd in ("sed s/a/b/ %s" % L,                 # no -i: output to stdout
+                    "sed -n p %s" % L,
+                    "cp %s %s" % (L, self.p(self.free)),  # leased file only READ
+                    "tee",                                # stdout only
+                    "dd if=%s of=/dev/null" % L,
+                    "dd if=%s" % L,
+                    "tee /dev/null"):
+            proc = self.run_bash(cmd)
+            self.assertEqual(decision(proc), "allow", "%s -> %s" % (cmd, proc.stdout))
+
+    def test_directory_destination_resolves_to_the_file_written_inside_it(self):
+        self.lease("alice", self.leased)
+        sub = self.repo / "sub"
+        sub.mkdir()
+        # `cp x repo` (an existing directory, no trailing slash) writes repo/x
+        other = self.p(self.root / "x" / "leased.txt")
+        self.assertHeld("cp %s %s" % (other, self.p(self.repo)))
+        # a file destination that does not exist is the file itself
+        proc = self.run_bash("cp %s %s" % (other, self.p(sub / "new.txt")))
+        self.assertNotEqual(decision(proc), "deny", proc.stdout)
+
+    def test_without_a_lease_setup_nothing_changes(self):
+        self.lease("alice", self.leased)
+        proc = self.run_bash("cp %s %s" % (self.p(self.src), self.p(self.leased)), leases=False)
+        self.assertEqual(decision(proc), "allow", proc.stdout)
+
+    # --- strict mode ---
+
+    def test_require_lease_denies_an_unleased_destination(self):
+        for cmd in ("cp %s %s" % (self.p(self.src), self.p(self.free)),
+                    "tee %s" % self.p(self.free),
+                    "sed -i s/a/b/ %s" % self.p(self.free),
+                    "dd of=%s" % self.p(self.free)):
+            proc = self.run_bash(cmd, PLAN_GATE_REQUIRE_LEASE="on")
+            self.assertEqual(decision(proc), "deny", cmd)
+            self.assertIn("acquire", self.reason(proc), cmd)
+        self.lease("bob", self.free)
+        proc = self.run_bash("cp %s %s" % (self.p(self.src), self.p(self.free)),
+                             PLAN_GATE_REQUIRE_LEASE="on")
+        self.assertEqual(decision(proc), "allow", proc.stdout)
+
+    def test_require_lease_denies_when_the_destination_cannot_be_determined(self):
+        F = self.p(self.free)
+        cmds = (
+            "cp %s $DEST" % self.p(self.src),
+            "cp %s/*.txt %s/" % (self.p(self.repo), F),
+            "cp %s %s/{a,b}" % (self.p(self.src), self.p(self.repo)),
+            "tee $F",
+            "tee %s/*" % self.p(self.repo),
+            "sed -i s/a/b/ %s/*.py" % self.p(self.repo),
+            "sed -i '' s/a/b/ %s" % F,
+            "dd of=$X",
+            "mv %s $D" % F,
+            "cp --frobnicate %s %s" % (self.p(self.src), F),
+            "cp %s" % F,
+            "cp -t",
+            "cd sub && cp a b",
+            "cp . %s/" % self.p(self.repo),
+            "bash -c 'cp a b'",
+            "xargs cp -t dest",
+        )
+        for cmd in cmds:
+            proc = self.run_bash(cmd, PLAN_GATE_REQUIRE_LEASE="on")
+            self.assertEqual(decision(proc), "deny", "%s -> %s" % (cmd, proc.stdout))
+            self.assertIn("cannot be determined", self.reason(proc), cmd)
+            self.assertIn("PLAN_GATE_BYPASS", self.reason(proc), cmd)
+
+    def test_undetermined_destination_without_require_is_not_blocked_by_the_lease(self):
+        # leases configured, not required: only a destination that IS found and held denies
+        for cmd in ("cp %s $DEST" % self.p(self.src), "tee $F", "dd of=$X"):
+            proc = self.run_bash(cmd)
+            self.assertEqual(decision(proc), "allow", "%s -> %s" % (cmd, proc.stdout))
+
+    def test_a_destination_under_the_log_dir_is_denied_even_without_leases(self):
+        proc = self.run_bash("cp %s %s/plan-gate-decisions.log" % (self.p(self.src), self.p(self.logs)),
+                             leases=False, PLAN_GATE_LOG_DIR=str(self.logs),
+                             PLAN_GATE_REQUIRE_APPROVAL="off")
+        self.assertEqual(decision(proc), "deny")
+        self.assertIn("PLAN_GATE_LOG_DIR", self.reason(proc))
+        for cmd in ("tee %s/x" % self.p(self.logs), "dd of=%s/x" % self.p(self.logs),
+                    "sed -i s/a/b/ %s/x" % self.p(self.logs)):
+            proc = self.run_bash(cmd, leases=False, PLAN_GATE_LOG_DIR=str(self.logs),
+                                 PLAN_GATE_REQUIRE_APPROVAL="off")
+            self.assertEqual(decision(proc), "deny", cmd)
+
+    def test_commands_not_admitted_by_the_plan_are_still_denied(self):
+        proc = self.run_bash("rm %s" % self.p(self.free))
+        self.assertEqual(decision(proc), "deny")
+        self.assertNotIn("leased", self.reason(proc))
+
+    def test_powershell_sed_destination_is_lease_checked(self):
+        self.lease("alice", self.leased)
+        e = {"PLAN_GATE_SCOPE_LEASE": str(SCOPE_LEASE), "SCOPE_LEASE_OWNER": "bob",
+             "SCOPE_LEASE_LOCK_ID": "", "PLAN_GATE_REQUIRE_LEASE": ""}
+        proc = run_gate({"tool_name": "PowerShell",
+                         "tool_input": {"command": "sed -i s/a/b/ '%s'" % self.leased}},
+                        self.plans, cwd=self.repo, extra_env=e)
+        self.assertEqual(decision(proc), "deny", proc.stdout)
+        self.assertIn("alice", self.reason(proc))
+
+
 class ApprovalClassTests(unittest.TestCase):
     """An explicit `permissionDecision: "allow"` skips Claude Code's own permission
     prompt, so the gate emits it only when the active plan was checked and approved
