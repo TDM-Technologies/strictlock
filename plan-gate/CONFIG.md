@@ -148,7 +148,7 @@ self-protection** to them, exactly as for a `>` redirect:
 | `cp`, `install` | the last argument; or `DIR/<basename of each source>` when it is an existing directory, ends in `/`, there are several sources, or `-t DIR` / `--target-directory` is used; `install -d` : every argument |
 | `mv` | the same destinations, **and each source** (a move removes it) |
 | `tee` | every file argument (`/dev/null` and friends are ignored; no file argument writes only stdout) |
-| `sed` | the file arguments, only when `-i` / `-i SUFFIX` attached / `--in-place[=SUFFIX]` is present; without it `sed` writes to stdout and is not a write |
+| `sed` | the file arguments that exist and are not directories, only when `-i` / `-i SUFFIX` / `-I SUFFIX` / `--in-place[=SUFFIX]` is present; without it `sed` writes to stdout and is not a write. Also the backup copy `<file><suffix>` for a non-empty suffix (it does not exist yet, so it is not filtered) |
 | `dd` | every `of=` operand |
 
 With `PLAN_GATE_REQUIRE_LEASE=on`, a destination that **cannot be determined statically**
@@ -163,9 +163,20 @@ as are typos and options from other versions; the full names `--target-directory
 options. `sed` is read **both ways**, GNU and BSD (macOS), and the destinations are the union,
 because the hook's PATH can differ from the agent's shell and so cannot say which `sed` runs:
 GNU `-i[SUFFIX]` / `--in-place`, `-l N`; BSD `-i SUFFIX` and `-I SUFFIX` (the next word is the
-suffix) and a value-less `-l`. So `sed -i '' s/a/b/ f` reports `f` and also `s/a/b/` (a
-superset, which can only deny more); `sed -I '' ...` and `sed -l -i '' ...` are in-place edits.
-If either reading does not parse (an unknown long option, an unknown short option) the
+suffix) and a value-less `-l`. `sed -I '' ...` and `sed -l -i '' ...` are in-place edits. A
+reading can report words that are not files (`sed -i '' s/a/b/ f` reads the script `s/a/b/`
+as a file under GNU rules), so a reported name is kept only if `sed -i` could write it: it
+**exists** and is **not a directory**. `sed -i` cannot create a file or edit a directory, so
+nonexistent names and directories are dropped. A **symlink is always kept**, whatever it
+points at (GNU `sed -i` replaces a symlink with a regular file). Relative names resolve against
+the working directory; after a `cd` in the same command they cannot be resolved and are kept
+(so the destination stays undetermined, as before). A name containing a variable, glob or
+brace is undetermined and is checked before this filter, so a script word such as `s/x*/y/`
+in the `-i ''` idiom also makes the destination undetermined. The backup copy `<file><suffix>`
+(`-i.bak`, `--in-place=.bak`, BSD `-i .bak` / `-I .bak`; with a bare GNU `-i -e ...` the BSD
+reading's suffix is `-e`) is reported to the lease lookup as well; under
+`PLAN_GATE_REQUIRE_LEASE` it needs its own lease. An empty suffix writes no backup, and a
+suffix with `*` is undetermined. If either reading does not parse (an unknown long option, an unknown short option) the
 destination is undetermined. With leases merely configured (not required), an undetermined
 destination is not checked, as before; a determined one is looked up and a path held by
 another agent denies.

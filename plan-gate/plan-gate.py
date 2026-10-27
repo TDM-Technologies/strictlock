@@ -3552,6 +3552,7 @@ def _fc_sed_parse(args: list[str], bsd: bool):
     both readings, and exact GNU long names are understood in both."""
     in_place = have_script = False
     positionals: list[str] = []
+    suffixes: list[str] = []
     i, after_dd = 0, False
     while i < len(args):
         a = args[i]
@@ -3566,6 +3567,8 @@ def _fc_sed_parse(args: list[str], bsd: bool):
             name, eq, _val = a.partition("=")
             if name == "--in-place":
                 in_place = True
+                if eq and _val:
+                    suffixes.append(_val)
             elif name in ("--expression", "--file"):
                 have_script = True
                 if not eq:
@@ -3581,8 +3584,12 @@ def _fc_sed_parse(args: list[str], bsd: bool):
             ch = a[j]
             if ch in "iI":
                 in_place = True
-                if (bsd or ch == "I") and j == len(a) - 1:
-                    i += 1  # BSD: the next word is the suffix
+                rest = a[j + 1:]
+                if rest:
+                    suffixes.append(rest)       # attached: -i.bak
+                elif (bsd or ch == "I") and i < len(args):
+                    suffixes.append(args[i])    # BSD: the next word is the suffix
+                    i += 1
                 break
             if ch in "efl" and not (ch == "l" and bsd):
                 if ch != "l":
@@ -3593,25 +3600,62 @@ def _fc_sed_parse(args: list[str], bsd: bool):
             if ch not in _FC_SED_SHORT and ch != "l":
                 return None
             j += 1
-    return in_place, (positionals if have_script else positionals[1:])
+    return in_place, (positionals if have_script else positionals[1:]), suffixes
 
 
-def _fc_sed(args: list[str]):
-    """Files `sed -i` / `-I` edits. Which sed runs (GNU or BSD) cannot be known from
+def _fc_sed_can_write(path: str, has_cd: bool) -> bool:
+    """Could `sed -i` write to this name? It edits an existing file (or replaces a
+    symlink with a regular file); it cannot create a file or edit a directory. So a
+    name that does not exist, or is a directory, is not a destination (the BSD/GNU
+    readings report the script word, `''`, and so on as files). A symlink is kept
+    whatever it points at. A name that cannot be resolved here (relative after a
+    `cd`, no working directory) is kept, so the caller's undetermined handling
+    applies."""
+    p = os.path.expanduser(path) if path.startswith("~") else path
+    if not os.path.isabs(p):
+        if has_cd:
+            return True
+        try:
+            p = os.path.join(os.getcwd(), p)
+        except OSError:
+            return True
+    try:
+        if os.path.islink(p):
+            return True
+        if not os.path.lexists(p):
+            return False
+        return not os.path.isdir(p)
+    except (OSError, ValueError):
+        return True
+
+
+def _fc_sed(args: list[str], has_cd: bool = False):
+    """Files `sed -i` / `-I` edits, plus the backup copy it writes (`<file><suffix>`;
+    an empty suffix means no backup). Which sed runs (GNU or BSD) cannot be known from
     the hook (its PATH can differ from the agent's shell), so the command line is read
-    BOTH ways and the destinations are the UNION: it can only over-include, which only
-    errs toward denying. If either reading does not parse, the destination is
-    undetermined."""
+    BOTH ways and the destinations are the UNION. A reported name that sed could not
+    write (it does not exist, or it is a directory: see _fc_sed_can_write) is dropped,
+    which leaves the over-included script word out. If either reading does not parse,
+    the destination is undetermined."""
     readings = [_fc_sed_parse(args, bsd) for bsd in (False, True)]
     if any(r is None for r in readings):
         return [], "an unrecognized sed option (a typo, a GNU abbreviation such as --expr=, or another version's)"
     files: list[str] = []
-    for in_place, fs in readings:
-        if in_place:
-            files.extend(f for f in fs if f not in files)
-    for f in files:
-        if _fc_expands(f):
-            return [], f"a variable, glob or brace in {f[:60]!r}"
+    for in_place, fs, suffixes in readings:
+        if not in_place:
+            continue
+        for f in fs:
+            if _fc_expands(f):
+                return [], f"a variable, glob or brace in {f[:60]!r}"
+            if not _fc_sed_can_write(f, has_cd):
+                continue
+            if f not in files:
+                files.append(f)
+            for suf in suffixes:
+                if "*" in suf or _fc_expands(suf):
+                    return [], f"a backup suffix pattern {suf[:40]!r}"
+                if suf and f + suf not in files:
+                    files.append(f + suf)
     return [os.path.expanduser(f) if f.startswith("~") else f for f in files], None
 
 
@@ -3663,7 +3707,6 @@ def _collect_file_command_targets(raw_segs: list[str], shell: str, has_cd: bool)
                     f"`{prog}` runs a command line that mentions one of "
                     f"{'/'.join(_FC_PROGS)}")
             continue
-        gnu_alias = prog in _FC_ALIASES
         prog = _FC_ALIASES.get(prog, prog)
         if prog not in _FC_PROGS:
             continue
@@ -3672,7 +3715,7 @@ def _collect_file_command_targets(raw_segs: list[str], shell: str, has_cd: bool)
         elif prog == "tee":
             dests, why = _fc_tee(args)
         elif prog == "sed":
-            dests, why = _fc_sed(args)
+            dests, why = _fc_sed(args, has_cd)
         else:
             dests, why = _fc_dd(args)
         if why:

@@ -3393,6 +3393,9 @@ class FileCommandLeaseTests(unittest.TestCase):
         self.free = self.repo / "free.txt"
         self.src = self.repo / "src.txt"
         self.logs = root / "logs"
+        # `sed -i` only edits files that exist, so the destinations must
+        for f in (self.leased, self.free):
+            f.write_text("a\n")
         (self.plans / "active.md").write_text(
             "---\nname: fc\nstatus: active\nallowed_paths:\n  - %s\n  - %s\n"
             "allowed_commands:\n%s---\n" % (
@@ -3534,6 +3537,36 @@ class FileCommandLeaseTests(unittest.TestCase):
         proc = self.run_bash("cp %s %s" % (other, self.p(sub / "new.txt")))
         self.assertNotEqual(decision(proc), "deny", proc.stdout)
 
+    def test_macos_sed_idiom_under_require_lease(self):
+        L = self.p(self.leased)
+        # I hold the lease: the macOS `sed -i '' s/a/b/ file` is allowed, not tripped by
+        # the script word the GNU reading reports as a file
+        self.lease("bob", self.leased)
+        for cmd in ("sed -i '' s/a/b/ %s" % L, "sed -I '' s/a/b/ %s" % L,
+                    "sed -i s/a/b/ %s" % L):
+            proc = self.run_bash(cmd, PLAN_GATE_REQUIRE_LEASE="on")
+            self.assertEqual(decision(proc), "allow", "%s -> %s" % (cmd, proc.stdout))
+
+    def test_macos_sed_idiom_on_a_file_held_by_another_is_denied(self):
+        self.lease("alice", self.leased)
+        L = self.p(self.leased)
+        for require in ("", "on"):
+            self.assertHeld("sed -i '' s/a/b/ %s" % L, PLAN_GATE_REQUIRE_LEASE=require)
+
+    def test_sed_backup_copy_needs_its_own_lease_under_require(self):
+        L = self.p(self.leased)
+        self.lease("bob", self.leased)
+        proc = self.run_bash("sed -i.bak s/a/b/ %s" % L, PLAN_GATE_REQUIRE_LEASE="on")
+        self.assertEqual(decision(proc), "deny", proc.stdout)
+        self.assertIn("leased.txt.bak", self.reason(proc))
+        self.assertIn("acquire", self.reason(proc))
+        # held by someone else: the backup path is checked too
+        self.lease("alice", Path(L + ".bak"))
+        self.assertHeld("sed -i.bak s/a/b/ %s" % L)
+        # an empty suffix writes no backup
+        proc = self.run_bash("sed -i '' s/a/b/ %s" % L, PLAN_GATE_REQUIRE_LEASE="on")
+        self.assertEqual(decision(proc), "allow", proc.stdout)
+
     def test_without_a_lease_setup_nothing_changes(self):
         self.lease("alice", self.leased)
         proc = self.run_bash("cp %s %s" % (self.p(self.src), self.p(self.leased)), leases=False)
@@ -3600,6 +3633,8 @@ class FileCommandLeaseTests(unittest.TestCase):
                              PLAN_GATE_REQUIRE_APPROVAL="off")
         self.assertEqual(decision(proc), "deny")
         self.assertIn("PLAN_GATE_LOG_DIR", self.reason(proc))
+        self.logs.mkdir(exist_ok=True)
+        (self.logs / "x").write_text("x")   # sed -i only edits what exists
         for cmd in ("tee %s/x" % self.p(self.logs), "dd of=%s/x" % self.p(self.logs),
                     "sed -i s/a/b/ %s/x" % self.p(self.logs)):
             proc = self.run_bash(cmd, leases=False, PLAN_GATE_LOG_DIR=str(self.logs),
@@ -3788,8 +3823,75 @@ class FileCommandParserTests(unittest.TestCase):
     def setUpClass(cls):
         cls.g = _load_gate_module()
 
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.d = os.path.realpath(self._tmp.name)
+        self.f = os.path.join(self.d, "f.txt")
+        with open(self.f, "w") as fh:
+            fh.write("a\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_sed_drops_words_that_are_not_existing_non_directory_files(self):
+        sub = os.path.join(self.d, "sub")
+        os.mkdir(sub)
+        # the macOS idiom: GNU reads `s/a/b/` (and '') as files; they do not exist
+        targets, why = self.g._fc_sed(["-i", "", "s/a/b/", self.f])
+        self.assertIsNone(why)
+        self.assertEqual(targets, [self.f])
+        # a directory is not editable in place; a missing file cannot be created
+        self.assertEqual(self.g._fc_sed(["-i", "", "s/a/b/", sub]), ([], None))
+        self.assertEqual(self.g._fc_sed(["-i", "", "s/a/b/", os.path.join(self.d, "nope")]),
+                         ([], None))
+
+    def test_sed_keeps_symlinks_whatever_they_point_at(self):
+        link_file = os.path.join(self.d, "lnk")
+        link_dangling = os.path.join(self.d, "dangling")
+        link_dir = os.path.join(self.d, "dlnk")
+        try:
+            os.symlink(self.f, link_file)
+            os.symlink(os.path.join(self.d, "missing"), link_dangling)
+            os.symlink(self.d, link_dir)
+        except (OSError, NotImplementedError, AttributeError) as exc:
+            raise unittest.SkipTest("cannot create symlinks here: %s" % exc)
+        for link in (link_file, link_dangling, link_dir):
+            targets, why = self.g._fc_sed(["-i", "", "s/a/b/", link])
+            self.assertIsNone(why)
+            self.assertEqual(targets, [link], link)
+
+    def test_sed_relative_names_resolve_against_the_cwd_unless_a_cd_intervenes(self):
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.d)
+            self.assertEqual(self.g._fc_sed(["-i", "", "s/a/b/", "f.txt"]), (["f.txt"], None))
+            self.assertEqual(self.g._fc_sed(["-i", "", "s/a/b/", "nope.txt"]), ([], None))
+            # after a `cd` a relative name cannot be resolved: kept (the caller then
+            # reports it as undetermined, as before)
+            targets, _ = self.g._fc_sed(["-i", "", "s/a/b/", "nope.txt"], has_cd=True)
+            self.assertIn("nope.txt", targets)
+        finally:
+            os.chdir(cwd)
+
+    def test_sed_backup_copies_are_reported_and_exempt_from_the_existence_filter(self):
+        f = self.f
+        def targets(*args):
+            t, why = self.g._fc_sed(list(args))
+            self.assertIsNone(why, args)
+            return t
+        self.assertIn(f + ".bak", targets("-i.bak", "s/a/b/", f))
+        self.assertIn(f + ".bak", targets("--in-place=.bak", "-e", "s/a/b/", f))
+        self.assertIn(f + ".orig", targets("-I", ".orig", "s/a/b/", f))     # BSD forms
+        self.assertIn(f + ".orig", targets("-i", ".orig", "s/a/b/", f))
+        self.assertIn(f + "-e", targets("-i", "-e", "s/a/b/", f))           # BSD: suffix "-e"
+        self.assertEqual(targets("-i", "", "s/a/b/", f), [f])                 # empty = no backup
+        self.assertEqual(targets("-i", "-e", "s/a/b/", os.path.join(self.d, "nope")), [])
+        for pattern in ("bak/*", "$X"):
+            t, why = self.g._fc_sed(["-i" + pattern, "s/a/b/", f])
+            self.assertTrue(why, pattern)
+
     def test_sed_is_read_both_ways_and_the_union_is_reported(self):
-        f = "/abs/f"
+        f = self.f
         # bare -i: GNU reads files [f]; BSD takes the next word as its suffix
         for args in (["-i", "s/a/b/", f], ["-i", "", "s/a/b/", f], ["-i", ".bak", "s/a/b/", f],
                      ["-i.bak", "s/a/b/", f], ["-I", "", "s/a/b/", f], ["-I.bak", "s/a/b/", f],
@@ -3804,10 +3906,11 @@ class FileCommandParserTests(unittest.TestCase):
         for args in (["s/a/b/", "/abs/f"], ["-n", "p", "/abs/f"], ["-l", "5", "-e", "p", "/abs/f"]):
             self.assertEqual(self.g._fc_sed(args), ([], None), args)
 
-    def test_sed_union_over_includes_but_never_misses(self):
-        targets, why = self.g._fc_sed(["-i", "", "s/a/b/", "/abs/f"])
+    def test_sed_union_never_misses_the_file_either_reading_edits(self):
+        # GNU: files [f]; BSD: suffix "s/a/b/", script f, no files. f must be reported.
+        targets, why = self.g._fc_sed(["-i", "s/a/b/", self.f])
         self.assertIsNone(why)
-        self.assertEqual(sorted(targets), ["/abs/f", "s/a/b/"])  # GNU reading adds the script word
+        self.assertEqual(targets, [self.f])
 
     def test_sed_unknown_options_are_undetermined_even_without_dash_i(self):
         for args in (["-i", "--expr=s/a/b/", "/abs/f"], ["--in-pl", "s/a/b/", "/abs/f"],
