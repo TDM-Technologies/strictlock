@@ -17,6 +17,10 @@ WHAT IT DOES
 HOOK CONTRACT (typical agentic-harness PreToolUse convention)
   - Exit 0 with JSON {"hookSpecificOutput": {"permissionDecision": "allow|deny", ...}}
                         every decision, INCLUDING the gate's own faults.
+  - Exit 0 with NO stdout => no opinion: the harness runs its own permission flow.
+                        "allow" is emitted only when the active plan approved the
+                        call; gate off, bypass, ungoverned tools, read-only commands,
+                        a bare cd and always-writable writes emit no decision.
   - Exit 1 + stderr  => non-blocking warning: the harness lets the action
                         proceed. Deliberately UNUSED — a gate that exits 1 on its
                         own crash fails open.
