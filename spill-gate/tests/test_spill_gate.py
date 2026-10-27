@@ -616,6 +616,52 @@ class ReviewFixes(Base):
         r = self.gate("pre-push", "origin", "u", stdin="r %s r %s\n" % (tip, base))
         self.assertEqual(r.returncode, 1, msg=r.stderr)
 
+    def test_each_pushed_commit_uses_its_own_allowlist(self):
+        base = self.git("rev-parse", "HEAD").strip()
+        self.stage("a.txt", UUID + "\n")               # commit A: no allowlist in it
+        a = self.commit("A")
+        self.allowlist("path **\n")                    # commit B widens the allowlist afterwards
+        b = self.commit("B")
+        r = self.gate("pre-push", "origin", "u", stdin="r %s r %s\n" % (b, base))
+        self.assertEqual(r.returncode, 1, msg="A must not be excused by B's allowlist")
+        self.assertIn(a[:8], r.stderr)
+        self.assertNotIn(b[:8], r.stderr)
+
+    def test_commit_adding_the_allowlist_is_judged_by_its_own_copy(self):
+        base = self.git("rev-parse", "HEAD").strip()
+        self.allowlist("path fx/**\n")
+        self.stage("fx/a.txt", UUID + "\n")
+        tip = self.commit("allowlist + fixture together")
+        r = self.gate("pre-push", "origin", "u", stdin="r %s r %s\n" % (tip, base))
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+
+    def test_two_refs_sharing_a_commit_give_the_same_verdict_in_either_order(self):
+        base = self.git("rev-parse", "HEAD").strip()
+        main = self.git("rev-parse", "--abbrev-ref", "HEAD").strip()
+        self.git("checkout", "-q", "-b", "main2")
+        self.stage("u.txt", UUID + "\n")
+        u = self.commit("U")
+        self.git("checkout", "-q", "-b", "scratch")
+        self.allowlist("path **\n")
+        s = self.commit("S")
+        self.git("checkout", "-q", main)
+        zero = "0" * 40
+        l1 = "refs/heads/scratch %s refs/heads/scratch %s\n" % (s, zero)
+        l2 = "refs/heads/main2 %s refs/heads/main2 %s\n" % (u, zero)
+        for order in ((l1, l2), (l2, l1)):
+            r = self.gate("pre-push", "origin", "u", stdin="".join(order))
+            self.assertEqual(r.returncode, 1, msg=r.stderr)
+            self.assertIn(u[:8], r.stderr)
+
+    def test_nul_cannot_defeat_the_token_boundary(self):
+        sg = load_gate_module()
+        for tok, rule in ((SK_ANT, "api-key-sk"), (STRIPE, "stripe-live-key")):
+            found = sg.scan_line("f", 1, "A\0" + tok, sg.Allowlist())
+            self.assertIn(rule, [f[3] for f in found])
+        # ...and NUL-interleaved (UTF-16LE style) text is still found, reported once
+        found = sg.scan_line("f", 1, "\0".join(GH_TOKEN) + "\0", sg.Allowlist())
+        self.assertEqual([f[3] for f in found], ["github-token"])
+
     def test_explicit_override_reads_disk(self):
         al = Path(self._tmp.name) / "override.allow"
         al.write_text("path **\n", encoding="utf-8")

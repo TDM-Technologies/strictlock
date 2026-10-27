@@ -306,10 +306,21 @@ def load_allowlist(repo_root: Path, spec: str) -> Allowlist:
 def scan_line(path: str, lineno: int, line: str, al: Allowlist, where: str = ""):
     """Return findings [(where, path, lineno, rule, matched)] for one line.
 
-    NULs are dropped first, so ASCII text inside UTF-16/UTF-32 data and binary blobs
-    is still matched."""
+    A line holding NULs is matched in two forms - NULs deleted (finds ASCII inside
+    UTF-16/UTF-32 data) and NULs turned into spaces (so a NUL cannot defeat a
+    boundary such as the one in front of `sk-`). Findings are de-duplicated."""
     if "\0" in line:
-        line = line.replace("\0", "")
+        out, seen = [], set()
+        for variant in (line.replace("\0", ""), line.replace("\0", " ")):
+            for f in _scan_text(path, lineno, variant, al, where):
+                if (f[3], f[4]) not in seen:
+                    seen.add((f[3], f[4]))
+                    out.append(f)
+        return out
+    return _scan_text(path, lineno, line, al, where)
+
+
+def _scan_text(path: str, lineno: int, line: str, al: Allowlist, where: str):
     findings = []
     marker_rules = None   # None = no marker; empty set = all rules
     m = _MARKER.search(line)
@@ -439,12 +450,13 @@ def mode_pre_push(repo_root: Path, args) -> None:
         _lref, local_sha, _rref, remote_sha = parts
         if local_sha == ZERO_SHA:
             continue  # branch deletion pushes no content
-        # The allowlist is the one the pushed tip carries (absent there = none).
-        al = load_allowlist(repo_root, f"{local_sha}:{ALLOWLIST_NAME}")
         for c in _commits_to_push(repo_root, remote_name, local_sha, remote_sha):
             if c in seen:
                 continue
             seen.add(c)
+            # Each commit is judged by the allowlist as it stands IN THAT COMMIT (absent =
+            # none; a merge uses its own copy). Independent of which ref is listed first.
+            al = load_allowlist(repo_root, f"{c}:{ALLOWLIST_NAME}")
             # --cc: a merge shows what the merge itself introduced (plain diff-tree -p is empty for merges).
             diff = _git_ok(
                 ["diff-tree", "-p", "-r", "--root", "--cc", "--no-commit-id", *_DIFF_ARGS, c],

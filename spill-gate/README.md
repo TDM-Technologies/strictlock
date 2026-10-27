@@ -118,11 +118,13 @@ and nothing glued on after it (`allowed`, `allow=uuid,` and `allow=` are not mar
 rule name in a marker blocks (fail-closed). The marker covers only its own line.
 
 **Allowlist file** `.spill-gate-allow` at the repo root, one entry per line, `#` comments. The gate
-reads it **from git, not from the working tree**: the staged copy for pre-commit, the pushed tip
-commit's copy for pre-push, the scanned revision's copy for scan-tree. A file that exists only on
-disk, or an unstaged edit, has no effect; if the file is absent from git there is no allowlist. A
-commit that adds or widens the allowlist is judged by the allowlist it carries, so that change is
-the one to review.
+reads it **from git, not from the working tree**: the staged copy for pre-commit, the scanned
+revision's copy for scan-tree, and for pre-push **each pushed commit's own copy** (the file as it
+stands in that commit; a merge commit uses its own copy). A later commit's allowlist never excuses
+an earlier commit, and the verdict does not depend on the order of refs in a multi-ref push. A file
+that exists only on disk, or an unstaged edit, has no effect; if the file is absent from git (or
+from that commit) there is no allowlist. A commit that itself adds or widens the allowlist is
+judged by its own widened copy, so that change is the one to review.
 
 ```text
 # whole files or directories (gitignore-style globs; ** crosses '/', * does not)
