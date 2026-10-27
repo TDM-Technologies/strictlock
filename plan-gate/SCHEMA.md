@@ -31,7 +31,7 @@ Free-form description for humans goes here.
 | `status` | string | `active` arms the plan. Any other value (e.g. `draft`, `archived`) makes it inert. **Exactly one** active plan per worktree. When approval is on (whenever `PLAN_GATE_LOG_DIR` is set, see [CONFIG.md](CONFIG.md#plan-approval)), `status: active` also needs a recorded human approval of the plan's exact bytes, or the plan is inert. |
 | `allowed_paths` | list of strings | The exact files the agent may write. **Exact match only** — a directory entry authorizes *nothing* inside it. Absolute or repo-root-relative. |
 | `allowed_commands` | list of strings | Command **prefixes** the agent may run. For Bash, every *segment* of a command (see below) must *start with* one of these, or be an always-allowed read-only command or a bare `cd`. |
-| `worktree_bypass` | bool | `true` opts out of the worktree guard for deliberately cross-tree work (absolute `allowed_paths`). Omit otherwise. **Only the unquoted, lowercase literal `true` is honored.** Any other value (`yes`, `True`, `1`, `on`, `"true"`, `false`, empty) is refused: the gate denies while that plan is active, naming the field (see [CONFIG.md](CONFIG.md#path-resolution-notes)). |
+| `worktree_bypass` | bool | `true` opts out of the worktree guard for deliberately cross-tree work (absolute `allowed_paths`). Omit otherwise. **Only the unquoted, lowercase literals `true` (on) and `false` (off, same as omitting it) are accepted.** Any other value (`yes`, `True`, `1`, `on`, `"true"`, `"false"`, empty) is refused: the gate denies while such a plan counts for the session (approved, and claiming its worktree), naming the field (see [CONFIG.md](CONFIG.md#path-resolution-notes)). |
 
 ## Authorization semantics (read these — they bite)
 

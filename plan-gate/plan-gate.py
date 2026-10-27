@@ -568,7 +568,7 @@ def _log_decision(
     if DECISIONS_LOG is None:
         return
     if (
-        decision == "allow"
+        decision in ("allow", "defer")
         and LOG_DECISIONS_MODE == "deny"
         and class_ != "emergency_bypass"
     ):
@@ -1164,9 +1164,22 @@ def _name_folds(parent: str, name: str):
     """Does directory `parent` match the existing entry `name` case-insensitively?
     True / False, or None when this name cannot tell (no cased letters, or an error).
     The case-swapped spelling must resolve (by lstat, so a symlink named like that is
-    its OWN inode, not the file it points at) to the very same inode, and the two
-    spellings must not both be listed as separate directory entries (that is two
-    hardlinks on a case-sensitive FS). Anything else -> False: never fold on doubt."""
+    its OWN inode, not the file it points at) to the very same inode, and so must a
+    THIRD case variant of the name: on a case-sensitive FS two hardlinked entries
+    `a.txt` / `A.TXT` would match each other but `A.txt` would not exist. (No listing
+    of the directory: it can be huge.) A name with no third variant (one cased
+    letter) or anything unexpected -> False: never fold on doubt."""
+    key = (parent, name)
+    if key in _FOLD_CACHE:
+        return _FOLD_CACHE[key]
+    _FOLD_CACHE[key] = res = _name_folds_uncached(parent, name)
+    return res
+
+
+_FOLD_CACHE: dict = {}
+
+
+def _name_folds_uncached(parent: str, name: str):
     swapped = name.swapcase()
     if swapped == name:
         return None
@@ -1174,17 +1187,18 @@ def _name_folds(parent: str, name: str):
         a = os.lstat(os.path.join(parent, name))
     except OSError:
         return None
-    try:
-        b = os.lstat(os.path.join(parent, swapped))
-    except OSError:
+    thirds = sorted({name.lower(), name.upper(), name.capitalize(), name.title()}
+                    - {name, swapped})
+    if not thirds:
         return False
-    if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
-        return False
-    try:
-        names = os.listdir(parent)
-    except OSError:
-        return False
-    return not (name in names and swapped in names)
+    for variant in [swapped, thirds[0]]:
+        try:
+            b = os.lstat(os.path.join(parent, variant))
+        except OSError:
+            return False
+        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+            return False
+    return True
 
 
 def _real_key(p: str):
@@ -2079,9 +2093,11 @@ def _bypass_state(fm: dict):
     Only the unquoted, lowercase YAML boolean `true` is honored; `True`, `yes`, `1`,
     `on`, a quoted "true", `false`, and an empty value are all refused rather than
     guessed at.
-    ONE-LINER to accept an explicit `false` as "off" (pending a ruling): return None
-    instead of False when `fm["worktree_bypass"] == "false"` and not quoted."""
+    An unquoted, lowercase `false` is accepted and means "off", the same as the field
+    being absent (maintainer ruling 2026-10-27)."""
     if "worktree_bypass" not in fm:
+        return None
+    if fm["worktree_bypass"] == "false" and not getattr(fm, "bypass_quoted", False):
         return None
     if fm["worktree_bypass"] == "true" and not getattr(fm, "bypass_quoted", False):
         return True
@@ -3724,7 +3740,7 @@ def _handle_crash(exc: BaseException) -> None:
         reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
                   f"— emergency bypass (gate fault path).")
         _log_decision(
-            "allow", "gate", "emergency_bypass", _CALL_CTX["tool"],
+            "defer", "gate", "emergency_bypass", _CALL_CTX["tool"],
             _CALL_CTX["tool_input"], reason, None,
         )
         _allow_or_defer(reason, _CALL_CTX["tool"])
@@ -3761,7 +3777,7 @@ def main() -> None:
             pass
         b_reason = (f"plan-gate: PLAN_GATE_BYPASS={os.environ.get('PLAN_GATE_BYPASS', '').strip()} "
                     f"— emergency bypass.")
-        _log_decision("allow", "gate", "emergency_bypass", b_tool, b_input, b_reason, None)
+        _log_decision("defer", "gate", "emergency_bypass", b_tool, b_input, b_reason, None)
         _allow_or_defer(b_reason, b_tool if isinstance(b_tool, str) else "")
 
     try:
@@ -3809,10 +3825,12 @@ def main() -> None:
     def gated_allow(reason: str, class_: str) -> None:
         """A unified-log row (subject to PLAN_GATE_LOG_DECISIONS), then either an
         explicit allow (the active plan approved the call) or NO decision (the gate
-        merely did not object; see _DEFER_CLASSES). The row says "allow" in both."""
-        _log_decision("allow", _surface(), class_, tool, tool_input, reason, plan_name)
+        merely did not object; see _DEFER_CLASSES). The row says "allow" for the
+        first and "defer" for the second."""
         if class_ in _DEFER_CLASSES:
+            _log_decision("defer", _surface(), class_, tool, tool_input, reason, plan_name)
             no_decision()
+        _log_decision("allow", _surface(), class_, tool, tool_input, reason, plan_name)
         allow(reason)
 
     if tool not in ("Edit", "Write", "NotebookEdit", "Bash", "PowerShell") + MCP_FILE_WRITE_TOOLS:
@@ -3822,7 +3840,7 @@ def main() -> None:
             # is logged so every MCP call the hook sees is on the record.
             # NO decision (not "allow"): an allow would skip the harness's own
             # permission prompt for a tool this gate did not actually check.
-            _log_decision("allow", "mcp", "mcp_unconfigured", tool, tool_input,
+            _log_decision("defer", "mcp", "mcp_unconfigured", tool, tool_input,
                           f"plan-gate: MCP tool {tool!r} is not in "
                           f"PLAN_GATE_MCP_WRITE_TOOLS.", None)
             no_decision()
@@ -4082,10 +4100,10 @@ def main() -> None:
         shown = "; ".join(f"{n}: worktree_bypass: {v}" for n, v in bad_bypass[:5])
         gated_deny(
             f"plan-gate: an active plan has a worktree_bypass value the gate refuses "
-            f"({shown}). The only accepted value is the unquoted, lowercase literal "
-            f"`true` (worktree_bypass: true); yes, True, 1, on, \"true\", false and an "
-            f"empty value are refused, not guessed at. Set it to `true`, or delete "
-            f"the line. If plan approval is on, the edit voids the approval: a human "
+            f"({shown}). The only accepted values are the unquoted, lowercase literals "
+            f"`true` (bypass on) and `false` (off); yes, True, 1, on, \"true\", "
+            f"\"false\" and an empty value are refused, not guessed at. Set it to "
+            f"`true`, or delete the line. If plan approval is on, the edit voids the approval: a human "
             f"approves the plan again.",
             class_="worktree_bypass_invalid",
         )

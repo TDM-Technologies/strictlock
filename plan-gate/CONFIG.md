@@ -153,12 +153,20 @@ self-protection** to them, exactly as for a `>` redirect:
 
 With `PLAN_GATE_REQUIRE_LEASE=on`, a destination that **cannot be determined statically**
 denies the call (class `scope_lease`, "cannot be determined"): a variable, glob or brace in a
-path, a relative path after a `cd` in the same command, an option the parser does not know, a
-source named `.` or `..`, `sed -i ''` (GNU and BSD `sed` read the empty word differently; write
-`-i.bak` or `--in-place=` instead), or a shell/`xargs`/`find`-style runner line that
-mentions one of the six programs (`bash -c 'cp a b'`). With leases merely configured (not
-required), an undetermined destination is not checked, as before; a determined one is looked up
-and a path held by another agent denies. Option parsing assumes GNU syntax.
+path, a relative path after a `cd` in the same command, **any long option that is not an exact
+known option name** (so GNU abbreviations such as `--target=`, `--expr=`, `--in-pl` are refused,
+as are typos and options from other versions; the full names `--target-directory`,
+`--in-place`, `--expression`, ... are understood), an unknown short `sed` option, a source named
+`.` or `..`, or a shell/`xargs`/`find`-style runner line that mentions one of the six programs
+(`bash -c 'cp a b'`). The GNU/coreutils `g` names (`gcp`, `gmv`, `ginstall`, `gsed`, `gtee`,
+`gdd`) are the same programs. `install` also reads BSD `-B suffix` and `-f flags` as value
+options. For `sed -i` the syntax is GNU's (the word after a bare `-i` is the script, so
+`sed -i '' s/a/b/ f` reports `s/a/b/` as well: a superset, which can only deny more), except
+when `sed` on PATH is macOS's own `/usr/bin/sed`: there a bare `-i` takes the next word as its
+backup suffix, so `sed -i '' s/a/b/ f` resolves to `f` and routine edits work under
+`PLAN_GATE_REQUIRE_LEASE`. With leases merely configured (not required), an undetermined
+destination is not checked, as before; a determined one is looked up and a path held by
+another agent denies.
 
 These destinations are **not** matched against `allowed_paths`: `allowed_commands` still decides
 whether the command may run at all, as before. Not covered (still unchecked by the lease lookup):
@@ -393,16 +401,20 @@ Set the variables in the `env` block and register the hook in `hooks.PreToolUse`
   active plan" text. This catches the "wrote to the wrong tree" failure. Opt out for
   deliberately cross-tree work with `worktree_bypass: true` in the plan (see
   [SCHEMA.md](SCHEMA.md)).
-- **`worktree_bypass` takes exactly one spelling.** Only the unquoted, lowercase YAML boolean
-  `true` is honored. Any other value (`yes`, `True`, `1`, `on`, a quoted `"true"`, `false`, or an
-  empty value) is **refused**: while a plan with such a value is `status: active`, the gate
-  denies every call that reaches the plan check (class `worktree_bypass_invalid`), with a message
-  naming the field and the accepted value. It does not guess what was meant, and it does not
-  treat the plan as "no bypass" either, because that would silently change which sessions the
-  plan collides with. Fix it by writing `worktree_bypass: true` or deleting the line (with
-  approval on, the edit voids the approval; a human approves again). The plans directory stays
-  writable, so the fix is possible. Earlier versions also honored `True` / `TRUE` / a quoted
-  `"true"`.
+- **`worktree_bypass` takes exactly two spellings.** The unquoted, lowercase YAML booleans
+  `true` (bypass on) and `false` (off, the same as omitting the field). Any other value (`yes`,
+  `True`, `1`, `on`, a quoted `"true"` or `"false"`, or an empty value) is **refused**: while a
+  plan with such a value is `status: active` **and counts for this session** (approved, when
+  approval is on, and claiming this worktree through an absolute `allowed_paths` entry), the gate
+  denies every call that reaches the plan check (class `worktree_bypass_invalid`), with a
+  message naming the field and the accepted values. Another worktree's plan, or an unapproved
+  one, never blocks this session. It does not guess what was meant, and it does not treat the
+  plan as "no bypass" either, because that would silently change which sessions the plan
+  collides with. Fix it by writing `worktree_bypass: true`, or `false`, or deleting the line
+  (with approval on, the edit voids the approval; a human approves again). The plans directory
+  stays writable **if it is listed in `PLAN_GATE_ALWAYS_WRITABLE`** (as the example settings
+  do); otherwise the plan has to be fixed outside the gated session. Earlier versions also
+  honored `True` / `TRUE` / a quoted `"true"`.
 - **Allow-type path matching compares resolved paths.** What *grants* a write (an
   `allowed_paths` entry, an always-writable directory, the `PLAN_GATE_REQUIRE_LEASE` exemption
   for always-writable directories) is judged on the **real** path: symlinks are followed in both
@@ -413,11 +425,14 @@ Set the variables in the `env` block and register the hook in `hooks.PreToolUse`
   out. A symlink *alias* of an allowed file matches the entry (it is the same file). If an entry
   is itself a symlink, the plan authorizes writes to what it points at. A path that cannot be
   resolved never matches.
-- **Case.** On Windows, and on any file system where a probe shows names differing only in case
-  are the same file (macOS's default APFS volume, case-insensitive Linux mounts), those paths
-  compare case-insensitively. Everywhere else comparison is **case-sensitive**: on a
-  case-sensitive file system `/Plans/x` is a different file from `/plans/x` and does not match an
-  entry for it. The probe looks up the case-swapped name of the deepest existing component; an
+- **Case.** On Windows, and for each path component whose directory a probe shows to be
+  case-insensitive (macOS's default APFS volume, case-insensitive Linux mounts), names compare
+  case-insensitively. Everywhere else comparison is **case-sensitive**: on a case-sensitive file
+  system `/Plans/x` is a different file from `/plans/x` and does not match an entry for it. The
+  probe looks up the case-swapped spelling of each existing component, and a third case variant,
+  with `lstat` (no directory listing), and folds only if all resolve to the very same inode (so
+  a case-swapped symlink, or hardlinked twins, never make a case-sensitive volume look
+  insensitive; a name with a single cased letter never folds). A component that does not exist yet inherits its parent's answer; an
   inconclusive probe means no folding, which only ever denies. Deny-type checks (log-directory
   protection, plan-to-plan path collisions, lease ref-store paths) still fold case always,
   because over-matching there only denies. Not handled: Unicode normalization differences
@@ -443,8 +458,12 @@ harness's own permission rules and prompts decide:
 | a bare `cd` | `navigation` |
 | a write into an always-writable directory (Edit/Write, redirect-only command, MCP targets all always-writable) | `always_writable` |
 
-The log row for those cases still reads `decision: allow`: it records that the gate did not
-object, not that it approved. A deny is unchanged. Consequence for operators: writes to the plans
+The log row for those cases reads `decision: defer` (new in this version; earlier rows read
+`allow`): it records that the gate did not object and left the decision to the harness, not that
+it approved. Rows for plan-approved calls read `allow`, denials `deny`. `verify-log` and plan
+approval only look at the hash chain and `approve` rows, so they are unaffected;
+`PLAN_GATE_LOG_DECISIONS=deny` skips `defer` rows along with `allow` rows (bypass rows are still
+kept). A deny is unchanged. Consequence for operators: writes to the plans
 and memory directories, and read-only commands, now go through Claude Code's normal permission
 prompt unless your own `permissions.allow` rules cover them.
 
@@ -477,7 +496,7 @@ make the gate deny.)
 ## Decision log
 
 When `PLAN_GATE_LOG_DIR` is set, every decision on a gated surface appends a JSON line to
-`plan-gate-decisions.log`: a UTC timestamp, the decision (`allow`/`deny`), the surface
+`plan-gate-decisions.log`: a UTC timestamp, the decision (`allow` / `deny` / `defer`; `defer` = the gate did not object and emitted no decision), the surface
 (`file`/`bash`/`ps`/`mcp`/`gate`), the tool, the command/target, a decision class (e.g.
 `allowed_paths`, `allowed_command`, `read_only_bypass`, `navigation`, `emergency_bypass`,
 `log_self_protect`, `silent_drift`, `unparseable_command`, `gate_error`, `scope_lease`,

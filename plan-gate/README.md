@@ -50,7 +50,7 @@ Read the full argument in [`paper.md`](paper.md).
   OS does; case folded only on case-insensitive file systems), so a symlink cannot carry a
   write out of an `allowed_paths` entry or an always-writable directory.
   See [`CONFIG.md`](CONFIG.md#path-resolution-notes).
-- Appends every decision, allow and deny, to a hash-chained decision log (when
+- Appends every decision (`allow`, `deny`, and `defer` for the no-decision cases above) to a hash-chained decision log (when
   `PLAN_GATE_LOG_DIR` is set) — your audit trail. `plan-gate.py verify-log` proves the
   chain, and the gate never authorizes a gated write to the log itself.
 

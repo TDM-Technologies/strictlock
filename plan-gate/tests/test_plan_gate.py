@@ -258,11 +258,11 @@ class DecisionLogTests(unittest.TestCase):
 
     def test_read_only_bypass_writes_allow_row(self):
         p = self.gate({"tool_name": "Bash", "tool_input": {"command": "git status"}})
-        self.assertEqual(decision(p), "defer")  # the row still says allow (below)
+        self.assertEqual(decision(p), "defer")
         (row,) = self.rows()
         self.assertEqual(
             (row["decision"], row["surface"], row["class"]),
-            ("allow", "bash", "read_only_bypass"),
+            ("defer", "bash", "read_only_bypass"),
         )
         self.assertEqual(row["command"], "git status")
 
@@ -282,7 +282,7 @@ class DecisionLogTests(unittest.TestCase):
         self.assertEqual(decision(p), "defer")
         (row,) = self.rows()
         self.assertEqual(row["class"], "always_writable")
-        self.assertEqual(row["decision"], "allow")
+        self.assertEqual(row["decision"], "defer")
 
     # --- deny rows carry a class ---
 
@@ -325,7 +325,7 @@ class DecisionLogTests(unittest.TestCase):
         (row,) = self.rows()
         self.assertEqual(
             (row["decision"], row["surface"], row["class"]),
-            ("allow", "gate", "emergency_bypass"),
+            ("defer", "gate", "emergency_bypass"),
         )
         self.assertEqual(row["command"], "rm -rf /")
 
@@ -613,11 +613,15 @@ class BashSegmentTests(unittest.TestCase):
         return p
 
     def assertAllowed(self, cmd, **kw):
-        # "Not denied": an explicit allow (the plan approved it) or no decision
-        # (read-only / always-writable: the harness decides). ApprovalClassTests
-        # pins which of the two each kind of command gets.
+        # An explicit allow: the active plan checked and approved the command.
         p = self.run_cmd(cmd, **kw)
-        self.assertIn(decision(p), ("allow", "defer"), "should ALLOW: %r\n%s" % (cmd, p.stdout))
+        self.assertEqual(decision(p), "allow", "should ALLOW: %r\n%s" % (cmd, p.stdout))
+        return p
+
+    def assertDeferred(self, cmd, **kw):
+        # No decision (read-only / bare cd / always-writable): the harness decides.
+        p = self.run_cmd(cmd, **kw)
+        self.assertEqual(decision(p), "defer", "should DEFER: %r\n%s" % (cmd, p.stdout))
         return p
 
     # --- no active plan: the pre-plan read-only bypass ---
@@ -720,13 +724,13 @@ class BashSegmentTests(unittest.TestCase):
             "git -C /tmp log --oneline",
             "cat <<'EOF'\n$(rm -rf b) && y > z\nEOF",
         ]:
-            self.assertAllowed(cmd)
+            self.assertDeferred(cmd)
 
     def test_no_plan_redirect_into_always_writable_dir_allowed(self):
         scratch = self.work / "scratch"
         scratch.mkdir()
         env = {"PLAN_GATE_ALWAYS_WRITABLE": str(scratch)}
-        self.assertAllowed("echo note > %s" % (scratch / "n.md"), extra_env=env)
+        self.assertDeferred("echo note > %s" % (scratch / "n.md"), extra_env=env)
         self.assertDenied("echo note > %s" % (self.work / "n.md"), extra_env=env)
         # `..` cannot launder a redirect out of the always-writable dir.
         self.assertDenied("echo note > %s/../n.md" % scratch, extra_env=env)
@@ -849,6 +853,8 @@ class BashSegmentTests(unittest.TestCase):
                 (self.plans / "active.md").unlink()
             if expect == "deny":
                 self.assertDenied(cmd, **kw)
+            elif expect == "defer":
+                self.assertDeferred(cmd, **kw)
             else:
                 self.assertAllowed(cmd, **kw)
 
@@ -869,10 +875,10 @@ class BashSegmentTests(unittest.TestCase):
         self.assertDenied("pytest $(echo a)#x; rm -rf zzz")
 
     def test_real_comments_still_work(self):
-        self.both("git status # a; trailing comment", "allow")
-        self.both("git status\n# whole line comment ; rm -rf x\ngit log", "allow")
-        self.both("git status;# c", "allow")
-        self.both("echo a \\\n# continued comment", "allow")
+        self.both("git status # a; trailing comment", "defer")
+        self.both("git status\n# whole line comment ; rm -rf x\ngit log", "defer")
+        self.both("git status;# c", "defer")
+        self.both("echo a \\\n# continued comment", "defer")
 
     def test_git_c_path_must_be_literal(self):
         for cmd in [
@@ -885,9 +891,9 @@ class BashSegmentTests(unittest.TestCase):
             "git -C \"$X\" status",
         ]:
             self.both(cmd, "deny")
-        self.both("git -C /tmp status", "allow")
-        self.both("git -C '/tmp/a b$c' status", "allow")
-        self.both("git -C \"/tmp/a b\" status", "allow")
+        self.both("git -C /tmp status", "defer")
+        self.both("git -C '/tmp/a b$c' status", "defer")
+        self.both("git -C \"/tmp/a b\" status", "defer")
 
     def test_quoted_and_ref_syntax_stays_allowed(self):
         for cmd in [
@@ -901,7 +907,7 @@ class BashSegmentTests(unittest.TestCase):
             "find . -name '*.py'",
             "git log --output-indicator-new=+",
         ]:
-            self.both(cmd, "allow")
+            self.both(cmd, "defer")
 
     def test_unquoted_expansion_and_glob_still_denied_for_validated(self):
         for cmd in [
@@ -938,10 +944,10 @@ class BashSegmentTests(unittest.TestCase):
             "echo x > %s/aw/{a,b}" % self.root,
         ]:
             self.both(cmd, "deny", extra_env=aw)
-        self.both("echo x > '%s/aw/lit*' " % self.root, "allow", extra_env=aw)
+        self.both("echo x > '%s/aw/lit*' " % self.root, "defer", extra_env=aw)
 
     def test_subshell_group_of_allowed_commands(self):
-        self.both("(cd sub && git status)", "allow")
+        self.both("(cd sub && git status)", "defer")
         self.plan()
         self.assertAllowed("(pytest -q)")
         self.assertDenied("(pytest -q; rm -rf x)")
@@ -990,8 +996,8 @@ class BashSegmentTests(unittest.TestCase):
                      log_dir=self.logs)
         got = [(r["decision"], r["class"]) for r in self.rows()]
         self.assertEqual(got, [
-            ("allow", "read_only_bypass"),
-            ("allow", "navigation"),
+            ("defer", "read_only_bypass"),
+            ("defer", "navigation"),
             ("allow", "allowed_command"),
             ("deny", "denied"),
             ("deny", "unparseable_command"),
@@ -1160,7 +1166,7 @@ class McpPathTests(unittest.TestCase):
         self.assertNoDecision("mcp__other__read", {"q": "x"}, log_dir=self.logs)
         (row,) = self.rows()
         self.assertEqual((row["decision"], row["surface"], row["class"], row["tool"]),
-                         ("allow", "mcp", "mcp_unconfigured", "mcp__other__read"))
+                         ("defer", "mcp", "mcp_unconfigured", "mcp__other__read"))
 
     def test_unconfigured_mcp_allow_row_respects_deny_only_mode(self):
         self.assertNoDecision("mcp__other__read", {"q": "x"}, log_dir=self.logs,
@@ -1308,9 +1314,13 @@ class WriterScriptTests(unittest.TestCase):
         return p
 
     def assertAllowed(self, cmd, tool="Bash", **kw):
-        # "Not denied": explicit allow (plan approved) or no decision (read-only).
         p = self.run_tool(tool, cmd, **kw)
-        self.assertIn(decision(p), ("allow", "defer"), "should ALLOW: %r\n%s" % (cmd, p.stdout))
+        self.assertEqual(decision(p), "allow", "should ALLOW: %r\n%s" % (cmd, p.stdout))
+        return p
+
+    def assertDeferred(self, cmd, tool="Bash", **kw):
+        p = self.run_tool(tool, cmd, **kw)
+        self.assertEqual(decision(p), "defer", "should DEFER: %r\n%s" % (cmd, p.stdout))
         return p
 
     def test_allowed_target_passes(self):
@@ -1405,10 +1415,10 @@ class WriterScriptTests(unittest.TestCase):
 
     def test_mentioning_the_script_without_running_it_is_unaffected(self):
         # No plan at all: read-only inspection of the script stays allowed.
-        self.assertAllowed("grep -n python %s" % self.WRITER)
-        self.assertAllowed("cat %s" % self.WRITER)
+        self.assertDeferred("grep -n python %s" % self.WRITER)
+        self.assertDeferred("cat %s" % self.WRITER)
         self.plan(commands=("echo",))
-        self.assertAllowed("echo python3 %s" % self.WRITER)
+        self.assertDeferred("echo python3 %s" % self.WRITER)
 
     def test_env_extension_with_argpos(self):
         self.plan(commands=("python3 tools/my-writer.py",))
@@ -1440,7 +1450,7 @@ class WriterScriptTests(unittest.TestCase):
             self.assertDenied("python3 %s %s" % (self.WRITER, self.out), extra_env=env,
                               contains="PLAN_GATE_WRITER_SCRIPTS")
             # Read-only commands are not wedged by the bad value.
-            self.assertAllowed("git status", extra_env=env)
+            self.assertDeferred("git status", extra_env=env)
 
     def test_malformed_env_mentions_one_based(self):
         self.plan()
@@ -1450,9 +1460,9 @@ class WriterScriptTests(unittest.TestCase):
 
     def test_bypass_still_honored_with_malformed_env(self):
         self.plan()
-        self.assertAllowed("python3 %s %s" % (self.WRITER, self.other),
-                           extra_env={"PLAN_GATE_WRITER_SCRIPTS": "bad",
-                                      "PLAN_GATE_BYPASS": "on"})
+        self.assertDeferred("python3 %s %s" % (self.WRITER, self.other),
+                            extra_env={"PLAN_GATE_WRITER_SCRIPTS": "bad",
+                                       "PLAN_GATE_BYPASS": "on"})
 
     def test_decision_log_records_writer_deny(self):
         self.plan()
@@ -1599,8 +1609,8 @@ class WriterScriptTests(unittest.TestCase):
         self.assertDenied("python3 %s %s" % (self.WRITER, self.out), tool="PowerShell",
                           extra_env={"PLAN_GATE_WRITER_SCRIPTS": "bad"},
                           contains="PLAN_GATE_WRITER_SCRIPTS")
-        self.assertAllowed("Get-ChildItem", tool="PowerShell",
-                           extra_env={"PLAN_GATE_WRITER_SCRIPTS": "bad"})
+        self.assertDeferred("Get-ChildItem", tool="PowerShell",
+                            extra_env={"PLAN_GATE_WRITER_SCRIPTS": "bad"})
 
 
 class PowerShellTests(unittest.TestCase):
@@ -1884,7 +1894,7 @@ class CrashPostureTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         self.assertEqual(decision(p), "defer")
         (row,) = self.rows()
-        self.assertEqual((row["decision"], row["class"]), ("allow", "emergency_bypass"))
+        self.assertEqual((row["decision"], row["class"]), ("defer", "emergency_bypass"))
         self.assertIn("fault path", row["reason"])
 
     def test_gate_off_still_allows_in_the_crash_path(self):
@@ -2473,8 +2483,9 @@ class ScopeLeaseTests(unittest.TestCase):
             "git show-ref",
         ):
             p = self.run_bash(cmd, "bob")
-            # plan-approved commands allow; read-only ones defer to the harness
-            self.assertIn(decision(p), ("allow", "defer"), cmd + " -> " + p.stdout)
+            # read-only commands defer to the harness; plan-admitted ones allow
+            expected = "defer" if cmd.startswith(("echo ", "git for-each-ref")) else "allow"
+            self.assertEqual(decision(p), expected, cmd + " -> " + p.stdout)
 
     def test_raw_lock_ref_changes_are_denied(self):
         self._plan_allowing("git", "bash")
@@ -3277,8 +3288,8 @@ class ApprovalTests(unittest.TestCase):
                     "python3 /opt/plan-gate.py verify-log",
                     "python3 other.py approve p.md"):
             p = self.bash(cmd)
-            # Not denied: an approved-plan command allows, a read-only one defers.
-            self.assertIn(decision(p), ("allow", "defer"), cmd + " -> " + p.stdout)
+            expected = "defer" if cmd.startswith("echo ") else "allow"
+            self.assertEqual(decision(p), expected, cmd + " -> " + p.stdout)
 
     def test_agent_cannot_write_the_log_or_forge_a_row(self):
         self.assertEqual(self.approve().returncode, 0)
@@ -3646,9 +3657,13 @@ class CaseProbeTests(unittest.TestCase):
     def folds(self, entries, insensitive, parent, name):
         from unittest import mock
         lstat, listdir = self.fake_fs(entries, insensitive)
-        with mock.patch.object(self.g.os, "lstat", lstat), \
-                mock.patch.object(self.g.os, "listdir", listdir):
-            return self.g._name_folds(parent, name)
+        self.g._FOLD_CACHE.clear()
+        try:
+            with mock.patch.object(self.g.os, "lstat", lstat), \
+                    mock.patch.object(self.g.os, "listdir", listdir):
+                return self.g._name_folds(parent, name)
+        finally:
+            self.g._FOLD_CACHE.clear()
 
     def test_case_insensitive_volume_folds(self):
         ents = {"/m": {"Plans": 7}}
@@ -3668,6 +3683,21 @@ class CaseProbeTests(unittest.TestCase):
     def test_two_hardlinked_spellings_on_a_sensitive_volume_do_not_fold(self):
         ents = {"/m": {"a.txt": 9, "A.TXT": 9}}
         self.assertIs(self.folds(ents, False, "/m", "a.txt"), False)
+        self.assertIs(self.folds(ents, False, "/m", "A.TXT"), False)
+
+    def test_a_single_cased_letter_has_no_third_variant_so_it_never_folds(self):
+        self.assertIs(self.folds({"/m": {"a": 3}}, True, "/m", "a"), False)
+
+    def test_a_large_directory_is_never_listed(self):
+        from unittest import mock
+        lstat, _ = self.fake_fs({"/m": {"Plans": 7}}, True)
+        def boom(path):
+            raise AssertionError("os.listdir must not be called by the probe")
+        self.g._FOLD_CACHE.clear()
+        with mock.patch.object(self.g.os, "lstat", lstat), \
+                mock.patch.object(self.g.os, "listdir", boom):
+            self.assertIs(self.g._name_folds("/m", "Plans"), True)
+        self.g._FOLD_CACHE.clear()
 
     def test_names_without_letters_and_errors_are_inconclusive(self):
         self.assertIsNone(self.folds({"/m": {"123": 1}}, True, "/m", "123"))
@@ -3811,13 +3841,31 @@ class ApprovalClassTests(unittest.TestCase):
         for tool in ("Read", "Grep", "WebFetch", "Task"):
             self.assertDeferred(self.call(tool, {"x": 1}), tool)
 
-    def test_deferred_calls_still_get_a_log_row_that_says_allow(self):
+    def test_deferred_calls_get_a_log_row_that_says_defer(self):
         self.call("Bash", {"command": "git status"}, log_dir=self.logs)
         self.call("Write", {"file_path": str(self.aw / "n.md")}, log_dir=self.logs)
+        self.call("Bash", {"command": "npm test"}, log_dir=self.logs)
+        self.call("Bash", {"command": "rm -rf x"}, log_dir=self.logs)
         rows = [json.loads(x) for x in
                 (self.logs / "plan-gate-decisions.log").read_text(encoding="utf-8").splitlines()]
         self.assertEqual([(r["decision"], r["class"]) for r in rows],
-                         [("allow", "read_only_bypass"), ("allow", "always_writable")])
+                         [("defer", "read_only_bypass"), ("defer", "always_writable"),
+                          ("allow", "allowed_command"), ("deny", "denied")])
+        # the chain still verifies with the new decision value
+        proc = subprocess.run([sys.executable, str(GATE), "verify-log", str(self.logs / "plan-gate-decisions.log")],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_deny_only_log_mode_skips_defer_rows_but_keeps_bypass(self):
+        env = {"PLAN_GATE_LOG_DECISIONS": "deny"}
+        self.call("Bash", {"command": "git status"}, log_dir=self.logs, extra_env=env)
+        self.call("Write", {"file_path": str(self.aw / "n.md")}, log_dir=self.logs, extra_env=env)
+        self.assertFalse((self.logs / "plan-gate-decisions.log").exists())
+        self.call("Bash", {"command": "x"}, log_dir=self.logs,
+                  extra_env=dict(env, PLAN_GATE_BYPASS="on"))
+        rows = [json.loads(x) for x in
+                (self.logs / "plan-gate-decisions.log").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([r["class"] for r in rows], ["emergency_bypass"])
 
     def test_denies_are_unaffected(self):
         p = self.call("Edit", {"file_path": str(self.work / "other.txt")})
@@ -3862,8 +3910,9 @@ class WorktreeBypassValueTests(unittest.TestCase):
             self.assertEqual(decision(self.edit()), "allow", msg=line)
 
     def test_every_other_value_is_refused_with_a_clear_message(self):
-        for value in ("yes", "True", "TRUE", "1", "on", "false", "no", "y", "t",
-                      '"true"', "'true'", '"True"', "tru", "true false", "[]"):
+        for value in ("yes", "True", "TRUE", "1", "on", "False", "FALSE", "no", "y", "t",
+                      '"true"', "'true'", '"True"', '"false"', "'false'", "tru",
+                      "true false", "[]", "0", "off"):
             self.plan("worktree_bypass: %s" % value)
             p = self.edit(log_dir=self.logs)
             self.assertEqual(decision(p), "deny", msg=value)
@@ -3873,6 +3922,24 @@ class WorktreeBypassValueTests(unittest.TestCase):
         rows = [json.loads(x) for x in
                 (self.logs / "plan-gate-decisions.log").read_text(encoding="utf-8").splitlines()]
         self.assertEqual({r["class"] for r in rows}, {"worktree_bypass_invalid"})
+
+    def test_literal_false_is_accepted_and_means_off(self):
+        # (maintainer ruling 2026-10-27) same as the field being absent
+        for line in ("worktree_bypass: false", "worktree_bypass: false   # not cross-tree"):
+            self.plan(line)
+            self.assertEqual(decision(self.edit()), "allow", msg=line)
+            self.assertEqual(decision(self.edit(self.work / "other.txt")), "deny")
+        # inside a worktree it does NOT claim every tree like `true` does
+        main = self.root / "main"
+        (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
+        wt = self.root / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text(
+            "gitdir: %s\n" % (main / ".git" / "worktrees" / "wt"), encoding="utf-8")
+        p = self.edit(cwd=wt)
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("none claims this worktree", self.reason(p))
+        self.assertNotIn("refuses", self.reason(p))
 
     def test_empty_value_is_refused(self):
         self.plan("worktree_bypass:")
