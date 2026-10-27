@@ -14,9 +14,13 @@ const noSmokeOnlyAssertions = require('./rules/no-smoke-only-assertions.cjs');
 const noTautologicalAssertions = require('./rules/no-tautological-assertions.cjs');
 const noUnassertedResult = require('./rules/no-unasserted-result.cjs');
 
+// Read from package.json so the reported version cannot drift from the
+// published one. index.mjs re-exports this object, so ESM gets it too.
+const { version } = require('./package.json');
+
 const meta = {
   name: 'eslint-plugin-strictlock',
-  version: '0.2.0',
+  version,
 };
 
 const rules = {
