@@ -356,8 +356,11 @@ def deny(reason: str) -> None:
 def no_decision() -> None:
     """Exit 0 with NO stdout JSON: the hook has no opinion, so the harness runs
     its normal permission flow (an "allow" decision would SKIP the user's
-    permission prompt). Used for MCP tools plan-gate does not affirmatively
-    check: unconfigured ones, and any MCP call while the gate is off or bypassed."""
+    permission prompt). Used wherever the gate did not affirmatively check the call
+    against a plan: gate off, emergency bypass, a tool outside the gated set
+    (including unconfigured MCP tools), read-only commands, bare `cd`, and writes
+    into an always-writable directory. An explicit "allow" is emitted only when the
+    active plan's allowed_paths / allowed_commands approved the call."""
     sys.exit(0)
 
 
@@ -376,10 +379,20 @@ def _peek_tool_name() -> str:
 
 
 def _allow_or_defer(reason: str, tool: str) -> None:
-    """allow(), except an MCP tool gets no decision (see no_decision)."""
-    if tool.startswith("mcp__"):
-        no_decision()
-    allow(reason)
+    """The gate is inert (off) or bypassed: it has no opinion, so it emits NO
+    decision for any tool and the harness runs its normal permission flow. (It used
+    to emit "allow" for non-MCP tools, which skipped the user's own permission
+    prompt for a call the gate never checked.) `reason` and `tool` are kept for the
+    call sites' readability only."""
+    no_decision()
+
+
+# gated_allow classes where the gate did NOT approve the call against a plan: a
+# read-only command, a bare `cd`, a write into an always-writable directory. The
+# gate lets these through (it does not deny) but defers to the harness's permission
+# flow instead of emitting "allow". Every other allow class (allowed_paths,
+# allowed_command) means the active plan was checked and approved the call.
+_DEFER_CLASSES = frozenset({"read_only_bypass", "navigation", "always_writable"})
 
 
 def _canonical_row_hash(prev: str, row_without_h: dict) -> str:
@@ -3410,8 +3423,12 @@ def main() -> None:
         deny(reason)
 
     def gated_allow(reason: str, class_: str) -> None:
-        """allow() + a unified-log row (subject to PLAN_GATE_LOG_DECISIONS)."""
+        """A unified-log row (subject to PLAN_GATE_LOG_DECISIONS), then either an
+        explicit allow (the active plan approved the call) or NO decision (the gate
+        merely did not object; see _DEFER_CLASSES). The row says "allow" in both."""
         _log_decision("allow", _surface(), class_, tool, tool_input, reason, plan_name)
+        if class_ in _DEFER_CLASSES:
+            no_decision()
         allow(reason)
 
     if tool not in ("Edit", "Write", "NotebookEdit", "Bash", "PowerShell") + MCP_FILE_WRITE_TOOLS:
@@ -3425,7 +3442,8 @@ def main() -> None:
                           f"plan-gate: MCP tool {tool!r} is not in "
                           f"PLAN_GATE_MCP_WRITE_TOOLS.", None)
             no_decision()
-        allow(f"plan-gate: tool {tool!r} is outside the gated set.")
+        # Not a tool this gate governs: no opinion, so the harness decides.
+        no_decision()
 
     # === Bypasses BEFORE active-plan check ===
     # For Edit/Write/NotebookEdit: the always-writable bypass runs before the
