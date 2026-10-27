@@ -258,7 +258,7 @@ module reads, so one knob sets the posture across the suite instead of wiring ea
 project. Composes with reversibility-tiers (that tiers by action reversibility; this by project
 criticality).
 
-### secret / non-public spill gate — *ready* (dogfood on StrictLock)
+### secret / non-public spill gate — *SHIPPED 2026-10-27* as [`spill-gate`](../spill-gate/) (see [Done](#done))
 A fail-closed pre-commit/pre-push gate that refuses to commit private keys, tokens, stray UUIDs,
 machine paths, or other non-public content — catching a leak at the BOUNDARY, not just in CI after
 it's pushed (the CI already greps for secrets/UUIDs post-hoc; this makes it structural and
@@ -339,6 +339,11 @@ Follow-ups from the claims-true round 2 build and its adversarial verification. 
   Windows when the interpreter path is quoted; not yet exercised on a real Windows console.
 
 ## Done
+- **2026-10-27** — **`spill-gate` shipped** (batch 2026-10-27, lane B): fail-closed pre-commit / pre-push gate
+  plus `scan-tree`, for private keys, tokens, stray UUIDs and machine paths; allowlist read from git (index at
+  commit, each pushed commit's own copy at push — Tim 2026-10-27); two Opus review rounds closed 5 spill-through
+  bypasses before merge. 66 tests; CI runs them on the OS matrix and dogfoods `scan-tree` on this repo.
+  Open: a COMPLIANCE.md row; commit messages and file names are not scanned.
 - **2026-10-16** — **Windows CI bring-up (PR #17)** — two real bugs fixed: scope-lease fed `git update-ref
   --stdin` in text mode (CRLF → every lease transaction failed on Windows; now bytes); the externalized-memory
   projection CLI wrote cp1252/CRLF to Windows pipes (now UTF-8/LF on every OS). Two test bugs fixed
