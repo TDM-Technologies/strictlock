@@ -128,3 +128,32 @@ invented here. Every decision from D-008 forward is recorded at the time it is m
   for a later release. Tim's call.
 - **Re-arguable:** yes — the remaining rules and the mutation gate stay open; the backlog carries
   the mutation gate as a not-now item.
+
+## D-009 · Batch 2026-10-27 rulings: plan-gate bypass values, spill-gate allowlist — 2026-10-27
+- **Decided by:** Tim Downs Mullen
+- **Context:** batch 2026-10-27 ([`batches/2026-10-27-batch.md`](batches/2026-10-27-batch.md)), lanes A
+  (plan-gate hardening, PR #25) and B (spill-gate, PR #24).
+- **Decisions:** (1) plan-gate emits no permission decision — Claude Code's own prompt applies —
+  when the gate is off, bypassed, or the call is read-only; an explicit `allow` only when the
+  active plan approved the call. (2) `worktree_bypass:` honors only the literal `true`; the literal
+  `false` means off; every other value is refused, only for plans that count for the session.
+  (3) spill-gate's pre-push judges each commit by the allowlist as it stands in that commit, not
+  the pushed tip's.
+- **Implementation:** builder and reviewer agents under Tim's go on the batch plan; a separate
+  push bypass for spill-gate (`SPILL_GATE_PUSH_BYPASS`) followed the house style of
+  generated-sink-prepush-gate.
+- **Re-arguable:** yes.
+
+## D-010 · All 16 CI checks required on `main`; admin override kept — 2026-10-27
+- **Decided by:** Tim Downs Mullen
+- **Context:** GitHub auto-merge on PR #26 merged with 4 checks still running, because `main` had no
+  branch protection and so no required checks.
+- **Options considered:** require all 16 checks; require a smaller set (one Python job per OS plus
+  the secret scan); leave `main` unprotected.
+- **Decision:** classic branch protection on `main` requiring all 16 check runs by name
+  (GitHub Actions), not requiring the branch to be up to date, no review requirement, and **not**
+  enforced for administrators — Tim keeps an override.
+- **Known costs (accepted):** direct pushes to `main` must also have passing checks; renaming a CI
+  job or changing the matrix leaves a required name that never reports, so the protection must be
+  updated in the same change; merges wait for the slowest job (~7.5 min).
+- **Re-arguable:** yes.
