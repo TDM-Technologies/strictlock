@@ -146,6 +146,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -3334,7 +3335,16 @@ def _collect_writer_targets(raw_segs: list[str], shell: str, has_cd: bool):
 # Not covered (still unchecked): touch, rm, truncate, ln, rsync, patch, chmod,
 # `git mv/checkout/...`, a `w` command inside a sed script, `perl -i`, `python -c`.
 _FC_PROGS = ("cp", "mv", "install", "tee", "sed", "dd")
-_FC_VALUE_SHORT = {"cp": "tS", "mv": "tS", "install": "tSmog"}
+# Short options that take a value (BSD install adds -B suffix and -f flags).
+_FC_VALUE_SHORT = {"cp": "tS", "mv": "tS", "install": "tSmogBf"}
+# Homebrew / coreutils "g" names are the GNU tools under another name.
+_FC_ALIASES = {"gcp": "cp", "gmv": "mv", "ginstall": "install", "gsed": "sed",
+               "gtee": "tee", "gdd": "dd"}
+_FC_SED_LONG = frozenset((
+    "--binary", "--debug", "--follow-symlinks", "--help", "--null-data",
+    "--zero-terminated", "--posix", "--quiet", "--silent", "--regexp-extended",
+    "--sandbox", "--separate", "--unbuffered", "--version"))
+_FC_SED_SHORT = "nEersuzbaI"
 _FC_VALUE_LONG = ("--target-directory", "--suffix", "--mode", "--owner", "--group",
                   "--strip-program")
 _FC_BOOL_LONG = frozenset((
@@ -3347,7 +3357,22 @@ _FC_BOOL_LONG = frozenset((
     "--keep-directory-symlink", "--exchange", "--progress-bar", "--no-copy",
 ))
 _FC_EXPANSION = "$`*?[{"
-_FC_RUNNER_RE = re.compile(r"(?<![\w./\\-])(?:cp|mv|install|tee|sed|dd)(?![\w-])")
+_FC_RUNNER_RE = re.compile(
+    r"(?<![\w./\\-])(?:g?cp|g?mv|g?install|g?tee|g?sed|g?dd)(?![\w-])")
+
+
+def _is_bsd_sed() -> bool:
+    """True only when `sed` on PATH is macOS's own BSD sed (darwin and /usr/bin/sed).
+    BSD `sed -i` takes the NEXT word as its backup suffix; GNU's does not. Anything
+    else (including a PATH that cannot be searched) is parsed GNU-style, which
+    reports a superset of the files and so only errs toward denying."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        found = shutil.which("sed")
+        return bool(found) and os.path.realpath(found) in ("/usr/bin/sed", "/bin/sed")
+    except (OSError, ValueError):
+        return False
 
 
 def _fc_expands(s: str) -> bool:
@@ -3394,9 +3419,12 @@ def _fc_cp_like(prog: str, args: list[str], has_cd: bool):
                 no_target_dir = True
             elif name == "--directory":
                 mkdirs = True
-            elif eq or name in _FC_BOOL_LONG:
+            elif name in _FC_BOOL_LONG:
                 pass
             else:
+                # Not an exact known name (a typo, a GNU abbreviation such as
+                # --target=, or an option from another version): it could be the
+                # target-directory option, so the destination is undetermined.
                 return [], f"unrecognized option {a[:40]!r}"
             continue
         j = 1
@@ -3488,11 +3516,14 @@ def _fc_tee(args: list[str]):
     return out, None
 
 
-def _fc_sed(args: list[str]):
-    """Files `sed -i` edits. Assumes GNU option syntax (`-i[SUFFIX]`,
-    `--in-place[=SUFFIX]`); BSD's separate suffix word is recognized only as an
-    empty string (`-i ''`), which is ambiguous between the flavors -> undetermined."""
-    in_place = have_script = ambiguous = False
+def _fc_sed(args: list[str], bsd: bool = False):
+    """Files `sed -i` edits. GNU syntax by default (`-i[SUFFIX]`, `--in-place[=SUFFIX]`;
+    the word after a bare `-i` is the script, so `sed -i '' s/a/b/ f` reports
+    `s/a/b/` too: a superset, which only errs toward denying). With bsd=True (macOS's
+    own sed) a bare `-i` consumes the next word as its suffix. Any long option that
+    is not an exact known name, and any unknown short option, is undetermined: it
+    might be an abbreviation of --in-place, --expression or --file."""
+    in_place = have_script = False
     positionals: list[str] = []
     i, after_dd = 0, False
     while i < len(args):
@@ -3512,16 +3543,19 @@ def _fc_sed(args: list[str]):
                 have_script = True
                 if not eq:
                     i += 1
-            elif name == "--line-length" and not eq:
-                i += 1
+            elif name == "--line-length":
+                if not eq:
+                    i += 1
+            elif name not in _FC_SED_LONG:
+                return [], f"unrecognized sed option {a[:40]!r}"
             continue
         j = 1
         while j < len(a):
             ch = a[j]
             if ch == "i":
                 in_place = True
-                if a == "-i" and i < len(args) and args[i] == "":
-                    ambiguous = True
+                if bsd and a == "-i":
+                    i += 1  # BSD: the next word is the suffix
                 break
             if ch in "efl":
                 if ch != "l":
@@ -3529,11 +3563,11 @@ def _fc_sed(args: list[str]):
                 if j == len(a) - 1:
                     i += 1
                 break
+            if ch not in _FC_SED_SHORT:
+                return [], f"unrecognized sed option -{ch}"
             j += 1
     if not in_place:
         return [], None
-    if ambiguous:
-        return [], "`sed -i ''` (a separate empty suffix word) is read differently by GNU and BSD sed"
     files = positionals if have_script else positionals[1:]
     for f in files:
         if _fc_expands(f):
@@ -3589,6 +3623,8 @@ def _collect_file_command_targets(raw_segs: list[str], shell: str, has_cd: bool)
                     f"`{prog}` runs a command line that mentions one of "
                     f"{'/'.join(_FC_PROGS)}")
             continue
+        gnu_alias = prog in _FC_ALIASES
+        prog = _FC_ALIASES.get(prog, prog)
         if prog not in _FC_PROGS:
             continue
         if prog in ("cp", "mv", "install"):
@@ -3596,7 +3632,7 @@ def _collect_file_command_targets(raw_segs: list[str], shell: str, has_cd: bool)
         elif prog == "tee":
             dests, why = _fc_tee(args)
         elif prog == "sed":
-            dests, why = _fc_sed(args)
+            dests, why = _fc_sed(args, bsd=(not gnu_alias and _is_bsd_sed()))
         else:
             dests, why = _fc_dd(args)
         if why:

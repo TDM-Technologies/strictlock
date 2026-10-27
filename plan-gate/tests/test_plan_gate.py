@@ -3361,7 +3361,8 @@ class FileCommandLeaseTests(unittest.TestCase):
     are looked up in the scope-lease like any other write; with
     PLAN_GATE_REQUIRE_LEASE a destination that cannot be determined denies."""
 
-    PROGS = ("cp", "mv", "install", "tee", "sed", "dd", "env", "bash", "xargs", "cd")
+    PROGS = ("cp", "mv", "install", "tee", "sed", "dd", "env", "bash", "xargs", "cd",
+             "gcp", "gmv", "ginstall", "gsed", "gtee", "gdd")
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -3441,7 +3442,7 @@ class FileCommandLeaseTests(unittest.TestCase):
             "tee %s" % L,
             "tee -a %s %s" % (self.p(self.free), L),
             "echo hi | tee -- %s" % L,
-            "sed -i s/a/b/ %s" % L,
+            "sed -i -e s/a/b/ %s" % L,      # same under GNU and BSD parsing
             "sed -i.bak s/a/b/ %s" % L,
             "sed --in-place=.bak -e s/a/b/ %s" % L,
             "sed -n -i -e p %s" % L,
@@ -3455,11 +3456,28 @@ class FileCommandLeaseTests(unittest.TestCase):
         ):
             self.assertHeld(cmd)
 
+    def test_gnu_g_prefixed_names_are_the_same_programs(self):
+        self.lease("alice", self.leased)
+        L, S = self.p(self.leased), self.p(self.src)
+        for cmd in ("gcp %s %s" % (S, L), "gmv %s %s" % (S, L), "ginstall %s %s" % (S, L),
+                    "gtee %s" % L, "gsed -i s/a/b/ %s" % L, "gdd of=%s" % L,
+                    "/opt/homebrew/bin/gcp %s %s" % (S, L)):
+            self.assertHeld(cmd)
+
+    def test_known_long_options_in_exact_form_still_resolve(self):
+        self.lease("alice", self.leased)
+        L, S = self.p(self.leased), self.p(self.src)
+        self.assertHeld("cp --target-directory=%s %s" % (self.p(self.repo),
+                                                         self.p(self.root / "x" / "leased.txt")))
+        self.assertHeld("cp --preserve=mode --backup=numbered %s %s" % (S, L))
+        self.assertHeld("sed --quiet --in-place=.bak --expression=s/a/b/ %s" % L)
+        self.assertHeld("sed -i --regexp-extended -e s/a/b/ %s" % L)
+
     def test_the_same_commands_on_a_free_path_are_allowed_by_the_plan(self):
         self.lease("alice", self.leased)
         F, S = self.p(self.free), self.p(self.src)
         for cmd in ("cp %s %s" % (S, F), "mv %s %s" % (S, F), "tee %s" % F,
-                    "sed -i s/a/b/ %s" % F, "install %s %s" % (S, F),
+                    "sed -i.bak s/a/b/ %s" % F, "install %s %s" % (S, F),
                     "dd if=/dev/zero of=%s" % F):
             proc = self.run_bash(cmd)
             self.assertEqual(decision(proc), "allow", "%s -> %s" % (cmd, proc.stdout))
@@ -3503,7 +3521,7 @@ class FileCommandLeaseTests(unittest.TestCase):
     def test_require_lease_denies_an_unleased_destination(self):
         for cmd in ("cp %s %s" % (self.p(self.src), self.p(self.free)),
                     "tee %s" % self.p(self.free),
-                    "sed -i s/a/b/ %s" % self.p(self.free),
+                    "sed -i.bak s/a/b/ %s" % self.p(self.free),
                     "dd of=%s" % self.p(self.free)):
             proc = self.run_bash(cmd, PLAN_GATE_REQUIRE_LEASE="on")
             self.assertEqual(decision(proc), "deny", cmd)
@@ -3521,8 +3539,15 @@ class FileCommandLeaseTests(unittest.TestCase):
             "cp %s %s/{a,b}" % (self.p(self.src), self.p(self.repo)),
             "tee $F",
             "tee %s/*" % self.p(self.repo),
-            "sed -i s/a/b/ %s/*.py" % self.p(self.repo),
-            "sed -i '' s/a/b/ %s" % F,
+            "sed -i.bak s/a/b/ %s/*.py" % self.p(self.repo),
+            "sed -i.bak --expr=s/a/b/ %s" % F,       # GNU abbreviation of --expression
+            "sed -i.bak --in-pl=.bak s/a/b/ %s" % F,
+            "sed -i.bak --frobnicate s/a/b/ %s" % F,
+            "sed -i.bak -Q s/a/b/ %s" % F,
+            "gsed -i --fil=x.sed %s" % F,
+            "cp --target=%s a b" % self.p(self.repo),   # GNU abbreviation of --target-directory
+            "cp --frobnicate=x %s %s" % (self.p(self.src), F),
+            "gcp --targ=%s a" % self.p(self.repo),
             "dd of=$X",
             "mv %s $D" % F,
             "cp --frobnicate %s %s" % (self.p(self.src), F),
@@ -3552,7 +3577,7 @@ class FileCommandLeaseTests(unittest.TestCase):
         self.assertEqual(decision(proc), "deny")
         self.assertIn("PLAN_GATE_LOG_DIR", self.reason(proc))
         for cmd in ("tee %s/x" % self.p(self.logs), "dd of=%s/x" % self.p(self.logs),
-                    "sed -i s/a/b/ %s/x" % self.p(self.logs)):
+                    "sed -i.bak s/a/b/ %s/x" % self.p(self.logs)):
             proc = self.run_bash(cmd, leases=False, PLAN_GATE_LOG_DIR=str(self.logs),
                                  PLAN_GATE_REQUIRE_APPROVAL="off")
             self.assertEqual(decision(proc), "deny", cmd)
@@ -3567,10 +3592,59 @@ class FileCommandLeaseTests(unittest.TestCase):
         e = {"PLAN_GATE_SCOPE_LEASE": str(SCOPE_LEASE), "SCOPE_LEASE_OWNER": "bob",
              "SCOPE_LEASE_LOCK_ID": "", "PLAN_GATE_REQUIRE_LEASE": ""}
         proc = run_gate({"tool_name": "PowerShell",
-                         "tool_input": {"command": "sed -i s/a/b/ '%s'" % self.leased}},
+                         "tool_input": {"command": "sed -i.bak s/a/b/ '%s'" % self.leased}},
                         self.plans, cwd=self.repo, extra_env=e)
         self.assertEqual(decision(proc), "deny", proc.stdout)
         self.assertIn("alice", self.reason(proc))
+
+
+def _load_gate_module():
+    """The gate as a module, for tests of its pure helpers (parsers, probes)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("plan_gate_under_test", str(GATE))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class FileCommandParserTests(unittest.TestCase):
+    """The pure option parsers behind FileCommandLeaseTests."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.g = _load_gate_module()
+
+    def test_sed_bsd_and_gnu_forms_of_a_bare_dash_i(self):
+        args = ["-i", "", "s/a/b/", "/abs/f"]
+        # GNU: the '' is the script; the next word is then a file too (a superset)
+        self.assertEqual(self.g._fc_sed(args, bsd=False), (["s/a/b/", "/abs/f"], None))
+        # BSD (macOS's sed): '' is the backup suffix
+        self.assertEqual(self.g._fc_sed(args, bsd=True), (["/abs/f"], None))
+        self.assertEqual(self.g._fc_sed(["-i", ".bak", "s/a/b/", "/abs/f"], bsd=True),
+                         (["/abs/f"], None))
+        # attached suffix is the same in both
+        for bsd in (False, True):
+            self.assertEqual(self.g._fc_sed(["-i.bak", "s/a/b/", "/abs/f"], bsd=bsd),
+                             (["/abs/f"], None))
+
+    def test_sed_unknown_options_are_undetermined_even_without_dash_i(self):
+        for args in (["-i", "--expr=s/a/b/", "/abs/f"], ["--in-pl", "s/a/b/", "/abs/f"],
+                     ["--fil=x", "/abs/f"], ["-i", "-Q", "s/a/b/", "/abs/f"]):
+            targets, why = self.g._fc_sed(args)
+            self.assertEqual(targets, [], args)
+            self.assertTrue(why, args)
+
+    def test_cp_unknown_long_options_are_undetermined(self):
+        for prog in ("cp", "mv", "install"):
+            for opt in ("--target=/victim/dir", "--frob=1", "--frob", "--target-dir=/v"):
+                targets, why = self.g._fc_cp_like(prog, [opt, "a", "b"], False)
+                self.assertTrue(why, (prog, opt))
+
+    def test_install_bsd_value_options_do_not_shift_the_destination(self):
+        self.assertEqual(self.g._fc_cp_like("install", ["-B", ".orig", "-f", "uchg", "/s", "/d"], False),
+                         (["/d"], None))
+        self.assertEqual(self.g._fc_cp_like("install", ["-B.orig", "-fuchg", "/s", "/d"], False),
+                         (["/d"], None))
 
 
 class ApprovalClassTests(unittest.TestCase):
