@@ -1122,7 +1122,98 @@ def _gate_record_cli(kind: str, argv: list[str]) -> int:
 
 
 def norm(p: str) -> str:
+    """Lexical, case-folded, slash-normalized form. Used where over-matching is the
+    SAFE direction (deny-type checks: log self-protection, plan collision, lease
+    ref-store paths). Allow-type matching uses _real_key instead."""
     return p.replace("\\", "/").lower().rstrip("/")
+
+
+# --- allow-type path matching: real paths, case-folded only where the FS folds ---
+# Every check that GRANTS a write (allowed_paths equality, always-writable dirs, the
+# lease-requirement exemption) compares RESOLVED paths:
+#   * symlinks are followed in both the target and the allowed entry, so
+#     `<allowed-dir>/link/../x` (which the OS opens beside the link's target, not
+#     inside the allowed dir) and a symlink inside an always-writable dir that points
+#     out of it cannot ride a lexical prefix. A target that does not exist yet is
+#     resolved through its deepest existing ancestor (os.path.realpath is non-strict).
+#   * case is folded ONLY on a file system that is case-insensitive (probed, below).
+#     Folding on a case-sensitive FS would let `/Plans/x` pass for `/plans/x`; not
+#     folding on a case-insensitive one only denies a legitimate spelling. So an
+#     inconclusive probe means "do not fold": the fail-closed direction for a grant.
+# Deny-type checks keep norm() (always lowercased): over-matching there only denies.
+def _fs_case_insensitive(real: str) -> bool:
+    """True when the file system holding `real` (an already-resolved path) treats
+    names differing only in case as the same file. Windows: yes. Elsewhere: probe the
+    deepest existing component of the path (or the nearest ancestor with a cased
+    letter in its name) by looking up its case-swapped name and comparing identity.
+    Any doubt or error -> False."""
+    if os.name == "nt":
+        return True
+    cur = real
+    try:
+        for _ in range(256):
+            if os.path.lexists(cur):
+                break
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                return False
+            cur = parent
+        else:
+            return False
+        for _ in range(256):
+            base = os.path.basename(cur)
+            swapped = base.swapcase()
+            if swapped != base:
+                alt = os.path.join(os.path.dirname(cur), swapped)
+                return os.path.lexists(alt) and os.path.samefile(cur, alt)
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                return False
+            cur = parent
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+def _real_key(p: str):
+    """Comparison key for an allow-type match, or None when the path cannot be
+    resolved (never matches). An absolute path is resolved with realpath on the RAW
+    string (not pre-collapsed: `link/..` must step up from the link's target, as the
+    OS does) and case-folded only on a case-insensitive FS. A relative path has no
+    resolvable location and keeps the old lexical form (it can only equal another
+    relative path, never an absolute one)."""
+    s = str(p)
+    if not os.path.isabs(s):
+        return norm(os.path.normpath(s))
+    try:
+        real = os.path.realpath(s)
+    except (OSError, ValueError):
+        return None
+    key = real.replace("\\", "/")
+    if _fs_case_insensitive(real):
+        key = key.lower()
+    return key.rstrip("/")
+
+
+def _path_matches_allowed(target: str, resolved_paths) -> bool:
+    """True when `target` is, after resolving symlinks on both sides, one of the
+    plan's (already anchored) allowed_paths entries."""
+    tk = _real_key(target)
+    if tk is None:
+        return False
+    return any(_real_key(rp) == tk for rp in resolved_paths)
+
+
+def _under_dirs_real(target: str, dirs) -> bool:
+    """True when `target`, resolved, sits under (or equals) any of `dirs`, resolved."""
+    tk = _real_key(target)
+    if tk is None:
+        return False
+    for d in dirs:
+        dk = _real_key(str(d))
+        if dk is not None and (tk == dk or tk.startswith(dk + "/")):
+            return True
+    return False
 
 
 _WORD_END = " \t\n;&|<>()"
@@ -2212,9 +2303,13 @@ def _classify_redirect(target: str, has_cd: bool, what: str = "redirection targe
             f"plan-gate: {what} {t} is under PLAN_GATE_LOG_DIR; the "
             f"gate never authorizes gated writes to its own decision log."
         )
-    if _under_any(norm(t), ALWAYS_WRITABLE_DIRS):
-        return "always", t
-    return "plan", t
+    # The grant checks resolve symlinks from the UN-collapsed path (t_raw): a `..`
+    # after a symlink must step up from the link's target, not from the link.
+    # The returned value is the un-collapsed path for the same reason (the
+    # allowed_paths match and the lease lookup resolve it themselves).
+    if _under_dirs_real(t_raw, ALWAYS_WRITABLE_DIRS):
+        return "always", t_raw
+    return "plan", t_raw
 
 
 # --- writer scripts (a script whose job is to write a file) -----------------------
@@ -2959,15 +3054,9 @@ def _lease_check(targets: list[str]):
     if require:
         # The exemption for plans / memory directories is judged on the REAL file:
         # compare against the directories as given and as resolved.
-        always_dirs = list(ALWAYS_WRITABLE_DIRS)
-        for d in ALWAYS_WRITABLE_DIRS:
-            try:
-                always_dirs.append(Path(os.path.realpath(str(d))))
-            except (OSError, ValueError):
-                pass
         for r in results:
             if (r["_real"] and r.get("status") == "free"
-                    and not _under_any(norm(r["_target"]), always_dirs)):
+                    and not _under_dirs_real(r["_target"], ALWAYS_WRITABLE_DIRS)):
                 why = "its lease has expired" if r.get("expired") else "no lease is held on it"
                 return (
                     f"plan-gate: {r['_target']}: {why} (PLAN_GATE_REQUIRE_LEASE is on). "
@@ -3302,9 +3391,9 @@ def main() -> None:
                 f"plan-gate: no file_path in tool_input for {tool}.",
                 class_="empty_input",
             )
-        # Collapse `..` / `.` lexically so `<always-writable>/../x` cannot ride
-        # the directory prefix out of it (same treatment as redirect targets).
-        target_n = norm(os.path.normpath(str(target)))
+        # Grants compare RESOLVED paths (symlinks followed, case folded only on a
+        # case-insensitive FS; see _real_key), so neither `<always-writable>/../x`
+        # nor a symlink inside an always-writable dir can ride the prefix out.
         # Log self-protection — runs BEFORE the always-writable bypass and
         # before allowed_paths matching, so neither can shadow it: the gate
         # never authorizes a gated write to its own decision log (raw AND
@@ -3320,7 +3409,7 @@ def main() -> None:
         lease_reason = _extra_write_target_checks([str(target)])
         if lease_reason:
             gated_deny(lease_reason, class_="scope_lease")
-        if _under_any(target_n, ALWAYS_WRITABLE_DIRS):
+        if _under_dirs_real(str(target), ALWAYS_WRITABLE_DIRS):
             gated_allow(
                 "plan-gate: target is under an always-writable directory.",
                 "always_writable",
@@ -3500,7 +3589,7 @@ def main() -> None:
                 gated_deny(extra_reason, class_="scope_lease")
             mcp_plan_targets = [
                 mt for mt in mcp_targets
-                if not _under_any(norm(os.path.normpath(mt)), ALWAYS_WRITABLE_DIRS)
+                if not _under_dirs_real(mt, ALWAYS_WRITABLE_DIRS)
             ]
             if not mcp_plan_targets:
                 gated_allow(
@@ -3640,13 +3729,12 @@ def main() -> None:
             gated_deny(reason, class_="disjoint_paths")
 
     if tool in ("Edit", "Write", "NotebookEdit"):
-        # target / target_n already computed above (early-bypass block).
-        for rp in resolved_paths:
-            if norm(rp) == target_n:
-                gated_allow(
-                    f"plan-gate: {target} matches allowed_paths entry {rp!r}.",
-                    "allowed_paths",
-                )
+        # target already computed above (early-bypass block).
+        if _path_matches_allowed(str(target), resolved_paths):
+            gated_allow(
+                f"plan-gate: {target} matches an allowed_paths entry.",
+                "allowed_paths",
+            )
         gated_deny(
             f"plan-gate: {target} is NOT in allowed_paths of active plan "
             f"({plan_path.name}). Update the plan or stop."
@@ -3668,7 +3756,7 @@ def main() -> None:
                 f"<(...)) are checked segment by segment. Command: {cmd[:200]}"
             )
         for tgt in plan_targets:
-            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+            if not _path_matches_allowed(tgt, resolved_paths):
                 gated_deny(
                     f"plan-gate: redirection target {tgt} is NOT in "
                     f"allowed_paths of active plan ({plan_path.name}). A "
@@ -3676,7 +3764,7 @@ def main() -> None:
                     f"like Edit/Write. Command: {cmd[:200]}"
                 )
         for tgt, script in writer_plan_targets:
-            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+            if not _path_matches_allowed(tgt, resolved_paths):
                 gated_deny(
                     f"plan-gate: {script} target {tgt} is NOT in allowed_paths "
                     f"of active plan ({plan_path.name}). A writer script's "
@@ -3713,7 +3801,7 @@ def main() -> None:
                 )
             used_ps_cmd = True
         for tgt, script in ps_writer_plan_targets:
-            if not any(norm(rp) == norm(tgt) for rp in resolved_paths):
+            if not _path_matches_allowed(tgt, resolved_paths):
                 gated_deny(
                     f"plan-gate: {script} target {tgt} is NOT in "
                     f"allowed_paths of active plan ({plan_path.name}). "
@@ -3726,9 +3814,8 @@ def main() -> None:
         )
 
     if tool in MCP_TOOL_ARGS:
-        resolved_n = {norm(rp) for rp in resolved_paths}
         for mt in mcp_plan_targets:
-            if norm(os.path.normpath(mt)) not in resolved_n:
+            if not _path_matches_allowed(mt, resolved_paths):
                 gated_deny(
                     f"plan-gate: MCP tool {tool!r} target {mt} is NOT in "
                     f"allowed_paths of active plan ({plan_path.name}). An MCP "

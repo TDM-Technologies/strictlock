@@ -3334,5 +3334,213 @@ class ApprovalTests(unittest.TestCase):
         self.assertLess(time.time() - t0, 10.0)
 
 
+AW_OK = "allow"  # what a write into an always-writable dir decides
+
+
+def _symlink(link, target):
+    """Create a symlink or skip the test (Windows without the privilege)."""
+    try:
+        os.symlink(str(target), str(link), target_is_directory=Path(target).is_dir())
+    except (OSError, NotImplementedError, AttributeError) as exc:
+        raise unittest.SkipTest("cannot create symlinks here: %s" % exc)
+
+
+def _fs_is_case_insensitive(directory):
+    """Independent probe (the gate has its own): does `directory`'s FS fold case?"""
+    probe = Path(directory) / "CaseProbe.tmp"
+    probe.write_text("x", encoding="utf-8")
+    try:
+        return (Path(directory) / "caseprobe.tmp").exists()
+    finally:
+        probe.unlink()
+
+
+class PathResolutionTests(unittest.TestCase):
+    """allowed_paths and always-writable grants compare RESOLVED paths: a symlink
+    (with or without `..`) cannot carry a write out of what the plan or the
+    always-writable dir covers; case is folded only on a case-insensitive FS."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self.plans = self.root / "plans"
+        self.plans.mkdir()
+        self.work = self.root / "work"
+        self.work.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def edit(self, path, tool="Edit", **kw):
+        kw.setdefault("cwd", self.work)
+        return run_gate({"tool_name": tool, "tool_input": {"file_path": str(path)}},
+                        self.plans, **kw)
+
+    def bash(self, command, **kw):
+        kw.setdefault("cwd", self.work)
+        return run_gate({"tool_name": "Bash", "tool_input": {"command": command}},
+                        self.plans, **kw)
+
+    def reason(self, proc):
+        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    # --- allowed_paths ---
+
+    def test_symlink_dotdot_escape_from_allowed_path_is_denied(self):
+        a = self.work / "a"
+        a.mkdir()
+        deep = self.work / "elsewhere" / "deep"
+        deep.mkdir(parents=True)
+        _symlink(a / "lnk", deep)
+        write_active_plan(self.plans, str(a / "f.txt"))
+        # Lexically `a/lnk/../f.txt` collapses to the allowed `a/f.txt`; the OS
+        # opens it next to the link's TARGET (`elsewhere/f.txt`).
+        sneaky = "%s/lnk/../f.txt" % a
+        for tool in ("Edit", "Write"):
+            p = self.edit(sneaky, tool=tool)
+            self.assertEqual(decision(p), "deny", msg=tool)
+            self.assertIn("NOT in allowed_paths", self.reason(p))
+        self.assertEqual(decision(self.edit(a / "f.txt")), "allow")  # control
+
+    def test_symlink_dotdot_escape_via_bash_redirect_is_denied(self):
+        a = self.work / "a"
+        a.mkdir()
+        deep = self.work / "elsewhere" / "deep"
+        deep.mkdir(parents=True)
+        _symlink(a / "lnk", deep)
+        write_active_plan(self.plans, str(a / "f.txt"))
+        p = self.bash("npm test > %s/lnk/../f.txt" % a)
+        self.assertEqual(decision(p), "deny")
+        p = self.bash("npm test > %s/f.txt" % a)
+        self.assertEqual(decision(p), "allow")
+
+    def test_symlinked_directory_in_front_of_target_is_resolved_both_sides(self):
+        real = self.work / "real"
+        real.mkdir()
+        _symlink(self.work / "via", real)
+        # Plan lists the file through the link; the write names the real path
+        # (and the reverse): same file, so it matches. Another file does not.
+        write_active_plan(self.plans, str(self.work / "via" / "f.txt"))
+        self.assertEqual(decision(self.edit(real / "f.txt")), "allow")
+        self.assertEqual(decision(self.edit(self.work / "via" / "f.txt")), "allow")
+        self.assertEqual(decision(self.edit(real / "other.txt")), "deny")
+        write_active_plan(self.plans, str(real / "f.txt"))
+        self.assertEqual(decision(self.edit(self.work / "via" / "f.txt")), "allow")
+        self.assertEqual(decision(self.edit(self.work / "via" / "other.txt")), "deny")
+
+    def test_not_yet_existing_target_resolves_through_its_existing_parent(self):
+        outside = self.work / "outside"
+        outside.mkdir()
+        allowed_dir = self.work / "plan_area"
+        allowed_dir.mkdir()
+        _symlink(allowed_dir / "lnk", outside)
+        # Neither `new.txt` exists. The plan lists a file in the plan area; the
+        # write goes through a link in it to `outside/`: a different location.
+        write_active_plan(self.plans, str(allowed_dir / "new.txt"))
+        self.assertEqual(decision(self.edit(allowed_dir / "lnk" / "new.txt")), "deny")
+        self.assertEqual(decision(self.edit(allowed_dir / "new.txt")), "allow")
+
+    def test_dangling_symlink_target_is_judged_by_where_it_points(self):
+        outside = self.work / "outside"
+        outside.mkdir()
+        allowed_dir = self.work / "plan_area"
+        allowed_dir.mkdir()
+        _symlink(allowed_dir / "dangling.txt", outside / "not_created_yet.txt")
+        write_active_plan(self.plans, str(allowed_dir / "other.txt"))
+        # A write through the dangling link would CREATE outside/not_created_yet.txt.
+        self.assertEqual(decision(self.edit(allowed_dir / "dangling.txt")), "deny")
+
+    def test_case_only_difference_follows_the_file_system(self):
+        write_active_plan(self.plans, str(self.work / "Notes.TXT"))
+        other_case = self.work / "notes.txt"
+        p = self.edit(other_case)
+        if _fs_is_case_insensitive(self.work):
+            self.assertEqual(decision(p), "allow")  # the same file
+        else:
+            self.assertEqual(decision(p), "deny")   # a different file
+        self.assertEqual(decision(self.edit(self.work / "Notes.TXT")), "allow")
+
+    def test_case_difference_in_a_directory_name_follows_the_file_system(self):
+        (self.work / "Sub").mkdir()
+        write_active_plan(self.plans, str(self.work / "Sub" / "f.txt"))
+        p = self.edit(self.work / "sub" / "f.txt")
+        expected = "allow" if _fs_is_case_insensitive(self.work) else "deny"
+        self.assertEqual(decision(p), expected)
+
+    # --- always-writable dirs ---
+
+    def aw_setup(self):
+        aw = self.root / "aw"
+        aw.mkdir()
+        out = self.root / "out"
+        out.mkdir()
+        _symlink(aw / "lnk", out)
+        # An unrelated active plan, so a denial is a real "not allowed", not
+        # "no plan".
+        write_active_plan(self.plans, str(self.work / "unrelated.txt"))
+        return aw, out, {"PLAN_GATE_ALWAYS_WRITABLE": str(aw)}
+
+    def test_symlink_inside_always_writable_dir_cannot_escape_it(self):
+        aw, out, env = self.aw_setup()
+        for tool in ("Edit", "Write"):
+            p = self.edit(aw / "lnk" / "x.txt", tool=tool, extra_env=env)
+            self.assertEqual(decision(p), "deny", msg=tool)
+            self.assertNotIn("always-writable", self.reason(p))
+        # control: a real file in the dir is still free to write
+        p = self.edit(aw / "ok.txt", extra_env=env)
+        self.assertEqual(decision(p), AW_OK)
+
+    def test_dotdot_after_symlink_inside_always_writable_dir_is_denied(self):
+        aw, out, env = self.aw_setup()
+        # Lexically aw/lnk/../y.txt is aw/y.txt; really it is <root>/y.txt.
+        p = self.edit("%s/lnk/../y.txt" % aw, extra_env=env)
+        self.assertEqual(decision(p), "deny")
+
+    def test_bash_redirect_through_symlink_in_always_writable_dir_is_denied(self):
+        aw, out, env = self.aw_setup()
+        p = self.bash("echo hi > %s/lnk/z.txt" % aw, extra_env=env)
+        self.assertEqual(decision(p), "deny")
+        p = self.bash("echo hi > %s/lnk/../z.txt" % aw, extra_env=env)
+        self.assertEqual(decision(p), "deny")
+        p = self.bash("echo hi > %s/z.txt" % aw, extra_env=env)
+        self.assertEqual(decision(p), AW_OK)
+
+    def test_symlink_inside_always_writable_dir_pointing_inside_it_is_fine(self):
+        aw, out, env = self.aw_setup()
+        (aw / "sub").mkdir()
+        _symlink(aw / "inner", aw / "sub")
+        p = self.edit(aw / "inner" / "x.txt", extra_env=env)
+        self.assertEqual(decision(p), AW_OK)
+
+    def test_always_writable_dir_that_is_itself_a_symlink(self):
+        real = self.root / "realplans"
+        real.mkdir()
+        link = self.root / "plans_link"
+        _symlink(link, real)
+        write_active_plan(self.plans, str(self.work / "unrelated.txt"))
+        env = {"PLAN_GATE_ALWAYS_WRITABLE": str(link)}
+        self.assertEqual(decision(self.edit(link / "p.md", extra_env=env)), AW_OK)
+        self.assertEqual(decision(self.edit(real / "p.md", extra_env=env)), AW_OK)
+        self.assertEqual(decision(self.edit(self.root / "nope.md", extra_env=env)), "deny")
+
+    def test_mcp_target_through_symlink_in_always_writable_dir_is_denied(self):
+        aw, out, env = self.aw_setup()
+        env = dict(env, PLAN_GATE_MCP_WRITE_TOOLS="mcp__fs__write:path")
+        def mcp(path):
+            return run_gate({"tool_name": "mcp__fs__write", "tool_input": {"path": str(path)}},
+                            self.plans, cwd=self.work, extra_env=env)
+        self.assertEqual(decision(mcp(aw / "lnk" / "m.txt")), "deny")
+        self.assertEqual(decision(mcp(aw / "m.txt")), AW_OK)
+
+    def test_always_writable_case_follows_the_file_system(self):
+        aw = self.root / "AwDir"
+        aw.mkdir()
+        write_active_plan(self.plans, str(self.work / "unrelated.txt"))
+        env = {"PLAN_GATE_ALWAYS_WRITABLE": str(aw)}
+        p = self.edit(self.root / "awdir" / "f.txt", extra_env=env)
+        expected = AW_OK if _fs_is_case_insensitive(self.root) else "deny"
+        self.assertEqual(decision(p), expected)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
