@@ -3607,6 +3607,84 @@ def _load_gate_module():
     return mod
 
 
+class CaseProbeTests(unittest.TestCase):
+    """_name_folds decides case-insensitivity by inode identity. A case-sensitive
+    volume is not available on every host (this suite's author ran on macOS), so
+    the filesystem is simulated by patching os.lstat / os.listdir / os.path.lexists
+    inside the gate module's `os`; the real-FS check at the end runs everywhere."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.g = _load_gate_module()
+
+    class _Stat(object):
+        def __init__(self, ino):
+            self.st_dev, self.st_ino = 1, ino
+
+    def fake_fs(self, entries, insensitive):
+        """entries: {dirpath: {name: ino}}. insensitive: lookups fold case."""
+        _Stat = self._Stat
+        def lookup(path):
+            d, n = os.path.split(path)
+            ents = entries.get(d, {})
+            if n in ents:
+                return ents[n]
+            if insensitive:
+                for k, v in ents.items():
+                    if k.lower() == n.lower():
+                        return v
+            return None
+        def lstat(path):
+            ino = lookup(path)
+            if ino is None:
+                raise FileNotFoundError(path)
+            return _Stat(ino)
+        def listdir(path):
+            return list(entries.get(path, {}))
+        return lstat, listdir
+
+    def folds(self, entries, insensitive, parent, name):
+        from unittest import mock
+        lstat, listdir = self.fake_fs(entries, insensitive)
+        with mock.patch.object(self.g.os, "lstat", lstat), \
+                mock.patch.object(self.g.os, "listdir", listdir):
+            return self.g._name_folds(parent, name)
+
+    def test_case_insensitive_volume_folds(self):
+        ents = {"/m": {"Plans": 7}}
+        self.assertIs(self.folds(ents, True, "/m", "Plans"), True)
+        self.assertIs(self.folds(ents, True, "/m", "PLANS"), True)  # not-stored spelling
+
+    def test_case_sensitive_volume_does_not_fold(self):
+        ents = {"/m": {"Plans": 7}}
+        self.assertIs(self.folds(ents, False, "/m", "Plans"), False)
+
+    def test_a_case_swapped_symlink_does_not_make_a_sensitive_volume_look_insensitive(self):
+        # real dir PLANS/evil.txt (ino 5) and a symlink EVIL.TXT (its own inode, 6)
+        ents = {"/m/PLANS": {"evil.txt": 5, "EVIL.TXT": 6}}
+        self.assertIs(self.folds(ents, False, "/m/PLANS", "evil.txt"), False)
+        self.assertIs(self.folds(ents, False, "/m/PLANS", "EVIL.TXT"), False)
+
+    def test_two_hardlinked_spellings_on_a_sensitive_volume_do_not_fold(self):
+        ents = {"/m": {"a.txt": 9, "A.TXT": 9}}
+        self.assertIs(self.folds(ents, False, "/m", "a.txt"), False)
+
+    def test_names_without_letters_and_errors_are_inconclusive(self):
+        self.assertIsNone(self.folds({"/m": {"123": 1}}, True, "/m", "123"))
+        self.assertIsNone(self.folds({"/m": {}}, True, "/m", "gone"))
+
+    def test_real_filesystem_matches_an_independent_probe(self):
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.realpath(d)
+            (Path(real) / "CaseProbe").mkdir()
+            expected = (Path(real) / "caseprobe").exists()
+            self.assertIs(self.g._name_folds(real, "CaseProbe"), expected)
+            # a file system that folds case: keys for two spellings agree; else they differ
+            ka = self.g._real_key(os.path.join(real, "CaseProbe", "New.txt"))
+            kb = self.g._real_key(os.path.join(real, "caseprobe", "new.txt"))
+            self.assertEqual(ka == kb, expected)
+
+
 class FileCommandParserTests(unittest.TestCase):
     """The pure option parsers behind FileCommandLeaseTests."""
 

@@ -1154,52 +1154,48 @@ def norm(p: str) -> str:
 #     inside the allowed dir) and a symlink inside an always-writable dir that points
 #     out of it cannot ride a lexical prefix. A target that does not exist yet is
 #     resolved through its deepest existing ancestor (os.path.realpath is non-strict).
-#   * case is folded ONLY on a file system that is case-insensitive (probed, below).
+#   * case is folded ONLY on a file system that is case-insensitive (probed per path
+#     component by inode identity, below).
 #     Folding on a case-sensitive FS would let `/Plans/x` pass for `/plans/x`; not
 #     folding on a case-insensitive one only denies a legitimate spelling. So an
 #     inconclusive probe means "do not fold": the fail-closed direction for a grant.
 # Deny-type checks keep norm() (always lowercased): over-matching there only denies.
-def _fs_case_insensitive(real: str) -> bool:
-    """True when the file system holding `real` (an already-resolved path) treats
-    names differing only in case as the same file. Windows: yes. Elsewhere: probe the
-    deepest existing component of the path (or the nearest ancestor with a cased
-    letter in its name) by looking up its case-swapped name and comparing identity.
-    Any doubt or error -> False."""
-    if os.name == "nt":
-        return True
-    cur = real
+def _name_folds(parent: str, name: str):
+    """Does directory `parent` match the existing entry `name` case-insensitively?
+    True / False, or None when this name cannot tell (no cased letters, or an error).
+    The case-swapped spelling must resolve (by lstat, so a symlink named like that is
+    its OWN inode, not the file it points at) to the very same inode, and the two
+    spellings must not both be listed as separate directory entries (that is two
+    hardlinks on a case-sensitive FS). Anything else -> False: never fold on doubt."""
+    swapped = name.swapcase()
+    if swapped == name:
+        return None
     try:
-        for _ in range(256):
-            if os.path.lexists(cur):
-                break
-            parent = os.path.dirname(cur)
-            if parent == cur:
-                return False
-            cur = parent
-        else:
-            return False
-        for _ in range(256):
-            base = os.path.basename(cur)
-            swapped = base.swapcase()
-            if swapped != base:
-                alt = os.path.join(os.path.dirname(cur), swapped)
-                return os.path.lexists(alt) and os.path.samefile(cur, alt)
-            parent = os.path.dirname(cur)
-            if parent == cur:
-                return False
-            cur = parent
-    except (OSError, ValueError):
+        a = os.lstat(os.path.join(parent, name))
+    except OSError:
+        return None
+    try:
+        b = os.lstat(os.path.join(parent, swapped))
+    except OSError:
         return False
-    return False
+    if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+        return False
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return False
+    return not (name in names and swapped in names)
 
 
 def _real_key(p: str):
     """Comparison key for an allow-type match, or None when the path cannot be
     resolved (never matches). An absolute path is resolved with realpath on the RAW
     string (not pre-collapsed: `link/..` must step up from the link's target, as the
-    OS does) and case-folded only on a case-insensitive FS. A relative path has no
-    resolvable location and keeps the old lexical form (it can only equal another
-    relative path, never an absolute one)."""
+    OS does). Case is folded per path COMPONENT, and only where that component's
+    directory is shown (_name_folds) to be case-insensitive; a component that does not
+    exist yet inherits its parent's answer. On Windows everything folds. A relative
+    path has no resolvable location and keeps the old lexical form (it can only equal
+    another relative path, never an absolute one)."""
     s = str(p)
     if not os.path.isabs(s):
         return norm(os.path.normpath(s))
@@ -1207,10 +1203,24 @@ def _real_key(p: str):
         real = os.path.realpath(s)
     except (OSError, ValueError):
         return None
-    key = real.replace("\\", "/")
-    if _fs_case_insensitive(real):
-        key = key.lower()
-    return key.rstrip("/")
+    if os.name == "nt":
+        return real.replace("\\", "/").lower().rstrip("/")
+    cur, fold, out = "/", False, []
+    for comp in real.split("/"):
+        if not comp:
+            continue
+        child = os.path.join(cur, comp)
+        try:
+            exists = os.path.lexists(child)
+        except (OSError, ValueError):
+            return None
+        if exists:
+            f = _name_folds(cur, comp)
+            if f is not None:
+                fold = f
+        cur = child
+        out.append(comp.lower() if fold else comp)
+    return ("/" + "/".join(out)).rstrip("/")
 
 
 def _path_matches_allowed(target: str, resolved_paths) -> bool:
