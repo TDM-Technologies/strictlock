@@ -3334,6 +3334,93 @@ class ApprovalTests(unittest.TestCase):
         self.assertLess(time.time() - t0, 10.0)
 
 
+class WorktreeBypassValueTests(unittest.TestCase):
+    """`worktree_bypass:` is honored only as the unquoted, lowercase literal
+    `true`. Any other value is REFUSED (a denial naming the field), never guessed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self.plans = self.root / "plans"
+        self.plans.mkdir()
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.target = self.root / "elsewhere" / "app.py"
+        self.logs = self.root / "logs"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def plan(self, value_line, status="active"):
+        (self.plans / "active.md").write_text(
+            "---\nname: x\nstatus: %s\n%s\nallowed_paths:\n  - %s\n---\n"
+            % (status, value_line, self.target), encoding="utf-8")
+
+    def edit(self, path=None, **kw):
+        kw.setdefault("cwd", self.work)
+        return run_gate({"tool_name": "Edit", "tool_input": {"file_path": str(path or self.target)}},
+                        self.plans, **kw)
+
+    def reason(self, proc):
+        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_literal_true_is_honored(self):
+        for line in ("worktree_bypass: true", "worktree_bypass: true   # cross-tree",
+                     "worktree_bypass:true"):
+            self.plan(line)
+            self.assertEqual(decision(self.edit()), "allow", msg=line)
+
+    def test_every_other_value_is_refused_with_a_clear_message(self):
+        for value in ("yes", "True", "TRUE", "1", "on", "false", "no", "y", "t",
+                      '"true"', "'true'", '"True"', "tru", "true false", "[]"):
+            self.plan("worktree_bypass: %s" % value)
+            p = self.edit(log_dir=self.logs)
+            self.assertEqual(decision(p), "deny", msg=value)
+            r = self.reason(p)
+            self.assertIn("worktree_bypass", r, msg=value)
+            self.assertIn("`true`", r, msg=value)
+        rows = [json.loads(x) for x in
+                (self.logs / "plan-gate-decisions.log").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual({r["class"] for r in rows}, {"worktree_bypass_invalid"})
+
+    def test_empty_value_is_refused(self):
+        self.plan("worktree_bypass:")
+        p = self.edit()
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("(empty)", self.reason(p))
+
+    def test_refused_value_is_refused_in_a_worktree_session_too(self):
+        main = self.root / "main"
+        (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
+        wt = self.root / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text(
+            "gitdir: %s\n" % (main / ".git" / "worktrees" / "wt"), encoding="utf-8")
+        self.plan("worktree_bypass: yes")
+        p = self.edit(cwd=wt)
+        self.assertEqual(decision(p), "deny")
+        self.assertIn("worktree_bypass", self.reason(p))
+
+    def test_non_active_plan_with_a_bad_value_does_not_block(self):
+        self.plan("worktree_bypass: yes", status="archived")
+        # no active plan -> the ordinary "no active plan" denial, not the bypass one
+        p = self.edit()
+        self.assertEqual(decision(p), "deny")
+        self.assertNotIn("worktree_bypass", self.reason(p).replace("worktree_bypass: true", ""))
+
+    def test_plan_without_the_field_is_unaffected(self):
+        (self.plans / "active.md").write_text(
+            "---\nname: x\nstatus: active\nallowed_paths:\n  - %s\n---\n" % self.target,
+            encoding="utf-8")
+        self.assertEqual(decision(self.edit()), "allow")
+
+    def test_the_plan_can_still_be_fixed_through_an_always_writable_plans_dir(self):
+        self.plan("worktree_bypass: yes")
+        p = self.edit(self.plans / "active.md",
+                      extra_env={"PLAN_GATE_ALWAYS_WRITABLE": str(self.plans)})
+        self.assertEqual(decision(p), AW_OK)
+
+
 AW_OK = "allow"  # what a write into an always-writable dir decides
 
 

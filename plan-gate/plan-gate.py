@@ -2019,6 +2019,7 @@ def parse_frontmatter(text: str) -> dict:
         if ":" in line and not line.startswith((" ", "\t")):
             key, _, value = line.partition(":")
             key = key.strip()
+            value_raw = value
             value = _strip_scalar(value)
             if value == "" or value == "[]":
                 # Empty scalar OR inline empty array -> a REAL empty list.
@@ -2030,7 +2031,55 @@ def parse_frontmatter(text: str) -> dict:
             else:
                 result[key] = value
                 current_key = None
+                if key == "worktree_bypass":
+                    # _strip_scalar drops the quotes; remember whether there were
+                    # any, because only the unquoted YAML boolean `true` is honored.
+                    result["_worktree_bypass_quoted"] = (
+                        value_raw.strip()[:1] in ("'", '"'))
     return result
+
+
+def _bypass_state(fm: dict):
+    """worktree_bypass of one parsed plan: None (field absent), True (honored), or
+    False (present but not the literal `true`: REFUSED, see invalid_bypass_plans).
+    Only the unquoted, lowercase YAML boolean `true` is honored; `True`, `yes`, `1`,
+    `on`, a quoted "true", `false`, and an empty value are all refused rather than
+    guessed at."""
+    if "worktree_bypass" not in fm:
+        return None
+    if fm["worktree_bypass"] == "true" and not fm.get("_worktree_bypass_quoted"):
+        return True
+    return False
+
+
+def _bypass_shown(fm: dict) -> str:
+    v = fm.get("worktree_bypass")
+    if fm.get("_worktree_bypass_quoted"):
+        return '"%s"' % _safe_str(str(v), 40)
+    return _safe_str(str(v) if isinstance(v, str) and v else "(empty)", 40)
+
+
+def invalid_bypass_plans() -> list[tuple[str, str]]:
+    """[(plan file name, shown value)] for every `status: active` plan in the plans
+    directory whose worktree_bypass is present but not the literal `true`. Such a
+    plan is not honored as a bypass AND the gate denies while it is active: a
+    mis-spelled opt-out must be fixed, not silently turned into a different scope
+    (it would otherwise change every session's single-active invariant)."""
+    if PLANS_DIR is None or not PLANS_DIR.is_dir():
+        return []
+    bad: list[tuple[str, str]] = []
+    for md in sorted(PLANS_DIR.glob("*.md")):
+        try:
+            text = md.read_bytes().decode("utf-8", "replace").replace(
+                "\r\n", "\n").replace("\r", "\n")
+        except OSError:
+            continue
+        fm = parse_frontmatter(text)
+        if str(fm.get("status", "")).strip().lower() != "active":
+            continue
+        if _bypass_state(fm) is False:
+            bad.append((md.name, _bypass_shown(fm)))
+    return bad
 
 
 def find_active_plans(
@@ -2092,7 +2141,7 @@ def find_active_plans(
         claimed = False
         if worktree_root is None:
             claimed = True
-        elif str(fm.get("worktree_bypass", "")).strip().lower() == "true":
+        elif _bypass_state(fm) is True:
             claimed = True
         else:
             for ap in fm.get("allowed_paths") or []:
@@ -3613,6 +3662,18 @@ def main() -> None:
     approval_required, approval_cfg_error = _approval_mode()
     if approval_cfg_error:
         gated_deny(approval_cfg_error, class_="approval_config")
+    bad_bypass = invalid_bypass_plans()
+    if bad_bypass:
+        shown = "; ".join(f"{n}: worktree_bypass: {v}" for n, v in bad_bypass[:5])
+        gated_deny(
+            f"plan-gate: an active plan has a worktree_bypass value the gate refuses "
+            f"({shown}). The only accepted value is the unquoted, lowercase literal "
+            f"`true` (worktree_bypass: true); yes, True, 1, on, \"true\", false and an "
+            f"empty value are refused, not guessed at. Set it to `true`, or delete "
+            f"the line. If plan approval is on, the edit voids the approval: a human "
+            f"approves the plan again.",
+            class_="worktree_bypass_invalid",
+        )
     actives = find_active_plans(worktree_root=worktree_root)
     if not actives and approval_required:
         # A plan can say `status: active` and still not count: nobody approved
@@ -3663,7 +3724,7 @@ def main() -> None:
         name_parts: list[str] = []
         bypass_count = 0
         for p, f in actives:
-            if str(f.get("worktree_bypass", "")).strip().lower() == "true":
+            if _bypass_state(f) is True:
                 name_parts.append(f"{p.name} (worktree_bypass: true)")
                 bypass_count += 1
             else:
@@ -3716,7 +3777,7 @@ def main() -> None:
     # allowed_paths entry resolving under worktree_root, so any plan that
     # reaches this point already satisfies the guard's condition. The silent-
     # drift diagnostic now fires from the no-claim path above.)
-    bypass = str(fm.get("worktree_bypass", "")).strip().lower() == "true"
+    bypass = _bypass_state(fm) is True
 
     # === Disjoint paths check ===
     # Skipped when MY plan is `worktree_bypass: true` (bypass plans are cross-tree
