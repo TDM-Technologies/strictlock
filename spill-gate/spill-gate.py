@@ -12,7 +12,8 @@ Three modes (one single file, standard library only):
                working tree). Wire it as the `pre-commit` hook.
   pre-push     reads git's pre-push stdin and scans every commit that is about to
                be pushed, one commit at a time (so a secret added then removed in a
-               later commit is still caught). A brand-new branch with no remote
+               later commit is still caught; merge commits are scanned for what
+               the merge itself introduced). A brand-new branch with no remote
                base scans the commits not reachable from any ref of that remote.
   scan-tree    scans every tracked file of a revision (default HEAD) in full —
                for dogfooding / auditing a repo that already exists.
@@ -39,37 +40,52 @@ import sys
 import traceback
 from pathlib import Path
 
-ENV_ENABLE = "SPILL_GATE"                # on/1/true/yes enables the gate; else inert.
-ENV_ALLOWLIST = "SPILL_GATE_ALLOWLIST"   # allowlist file (repo-root-relative or absolute).
-ENV_LOG_DIR = "SPILL_GATE_LOG_DIR"       # optional dir for the append-only decision log.
-ENV_BYPASS = "SPILL_GATE_BYPASS"         # on/1/true/yes = logged bypass.
+ENV_ENABLE = "SPILL_GATE"                  # on/1/true/yes enables the gate; else inert.
+ENV_ALLOWLIST = "SPILL_GATE_ALLOWLIST"     # explicit allowlist file override (trusted, on disk).
+ENV_LOG_DIR = "SPILL_GATE_LOG_DIR"         # optional dir for the append-only decision log.
+ENV_BYPASS = "SPILL_GATE_BYPASS"           # pre-commit bypass (on/1/true/yes).
+ENV_PUSH_BYPASS = "SPILL_GATE_PUSH_BYPASS"  # pre-push bypass - distinct on purpose.
 
-DEFAULT_ALLOWLIST = ".spill-gate-allow"
+ALLOWLIST_NAME = ".spill-gate-allow"
 EXIT_ALLOW = 0
 EXIT_BLOCK = 1
 EXIT_USAGE = 2
 ZERO_SHA = "0" * 40
 _TRUTHY = ("on", "1", "true", "yes")
 
+
+class ConfigError(Exception):
+    """Bad allowlist / marker content: always a block, never a pass."""
+
+
 # --- rules -------------------------------------------------------------------
-# (name, compiled regex). The first group of rules mirrors CI's secret-scan job
-# (private keys, AWS key id, GitHub PAT, UUID, machine path); the rest are token
-# shapes with a distinctive prefix + length, chosen for a low false-positive rate.
+# The first group mirrors CI's secret-scan job (private keys, AWS key id, GitHub
+# token, UUID, machine path) and drops word boundaries exactly where CI has none,
+# so a token glued to an identifier (`AWS_KEY_AKIA...`) is still caught. The rest
+# are token shapes with a distinctive prefix + length, chosen for a low
+# false-positive rate.
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_USER = r"[A-Za-z0-9_.@-]*"
+_SEP = r"(?:\\\\|\\|/)"
 RULES = [
     ("private-key", re.compile(r"BEGIN (?:RSA |EC |OPENSSH |PGP |DSA |ENCRYPTED )?PRIVATE KEY")),
-    ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("github-token", re.compile(r"\b(?:gh[pousr]_[0-9A-Za-z]{36,}|github_pat_[0-9A-Za-z_]{22,})")),
-    ("slack-token", re.compile(r"\bxox[abprs]-[0-9A-Za-z-]{10,}")),
-    ("api-key-sk", re.compile(r"\bsk-(?:ant-|proj-)[0-9A-Za-z_-]{20,}")),
-    ("stripe-live-key", re.compile(r"\b[sr]k_live_[0-9A-Za-z]{20,}")),
-    ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("aws-access-key", re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")),
+    ("github-token", re.compile(r"(?:gh[pousr]_[0-9A-Za-z]{36,}|github_pat_[0-9A-Za-z_]{22,})")),
+    ("slack-token", re.compile(r"xox[abprs]-[0-9A-Za-z-]{10,}")),
+    ("api-key-sk", re.compile(r"(?<![A-Za-z0-9])sk-(?:ant-|proj-)[0-9A-Za-z_-]{20,}")),
+    ("stripe-live-key", re.compile(r"(?<![A-Za-z0-9])[sr]k_live_[0-9A-Za-z]{20,}")),
+    ("google-api-key", re.compile(r"AIza[0-9A-Za-z_-]{35}")),
     ("uuid", re.compile(_UUID)),
-    # /Users/<name>, <Drive>:\Users, /home/<name>/ — a machine path with a user name.
-    ("machine-path", re.compile(r"(?:/Users/[A-Za-z]|[A-Za-z]:(?:\\\\|\\|/)Users|/home/[A-Za-z_][A-Za-z0-9_.-]*/)")),
+    # A machine path WITH its whole user segment: /Users/<name>, <Drive>:\Users[\<name>],
+    # /home/<name>/. (So a `literal` for one user cannot exempt a longer name.)
+    ("machine-path", re.compile(
+        r"(?:/Users/[A-Za-z]" + _USER
+        + r"|[A-Za-z]:" + _SEP + r"Users(?:" + _SEP + r"[^\\/\s\"'`<>]*)?"
+        + r"|/home/[A-Za-z_]" + _USER + r"/)")),
 ]
 RULE_NAMES = {n for n, _ in RULES}
-_MARKER = re.compile(r"spill-gate:\s*allow(?:=([A-Za-z0-9_,-]+))?")
+# Exact marker: `spill-gate: allow` or `spill-gate: allow=rule[,rule]`, nothing glued after it.
+_MARKER = re.compile(r"spill-gate: allow(?:=([A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*))?(?![A-Za-z0-9_=,-])")
 
 
 def _env_truthy(name: str) -> bool:
@@ -106,6 +122,13 @@ def allow(repo_root, reason: str) -> None:
     sys.exit(EXIT_ALLOW)
 
 
+def bypass(repo_root, var: str) -> None:
+    print(f"spill-gate: BYPASSED - {var} is on; gate skipped for this run "
+          f"(logged only if {ENV_LOG_DIR} is set).", file=sys.stderr)
+    _log(repo_root, "bypass", f"{var} explicit bypass")
+    sys.exit(EXIT_ALLOW)
+
+
 def block(repo_root, reason: str) -> None:
     print(f"spill-gate: BLOCKED - {reason}", file=sys.stderr)
     _log(repo_root, "block", reason)
@@ -120,13 +143,26 @@ def _clean_git_env() -> dict:
     return env
 
 
-def _git_raw(args, cwd, keep_index_env: bool = False):
+# User diff config must not change what we parse.
+_GIT_NEUTRAL = [
+    "-c", "core.quotepath=off", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false",
+    "-c", "diff.suppressBlankEmpty=false", "-c", "diff.interHunkContext=0",
+]
+# --text: never let a `-diff`/`binary` attribute (or a NUL heuristic) hide a file's content.
+_DIFF_ARGS = [
+    "-U0", "--inter-hunk-context=0", "--text", "--no-color", "--no-ext-diff", "--no-textconv",
+    "--no-renames", "--diff-filter=ACMRTUX", "--src-prefix=a/", "--dst-prefix=b/",
+]
+
+
+def _git_raw(args, cwd, keep_index_env: bool = False, stdin: bytes = None):
     """Run git; return (returncode, stdout bytes). OS failure -> fail-closed."""
     try:
         r = subprocess.run(
-            ["git", "-c", "core.quotepath=off", *args],
+            ["git", *_GIT_NEUTRAL, *args],
             cwd=str(cwd) if cwd else None,
             capture_output=True,
+            input=stdin,
             timeout=120,
             env=dict(os.environ) if keep_index_env else _clean_git_env(),
         )
@@ -136,8 +172,8 @@ def _git_raw(args, cwd, keep_index_env: bool = False):
         raise
 
 
-def _git_ok(args, cwd, keep_index_env: bool = False) -> bytes:
-    rc, out = _git_raw(args, cwd, keep_index_env)
+def _git_ok(args, cwd, keep_index_env: bool = False, stdin: bytes = None) -> bytes:
+    rc, out = _git_raw(args, cwd, keep_index_env, stdin)
     if rc != 0:
         block(cwd, f"`git {' '.join(args)}` exited {rc} - fail-closed.")
     return out
@@ -207,30 +243,17 @@ class Allowlist:
         return text in self.literals
 
 
-def load_allowlist(repo_root: Path) -> Allowlist:
-    name = os.environ.get(ENV_ALLOWLIST, "").strip() or DEFAULT_ALLOWLIST
-    p = Path(name)
-    explicit = bool(os.environ.get(ENV_ALLOWLIST, "").strip())
-    if not p.is_absolute():
-        p = repo_root / p
+def parse_allowlist(repo_root, text: str, label: str) -> Allowlist:
     al = Allowlist()
-    if not p.exists():
-        if explicit:
-            block(repo_root, f"allowlist {p} named by {ENV_ALLOWLIST} does not exist - fail-closed.")
-        return al
-    try:
-        text = p.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        block(repo_root, f"cannot read allowlist {p} ({e}) - fail-closed.")
-        raise
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        where = f"allowlist {label} line {n}"
         if line.startswith("literal ") or line.startswith("literal\t"):
             lit = line[len("literal"):].strip()
             if not lit:
-                block(repo_root, f"allowlist line {n}: empty literal - fail-closed.")
+                block(repo_root, f"{where}: empty literal - fail-closed.")
             al.literals.add(lit)
             continue
         parts = line.split()
@@ -238,25 +261,63 @@ def load_allowlist(repo_root: Path) -> Allowlist:
             rules = None
             if len(parts) == 3:
                 if not parts[2].startswith("rules="):
-                    block(repo_root, f"allowlist line {n}: expected rules=a,b, got {parts[2]!r} - fail-closed.")
+                    block(repo_root, f"{where}: expected rules=a,b, got {parts[2]!r} - fail-closed.")
                 rules = frozenset(r for r in parts[2][6:].split(",") if r)
                 unknown = rules - RULE_NAMES
                 if not rules or unknown:
-                    block(repo_root, f"allowlist line {n}: unknown rule(s) {sorted(unknown) or '(none given)'} - fail-closed.")
+                    block(repo_root, f"{where}: unknown rule(s) {sorted(unknown) or '(none given)'} - fail-closed.")
             al.paths.append((_glob_to_regex(parts[1]), rules))
             continue
-        block(repo_root, f"allowlist line {n}: cannot parse {line!r} - fail-closed.")
+        block(repo_root, f"{where}: cannot parse {line!r} - fail-closed.")
     return al
+
+
+def load_allowlist(repo_root: Path, spec: str) -> Allowlist:
+    """The allowlist the gate honors comes from GIT, not the working tree:
+    `spec` is the index entry (":0:.spill-gate-allow") or a commit's copy
+    ("<sha>:.spill-gate-allow"). Absent there means no allowlist - an untracked or
+    unstaged file on disk cannot loosen the gate. SPILL_GATE_ALLOWLIST is an explicit,
+    trusted override that reads a file from disk instead."""
+    override = os.environ.get(ENV_ALLOWLIST, "").strip()
+    if override:
+        p = Path(override)
+        if not p.is_absolute():
+            p = repo_root / p
+        if not p.exists():
+            block(repo_root, f"allowlist {p} named by {ENV_ALLOWLIST} does not exist - fail-closed.")
+        try:
+            return parse_allowlist(repo_root, p.read_text(encoding="utf-8"), str(p))
+        except (OSError, UnicodeDecodeError) as e:
+            block(repo_root, f"cannot read allowlist {p} ({e}) - fail-closed.")
+            raise
+    rc, _ = _git_raw(["cat-file", "-e", spec], repo_root, keep_index_env=True)
+    if rc != 0:
+        return Allowlist()  # not in git -> no allowlist (the strict direction)
+    raw = _git_ok(["show", spec], repo_root, keep_index_env=True)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        block(repo_root, f"allowlist {spec} is not valid UTF-8 ({e}) - fail-closed.")
+        raise
+    return parse_allowlist(repo_root, text, spec)
 
 
 # --- scanning ----------------------------------------------------------------
 def scan_line(path: str, lineno: int, line: str, al: Allowlist, where: str = ""):
-    """Return findings [(where, path, lineno, rule, matched)] for one line."""
+    """Return findings [(where, path, lineno, rule, matched)] for one line.
+
+    NULs are dropped first, so ASCII text inside UTF-16/UTF-32 data and binary blobs
+    is still matched."""
+    if "\0" in line:
+        line = line.replace("\0", "")
     findings = []
-    m = _MARKER.search(line)
     marker_rules = None   # None = no marker; empty set = all rules
+    m = _MARKER.search(line)
     if m:
         marker_rules = set(r for r in (m.group(1) or "").split(",") if r)
+        unknown = marker_rules - RULE_NAMES
+        if unknown:
+            raise ConfigError(f"{path}:{lineno}: spill-gate marker names unknown rule(s) {sorted(unknown)} - fail-closed.")
     for rule, rx in RULES:
         for hit in rx.finditer(line):
             if marker_rules is not None and (not marker_rules or rule in marker_rules):
@@ -274,8 +335,6 @@ def _redact(s: str) -> str:
 
 
 def scan_blob(path: str, data: bytes, al: Allowlist, where: str = ""):
-    if b"\0" in data:
-        return []
     text = data.decode("utf-8", errors="replace")
     out = []
     for i, line in enumerate(text.splitlines(), 1):
@@ -283,35 +342,51 @@ def scan_blob(path: str, data: bytes, al: Allowlist, where: str = ""):
     return out
 
 
+_HUNK = re.compile(r"^(@{2,}) .*? \+(\d+)(?:,\d+)? @{2,}")
+
+
 def scan_diff(diff: bytes, al: Allowlist, where: str = ""):
-    """Scan the '+' lines of a `git diff -U0` / `git diff-tree -p -U0` output."""
+    """Scan the added lines of `git diff -U0` / `git diff-tree -p --cc` output.
+
+    Parsed by line shape, not by counts: hunk-body lines start with a space, '+' or
+    '-' (`ncols` of them in a combined diff), while a header can only start with
+    'd' (diff ...) or '@'. So context lines are tolerated, line numbers stay right,
+    and a new `diff ` line always resets the file/hunk state."""
     findings = []
     path = None
+    in_hunk = False
+    ncols = 1
     new_line = 0
-    minus_left = plus_left = 0
     for raw in diff.decode("utf-8", errors="replace").split("\n"):
-        if minus_left > 0 and raw.startswith("-"):
-            minus_left -= 1
+        if raw.startswith("diff "):
+            in_hunk = False
+            path = None
+            for pre in ("diff --cc ", "diff --combined "):
+                if raw.startswith(pre):
+                    path = raw[len(pre):].rstrip("\r")
             continue
-        if plus_left > 0 and raw.startswith("+"):
-            plus_left -= 1
-            if path is not None:
-                findings.extend(scan_line(path, new_line, raw[1:], al, where))
-            new_line += 1
+        m = _HUNK.match(raw)
+        if m and not (in_hunk and raw[:1] in ("+", "-", " ")):
+            in_hunk = True
+            ncols = len(m.group(1)) - 1
+            new_line = int(m.group(2))
+            continue
+        if not in_hunk:
+            if raw.startswith("+++ "):
+                p = raw[4:].rstrip("\r")
+                if p.endswith("\t"):
+                    p = p[:-1]
+                path = None if p == "/dev/null" else (p[2:] if p.startswith("b/") else p)
             continue
         if raw.startswith("\\"):
             continue
-        if raw.startswith("+++ "):
-            p = raw[4:].rstrip("\r")
-            if p.endswith("\t"):
-                p = p[:-1]
-            path = None if p == "/dev/null" else (p[2:] if p.startswith("b/") else p)
-            continue
-        m = re.match(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", raw)
-        if m:
-            minus_left = int(m.group(1)) if m.group(1) is not None else 1
-            new_line = int(m.group(2))
-            plus_left = int(m.group(3)) if m.group(3) is not None else 1
+        prefix = raw[:ncols]
+        if "-" in prefix:
+            continue                     # removed: not a line of the result
+        if prefix == "+" * ncols and len(raw) >= ncols and ncols > 0 and raw[:1] == "+":
+            if path is not None:
+                findings.extend(scan_line(path, new_line, raw[ncols:], al, where))
+        new_line += 1
     return findings
 
 
@@ -333,14 +408,11 @@ def report(repo_root, findings, context: str) -> None:
 
 
 # --- modes -------------------------------------------------------------------
-def mode_pre_commit(repo_root: Path, al: Allowlist) -> None:
-    # The index (--cached), never the working tree. --no-renames: a renamed file is
-    # re-scanned in full as an addition, so moving a file cannot dodge a path rule.
-    diff = _git_ok(
-        ["diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--no-textconv",
-         "--no-renames", "--diff-filter=ACMR", "--src-prefix=a/", "--dst-prefix=b/"],
-        repo_root, keep_index_env=True,
-    )
+def mode_pre_commit(repo_root: Path) -> None:
+    # The allowlist is the INDEX copy; the diff is the index (--cached), never the
+    # working tree. --no-renames: a renamed file is re-scanned in full as an addition.
+    al = load_allowlist(repo_root, ":0:" + ALLOWLIST_NAME)
+    diff = _git_ok(["diff", "--cached", *_DIFF_ARGS], repo_root, keep_index_env=True)
     report(repo_root, scan_diff(diff, al), "staged changes")
 
 
@@ -354,7 +426,7 @@ def _commits_to_push(repo_root: Path, remote_name: str, local_sha: str, remote_s
     return _git_ok(["rev-list", "--reverse", local_sha, "--not", spec], repo_root).decode().split()
 
 
-def mode_pre_push(repo_root: Path, al: Allowlist, args) -> None:
+def mode_pre_push(repo_root: Path, args) -> None:
     remote_name = args[0] if args else ""
     stdin = sys.stdin.read()
     seen, findings = set(), []
@@ -367,21 +439,22 @@ def mode_pre_push(repo_root: Path, al: Allowlist, args) -> None:
         _lref, local_sha, _rref, remote_sha = parts
         if local_sha == ZERO_SHA:
             continue  # branch deletion pushes no content
+        # The allowlist is the one the pushed tip carries (absent there = none).
+        al = load_allowlist(repo_root, f"{local_sha}:{ALLOWLIST_NAME}")
         for c in _commits_to_push(repo_root, remote_name, local_sha, remote_sha):
             if c in seen:
                 continue
             seen.add(c)
+            # --cc: a merge shows what the merge itself introduced (plain diff-tree -p is empty for merges).
             diff = _git_ok(
-                ["diff-tree", "-p", "-r", "--root", "-U0", "--no-commit-id", "--no-color",
-                 "--no-ext-diff", "--no-textconv", "--no-renames", "--diff-filter=ACMR",
-                 "--src-prefix=a/", "--dst-prefix=b/", c],
+                ["diff-tree", "-p", "-r", "--root", "--cc", "--no-commit-id", *_DIFF_ARGS, c],
                 repo_root,
             )
             findings.extend(scan_diff(diff, al, where=c[:8]))
     report(repo_root, findings, f"{len(seen)} commit(s) being pushed")
 
 
-def mode_scan_tree(repo_root: Path, al: Allowlist, args) -> None:
+def mode_scan_tree(repo_root: Path, args) -> None:
     rev = "HEAD"
     if args:
         if len(args) == 2 and args[0] == "--rev":
@@ -389,16 +462,32 @@ def mode_scan_tree(repo_root: Path, al: Allowlist, args) -> None:
         else:
             print("usage: spill-gate.py scan-tree [--rev REV]", file=sys.stderr)
             sys.exit(EXIT_USAGE)
-    listing = _git_ok(["ls-tree", "-r", "-z", "--name-only", rev], repo_root).split(b"\0")
-    findings, n = [], 0
-    for rawp in listing:
-        if not rawp:
+    al = load_allowlist(repo_root, f"{rev}:{ALLOWLIST_NAME}")
+    entries = []   # (path, sha); submodules (mode 160000) have no blob here and are skipped
+    for rec in _git_ok(["ls-tree", "-r", "-z", rev], repo_root).split(b"\0"):
+        if not rec:
             continue
-        path = rawp.decode("utf-8", errors="replace")
-        data = _git_ok(["show", f"{rev}:{path}"], repo_root)
-        n += 1
-        findings.extend(scan_blob(path, data, al))
-    report(repo_root, findings, f"{n} file(s) at {rev}")
+        meta, _, rawp = rec.partition(b"\t")
+        mode, typ, sha = meta.decode().split()
+        if mode == "160000" or typ != "blob":
+            continue
+        entries.append((rawp.decode("utf-8", errors="replace"), sha))
+    findings = []
+    for i in range(0, len(entries), 500):
+        chunk = entries[i:i + 500]
+        out = _git_ok(["cat-file", "--batch"], repo_root,
+                      stdin="".join(s + "\n" for _, s in chunk).encode())
+        pos = 0
+        for path, sha in chunk:
+            nl = out.index(b"\n", pos)
+            hdr = out[pos:nl].decode().split()
+            if len(hdr) != 3 or hdr[1] != "blob":
+                block(repo_root, f"unexpected cat-file output for {path} - fail-closed.")
+            size = int(hdr[2])
+            data = out[nl + 1:nl + 1 + size]
+            pos = nl + 1 + size + 1
+            findings.extend(scan_blob(path, data, al))
+    report(repo_root, findings, f"{len(entries)} file(s) at {rev}")
 
 
 def main(argv) -> None:
@@ -417,17 +506,21 @@ def main(argv) -> None:
     if mode != "scan-tree" and not _env_truthy(ENV_ENABLE):
         sys.exit(EXIT_ALLOW)  # inert (allow-all) unless SPILL_GATE=on
     repo_root = resolve_repo_root()
-    if _env_truthy(ENV_BYPASS):
+    # Separate bypass per hook: bypassing the commit gate does not bypass the push backstop.
+    bypass_var = {"pre-commit": ENV_BYPASS, "pre-push": ENV_PUSH_BYPASS}.get(mode)
+    if bypass_var and _env_truthy(bypass_var):
         if mode == "pre-push":
             sys.stdin.read()
-        allow(repo_root, f"{ENV_BYPASS} is on - bypass (logged).")
-    al = load_allowlist(repo_root)
-    if mode == "pre-commit":
-        mode_pre_commit(repo_root, al)
-    elif mode == "pre-push":
-        mode_pre_push(repo_root, al, args)
-    else:
-        mode_scan_tree(repo_root, al, args)
+        bypass(repo_root, bypass_var)
+    try:
+        if mode == "pre-commit":
+            mode_pre_commit(repo_root)
+        elif mode == "pre-push":
+            mode_pre_push(repo_root, args)
+        else:
+            mode_scan_tree(repo_root, args)
+    except ConfigError as e:
+        block(repo_root, str(e))
 
 
 if __name__ == "__main__":

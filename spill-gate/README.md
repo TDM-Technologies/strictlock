@@ -31,10 +31,11 @@ behind it.
 | `stripe-live-key` | `sk_live_` / `rk_live_` + 20 or more characters |
 | `google-api-key` | `AIza` + 35 characters |
 | `uuid` | any canonical 8-4-4-4-12 hex UUID (parity with CI: every UUID is suspect until allowlisted) |
-| `machine-path` | `/Users/<letter>...`, `<Drive>:\Users`, `<Drive>:/Users`, `/home/<name>/` |
+| `machine-path` | `/Users/<name>` (name starts with a letter), `<Drive>:\Users[\<name>]`, `<Drive>:/Users[/<name>]`, `/home/<name>/`; the whole user segment is matched |
 
-The first five CI patterns (private key, AWS key id, GitHub token, UUID, machine path) are all
-covered; the rest are prefixed, length-bounded token shapes chosen to stay quiet on ordinary text.
+The five CI patterns (private key, AWS key id, GitHub token, UUID, machine path) are all covered,
+with no leading word boundary, so a token glued to an identifier is still caught (a test asserts
+this for every CI pattern); the rest are prefixed, length-bounded token shapes chosen to stay quiet on ordinary text.
 `/home/<name>/` is new relative to CI and is the noisiest rule: documentation often uses
 placeholder home paths (see "Allowlist"); the `literal` entry exists for those.
 
@@ -63,7 +64,16 @@ python3 spill-gate.py scan-tree [--rev REV] # scan every tracked file of REV (de
 - **scan-tree** reads whole files of a revision. It is the dogfood / audit mode and runs even when
   `SPILL_GATE` is off.
 
-Binary files (containing a NUL byte) are skipped.
+**What is scanned, honestly.** Every added line of every changed file is scanned as text. Git
+attributes (`-diff`, `binary`) and git's binary heuristic do not exempt a file (the diff is forced
+with `--text`). NUL bytes are dropped from a line before matching, so ASCII inside UTF-16/UTF-32
+text and inside binary blobs is still found. What is *not* found: anything compressed, encrypted,
+base64-wrapped or otherwise encoded (a token in a zip, a packed image, a base64 blob), and text in
+other legacy encodings whose bytes differ from ASCII. Binary files therefore need an allowlist
+entry if they legitimately contain a match. Submodule entries (gitlinks) carry no content here and
+are skipped by `scan-tree`; scan the submodule's own repo. Symlinks are scanned as their target text;
+typechanges (symlink to regular file) are scanned. Merge commits on push are scanned for what the
+merge itself introduced (`--cc`); the commits it brought in are scanned as ordinary commits.
 
 ## Install
 
@@ -89,9 +99,13 @@ once, so a wrapper running several readers must save it first.
 | Variable | Meaning |
 |---|---|
 | `SPILL_GATE` | `on`, `1`, `true` or `yes` (any case) enables the hooks. Anything else: inert. |
-| `SPILL_GATE_ALLOWLIST` | Allowlist file, absolute or repo-root-relative. Default `.spill-gate-allow` at the repo root. If set, the file must exist (a typo fails closed). |
-| `SPILL_GATE_LOG_DIR` | Directory for an append-only JSON-lines log (`spill-gate.log`). Records decisions, never matched text. |
-| `SPILL_GATE_BYPASS` | `on`/`1`/`true`/`yes` skips the gate for that invocation. Set it inline per commit; every use is logged. |
+| `SPILL_GATE_ALLOWLIST` | Explicit, trusted **override**: read this file from disk (absolute or repo-root-relative) instead of the allowlist stored in git. Must exist (a typo fails closed). Unset by default; see "Allowlist". |
+| `SPILL_GATE_LOG_DIR` | Directory for an append-only JSON-lines log (`spill-gate.log`). Records decisions (`allow`, `block`, `bypass`), never matched text. |
+| `SPILL_GATE_BYPASS` | `on`/`1`/`true`/`yes` skips the **pre-commit** gate for that invocation. Set it inline per commit. |
+| `SPILL_GATE_PUSH_BYPASS` | Same, for the **pre-push** gate only. Distinct on purpose (as in `generated-sink-prepush-gate`): bypassing the commit gate does not bypass the push backstop. |
+
+A bypass is always announced on stderr; it is written to the audit log (as decision `bypass`) only
+when `SPILL_GATE_LOG_DIR` is set.
 
 ## Allowlist
 
@@ -99,9 +113,16 @@ Two mechanisms, for the cases where a hit is a deliberate, public-safe example.
 
 **Per-line marker.** Put `spill-gate: allow` anywhere on the line (usually in a comment) to exempt
 that line from every rule, or `spill-gate: allow=uuid,machine-path` to exempt it from named rules
-only. The marker covers only its own line.
+only. The marker is exact: one space after the colon, a comma-separated rule list with no spaces,
+and nothing glued on after it (`allowed`, `allow=uuid,` and `allow=` are not markers). An unknown
+rule name in a marker blocks (fail-closed). The marker covers only its own line.
 
-**Allowlist file** `.spill-gate-allow` (repo root by default), one entry per line, `#` comments:
+**Allowlist file** `.spill-gate-allow` at the repo root, one entry per line, `#` comments. The gate
+reads it **from git, not from the working tree**: the staged copy for pre-commit, the pushed tip
+commit's copy for pre-push, the scanned revision's copy for scan-tree. A file that exists only on
+disk, or an unstaged edit, has no effect; if the file is absent from git there is no allowlist. A
+commit that adds or widens the allowlist is judged by the allowlist it carries, so that change is
+the one to review.
 
 ```text
 # whole files or directories (gitignore-style globs; ** crosses '/', * does not)
@@ -115,8 +136,10 @@ literal <the exact text the gate matched, e.g. a placeholder home path>
 
 A pattern containing no `/` matches the file name at any depth; a trailing `/` means everything
 below. Path globs cannot contain spaces. An unknown rule name, an unparseable line or an unreadable
-file blocks, so a typo can never quietly turn the gate off. The allowlist is read from the working
-tree, so editing it is itself a change to review.
+file blocks, so a typo can never quietly turn the gate off. A `literal` must equal the whole matched
+text, and the machine-path rule matches the whole user segment (the whole name, not its first letter), so a
+literal for one user never exempts a longer name. `SPILL_GATE_ALLOWLIST` replaces the git copy with
+a file on disk; it is meant for a trusted environment (your own shell or CI config), not a default.
 
 **Keeping the gate's own tests clean.** The shipped test suite builds every spill-shaped fixture
 from string fragments at run time, so this module carries no literal secret, UUID or machine path

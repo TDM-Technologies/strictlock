@@ -83,6 +83,10 @@ class Base(unittest.TestCase):
         env.update(extra or {})
         return run([sys.executable, str(GATE), *args], cwd or self.repo, env, stdin)
 
+    def allowlist(self, text):
+        """The gate reads the allowlist from GIT (index / pushed tip), so stage it."""
+        self.stage(".spill-gate-allow", text)
+
     def stage(self, rel, text):
         self.write(rel, text)
         self.git("add", rel)
@@ -156,7 +160,22 @@ class PreCommitNegative(Base):
         logdir = Path(self._tmp.name) / "logs"
         r = self.gate("pre-commit", extra={"SPILL_GATE_BYPASS": "yes", "SPILL_GATE_LOG_DIR": str(logdir)})
         self.assertEqual(r.returncode, 0)
-        self.assertIn("bypass", (logdir / "spill-gate.log").read_text())
+        self.assertIn('"decision": "bypass"', (logdir / "spill-gate.log").read_text())
+
+    def test_bypasses_are_split_per_hook(self):
+        self.stage("f.txt", UUID + "\n")
+        # the commit bypass does not bypass the push backstop, and vice versa
+        base = self.git("rev-parse", "HEAD").strip()
+        tip = self.commit()
+        line = "refs/heads/main %s refs/heads/main %s\n" % (tip, base)
+        r = self.gate("pre-push", "origin", "u", stdin=line, extra={"SPILL_GATE_BYPASS": "on"})
+        self.assertEqual(r.returncode, 1, msg=r.stderr)
+        r = self.gate("pre-push", "origin", "u", stdin=line, extra={"SPILL_GATE_PUSH_BYPASS": "on"})
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("BYPASSED", r.stderr)
+        self.stage("g.txt", UUID + "\n")
+        r = self.gate("pre-commit", extra={"SPILL_GATE_PUSH_BYPASS": "on"})
+        self.assertEqual(r.returncode, 1, msg=r.stderr)
 
     def test_block_is_logged_without_secret(self):
         self.stage("f.txt", GH_TOKEN + "\n")
@@ -176,13 +195,22 @@ class PreCommitNegative(Base):
         self.git("add", "f.txt")
         self.assertEqual(self.gate("pre-commit").returncode, 0)
 
-    def test_deleted_file_ok_and_binary_skipped(self):
+    def test_deleted_file_ok(self):
         (self.repo / "README.txt").unlink()
         self.git("add", "-A")
         self.assertEqual(self.gate("pre-commit").returncode, 0)
-        self.write("b.bin", "\0\0" + UUID + "\0")
+
+    def test_binary_and_utf16_content_is_scanned(self):
+        # No NUL-skip: ASCII inside a NUL-bearing blob, and UTF-16LE text, still match.
+        (self.repo / "b.bin").write_bytes(b"\0\0" + UUID.encode() + b"\0")
         self.git("add", "b.bin")
-        self.assertEqual(self.gate("pre-commit").returncode, 0)
+        self.assertEqual(self.gate("pre-commit").returncode, 1)
+        self.git("reset", "-q")
+        (self.repo / "u16.txt").write_bytes(("﻿" + GH_TOKEN + "\n").encode("utf-16-le"))
+        self.git("add", "u16.txt")
+        r = self.gate("pre-commit")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("github-token", r.stderr)
 
 
 class StagedVsWorktree(Base):
@@ -204,7 +232,7 @@ class StagedVsWorktree(Base):
 
     def test_rename_into_unallowlisted_path_is_rescanned(self):
         self.write("fixtures/x.txt", UUID + "\n")
-        self.write(".spill-gate-allow", "path fixtures/**\n")
+        self.allowlist("path fixtures/**\n")
         self.git("add", "-A")
         self.assertEqual(self.gate("pre-commit").returncode, 0)
         self.commit()
@@ -242,25 +270,25 @@ class Allowlist(Base):
         self.assertNotIn("f.txt:1", r.stderr)
 
     def test_path_glob_all_rules(self):
-        self.write(".spill-gate-allow", "# fixtures\npath tests/fixtures/**\npath *.sample\n")
+        self.allowlist("# fixtures\npath tests/fixtures/**\npath *.sample\n")
         self.stage("tests/fixtures/a/b.txt", UUID + "\n" + MAC_PATH + "\n")
         self.stage("deep/dir/k.sample", GH_TOKEN + "\n")
         self.assertEqual(self.gate("pre-commit").returncode, 0)
 
     def test_path_glob_does_not_overmatch(self):
-        self.write(".spill-gate-allow", "path tests/fixtures/*.txt\n")
+        self.allowlist("path tests/fixtures/*.txt\n")
         self.stage("tests/fixtures/sub/b.txt", UUID + "\n")  # '*' does not cross '/'
         self.assertEqual(self.gate("pre-commit").returncode, 1)
 
     def test_path_with_rules_only_exempts_those_rules(self):
-        self.write(".spill-gate-allow", "path docs/** rules=uuid\n")
+        self.allowlist("path docs/** rules=uuid\n")
         self.stage("docs/a.md", UUID + "\n")
         self.assertEqual(self.gate("pre-commit").returncode, 0)
         self.stage("docs/b.md", MAC_PATH + "\n")
         self.assertEqual(self.gate("pre-commit").returncode, 1)
 
     def test_literal_exception(self):
-        self.write(".spill-gate-allow", "literal " + UUID + "\n")
+        self.allowlist("literal " + UUID + "\n")
         self.stage("f.txt", UUID + "\n")
         self.assertEqual(self.gate("pre-commit").returncode, 0)
         other = UUID[:-1] + "1"
@@ -277,7 +305,7 @@ class Allowlist(Base):
     def test_malformed_allowlist_fails_closed(self):
         for bad in ("bogus line here\n", "path\n", "path x rules=nonsense\n", "path x notrules\n", "literal\n"):
             with self.subTest(bad=bad):
-                self.write(".spill-gate-allow", bad)
+                self.allowlist(bad)
                 self.stage("f.txt", "clean\n")
                 r = self.gate("pre-commit")
                 self.assertEqual(r.returncode, 1, msg=r.stderr)
@@ -397,7 +425,7 @@ class PrePush(Base):
 
     def test_allowlist_applies_on_push(self):
         base = self.git("rev-parse", "HEAD").strip()
-        self.write(".spill-gate-allow", "path fx/**\n")
+        self.allowlist("path fx/**\n")
         self.write("fx/a.txt", UUID + "\n")
         self.git("add", "-A")
         tip = self.commit()
@@ -454,6 +482,211 @@ class ScanTree(Base):
         self.assertEqual(self.gate("scan-tree", "--rev", "HEAD").returncode, 1)
         self.assertEqual(self.gate("scan-tree", "--bogus").returncode, 2)
         self.assertEqual(self.gate("frobnicate").returncode, 2)
+
+
+def load_gate_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sg_under_test", GATE)
+    sg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sg)
+    return sg
+
+
+class ReviewFixes(Base):
+    """Regression tests for the independent review of the first commit."""
+
+    def blob(self, text):
+        r = run(["git", "hash-object", "-w", "--stdin"], self.repo, self.env, stdin=text)
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        return r.stdout.strip()
+
+    # 1. -diff / binary attributes must not hide a file
+    def test_diff_and_binary_attributes_do_not_hide_files_on_commit(self):
+        self.stage(".gitattributes", "*.dat -diff\n*.bin binary\n")
+        self.stage("x.dat", "id " + UUID + "\n")
+        self.stage("y.bin", "id " + UUID + "\n")
+        r = self.gate("pre-commit")
+        self.assertEqual(r.returncode, 1, msg=r.stderr)
+        self.assertIn("x.dat:1", r.stderr)
+        self.assertIn("y.bin:1", r.stderr)
+
+    def test_diff_attribute_does_not_hide_files_on_push(self):
+        base = self.git("rev-parse", "HEAD").strip()
+        self.stage(".gitattributes", "*.dat -diff\n")
+        self.stage("x.dat", "id " + UUID + "\n")
+        tip = self.commit()
+        r = self.gate("pre-push", "origin", "u", stdin="r %s r %s\n" % (tip, base))
+        self.assertEqual(r.returncode, 1, msg=r.stderr)
+        self.assertIn("x.dat:1", r.stderr)
+
+    # 2. typechange (symlink -> regular file)
+    def test_typechange_symlink_to_file_is_scanned(self):
+        run(["git", "update-index", "--add", "--cacheinfo", "120000,%s,link" % self.blob("target"), ],
+            self.repo, self.env)
+        self.commit("link")
+        run(["git", "update-index", "--cacheinfo", "100644,%s,link" % self.blob("v " + UUID + "\n")],
+            self.repo, self.env)
+        r = self.gate("pre-commit")
+        self.assertEqual(r.returncode, 1, msg=r.stderr)
+        self.assertIn("link:1", r.stderr)
+
+    # 3. merge commits on push
+    def _merge_with(self, resolution_text):
+        main = self.git("rev-parse", "--abbrev-ref", "HEAD").strip()
+        self.stage("shared.txt", "base\n")
+        base = self.commit("base")
+        self.git("checkout", "-q", "-b", "feature")
+        self.stage("feature.txt", "f\n")
+        self.commit("feature")
+        self.git("checkout", "-q", main)
+        self.stage("m.txt", "m\n")
+        self.commit("main")
+        self.git("merge", "-q", "--no-ff", "--no-commit", "feature")
+        self.write("shared.txt", "base\n" + resolution_text)
+        self.git("add", "shared.txt")
+        self.git("commit", "-q", "-m", "merge")
+        return base, self.git("rev-parse", "HEAD").strip()
+
+    def test_secret_introduced_in_merge_resolution_blocks_push(self):
+        base, tip = self._merge_with(UUID + "\n")
+        r = self.gate("pre-push", "origin", "u", stdin="r %s r %s\n" % (tip, base))
+        self.assertEqual(r.returncode, 1, msg=r.stderr)
+        self.assertIn(tip[:8], r.stderr)
+        self.assertIn("shared.txt:2", r.stderr)
+
+    def test_clean_merge_push_allows(self):
+        base, tip = self._merge_with("resolved\n")
+        r = self.gate("pre-push", "origin", "u", stdin="r %s r %s\n" % (tip, base))
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+
+    # 4 + 14. user diff config, context lines, state reset between files
+    def test_user_diff_config_is_neutralized(self):
+        self.git("config", "diff.interHunkContext", "10")
+        self.git("config", "diff.noprefix", "true")
+        self.git("config", "diff.mnemonicPrefix", "true")
+        self.git("config", "diff.suppressBlankEmpty", "true")
+        self.allowlist("path fx/**\n")
+        self.write("fx/a.txt", "l1\nl2\nl3\nl4\nl5\n")
+        self.git("add", "fx/a.txt")
+        self.commit()
+        self.write("fx/a.txt", "L1\nl2\nL3\nl4\nl5\n")
+        self.git("add", "fx/a.txt")
+        self.stage("z.txt", UUID + "\n")
+        r = self.gate("pre-commit")
+        self.assertEqual(r.returncode, 1, msg=r.stderr)
+        self.assertIn("z.txt:1", r.stderr)
+        self.assertNotIn("fx/", r.stderr)
+
+    def test_parser_counts_context_lines_and_resets_per_file(self):
+        sg = load_gate_module()
+        diff = (
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,5 +1,5 @@\n"
+            " c1\n-c2\n+n2\n c3\n c4\n+" + UUID + "\n"
+            "diff --git a/fx/b.txt b/fx/b.txt\n--- a/fx/b.txt\n+++ b/fx/b.txt\n@@ -0,0 +1 @@\n+" + UUID + "\n"
+        ).encode()
+        al = sg.parse_allowlist(None, "path fx/**\n", "t")
+        found = sg.scan_diff(diff, al)
+        self.assertEqual([(f[1], f[2], f[3]) for f in found], [("a.txt", 5, "uuid")])
+
+    def test_combined_diff_only_flags_lines_new_to_every_parent(self):
+        sg = load_gate_module()
+        diff = (
+            "diff --cc shared.txt\n--- a/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@@ -1,2 -1,2 +1,3 @@@\n"
+            "  base\n+ " + GH_TOKEN + "\n++" + UUID + "\n"
+        ).encode()
+        found = sg.scan_diff(diff, sg.Allowlist())
+        self.assertEqual([(f[2], f[3]) for f in found], [(3, "uuid")])
+
+    # 5. allowlist comes from git, not the working tree
+    def test_untracked_or_unstaged_allowlist_does_not_loosen_the_gate(self):
+        self.write(".spill-gate-allow", "path **\n")          # on disk only
+        self.stage("f.txt", UUID + "\n")
+        self.assertEqual(self.gate("pre-commit").returncode, 1)
+        self.allowlist("path nothing-matches\n")               # staged narrow version
+        self.write(".spill-gate-allow", "path **\n")          # then widened, unstaged
+        self.assertEqual(self.gate("pre-commit").returncode, 1)
+        self.git("add", ".spill-gate-allow")                   # staging it makes it count
+        self.assertEqual(self.gate("pre-commit").returncode, 0)
+
+    def test_push_uses_the_allowlist_of_the_pushed_tip(self):
+        base = self.git("rev-parse", "HEAD").strip()
+        self.write(".spill-gate-allow", "path **\n")          # untracked: not in the pushed tip
+        self.stage("f.txt", UUID + "\n")
+        tip = self.commit()
+        r = self.gate("pre-push", "origin", "u", stdin="r %s r %s\n" % (tip, base))
+        self.assertEqual(r.returncode, 1, msg=r.stderr)
+
+    def test_explicit_override_reads_disk(self):
+        al = Path(self._tmp.name) / "override.allow"
+        al.write_text("path **\n", encoding="utf-8")
+        self.stage("f.txt", UUID + "\n")
+        self.assertEqual(self.gate("pre-commit", extra={"SPILL_GATE_ALLOWLIST": str(al)}).returncode, 0)
+
+    # 6. CI parity: every CI pattern sample is caught, including glued to identifiers
+    def test_every_ci_pattern_sample_is_caught(self):
+        sg = load_gate_module()
+        samples = [
+            "BEGIN " + "PRIVATE KEY", "BEGIN " + "RSA PRIVATE KEY", "BEGIN " + "EC PRIVATE KEY",
+            "BEGIN " + "OPENSSH PRIVATE KEY", "BEGIN " + "PGP PRIVATE KEY",
+            AWS_KEY, "AWS_KEY_" + AWS_KEY, AWS_KEY + "lowercase", "x" + AWS_KEY,
+            GH_TOKEN, "TOKEN_" + GH_TOKEN, "x" + GH_TOKEN, GH_TOKEN + "extra",
+            UUID, "id" + UUID,
+            "/" + "Users" + "/a", "x/" + "Users" + "/Zed", "C" + ":\\" + "Users", "Z" + ":\\\\" + "Users",
+        ]
+        for s in samples:
+            with self.subTest(sample=s[:10]):
+                self.assertTrue(sg.scan_line("f.txt", 1, "v=" + s, sg.Allowlist()), msg=s)
+
+    # 7. machine-path captures the whole user segment
+    def test_literal_for_one_user_does_not_allow_longer_names(self):
+        self.allowlist("literal /" + "Users" + "/j\n")
+        self.stage("f.txt", "/" + "Users" + "/john/x\n")
+        self.assertEqual(self.gate("pre-commit").returncode, 1)
+        self.allowlist("literal /" + "Users" + "/john\n")
+        self.assertEqual(self.gate("pre-commit").returncode, 0)
+
+    def test_windows_and_home_literals_need_the_full_segment(self):
+        sg = load_gate_module()
+        al = sg.Allowlist()
+        al.literals.add("C" + ":\\" + "Users" + "\\j")
+        al.literals.add("/" + "home" + "/j/")
+        self.assertTrue(sg.scan_line("f", 1, WIN_PATH, al))
+        self.assertTrue(sg.scan_line("f", 1, LINUX_PATH, al))
+        al.literals.add("C" + ":\\" + "Users" + "\\carol")
+        al.literals.add("/" + "home" + "/bob/")
+        self.assertFalse(sg.scan_line("f", 1, WIN_PATH, al))
+        self.assertFalse(sg.scan_line("f", 1, LINUX_PATH, al))
+
+    # 10. scan-tree with a submodule (gitlink)
+    def test_scan_tree_skips_submodule_entries(self):
+        sha = self.git("rev-parse", "HEAD").strip()
+        run(["git", "update-index", "--add", "--cacheinfo", "160000,%s,sub" % sha], self.repo, self.env)
+        self.commit("gitlink")
+        r = self.gate("scan-tree")
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        self.assertIn("nothing flagged", r.stderr)
+
+    # 13. marker must be exact; unknown rule fails closed
+    def test_marker_must_be_exact(self):
+        for tail in ("spill-gate: allowed", "spill-gate:allow", "spill-gate: allow=", "spill-gate: allow=uuid,",
+                     "spill-gate: allowx", "spill-gate: " + "allow=uuid_x"):
+            with self.subTest(tail=tail):
+                self.git("reset", "-q")
+                self.stage("f.txt", UUID + " " + tail + "\n")
+                r = self.gate("pre-commit")
+                self.assertEqual(r.returncode, 1, msg=r.stderr)
+
+    def test_marker_with_unknown_rule_fails_closed(self):
+        self.stage("f.txt", UUID + " spill-gate: " + "allow=uuuid\n")
+        r = self.gate("pre-commit")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("unknown rule", r.stderr)
+
+    def test_valid_marker_forms_still_work(self):
+        self.stage("f.txt", UUID + " # spill-gate: allow\n" + UUID + " /* spill-gate: allow=uuid */\n"
+                   + UUID + " <!-- spill-gate: allow=uuid,machine-path -->\n")
+        r = self.gate("pre-commit")
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
 
 
 class SelfCheck(unittest.TestCase):
