@@ -302,7 +302,8 @@ Built-but-narrower or deliberately not built in PR 2; each keeps its interim wor
   background/substitution/heredoc/redirect, `eval`, `bash -c`, env prefixes, `xargs`, `git -c`, `find -exec`,
   `rg --pre`) found no smuggle; a dedicated adversarial pass (unicode, very long input, `git` config-driven
   execution such as `--ext-diff`/textconv) is still worth running. *Not run* in batch 2026-10-27 (the agent was
-  stopped by a safety check before any payload); those families remain UNTESTED.
+  stopped by a safety check before any payload); those families remain UNTESTED. **Queued 2026-10-27 (Tim)**
+  as a deny-regression-test lane for the next batch: [`batches/next-batch-draft.md`](batches/next-batch-draft.md).
 - **scope-lease denied-acquire logging** — a decision, not built; denied acquires still write no row.
 - **sink-resolver no-conflict `resolve` and dry-run rows** — not built; they still write no row.
 - **memory-cap total caps for `NotebookEdit`** — not evaluated (a notebook edit carries one cell, not the file).
