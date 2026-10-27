@@ -1,0 +1,16 @@
+# Example .spill-gate-allow (copy to the repo root). One entry per line.
+#
+# Whole files / directories (gitignore-style globs; ** crosses '/', * does not):
+path tests/fixtures/**
+path **/*.sample
+
+# The same, but only exempt named rules (see the README table for rule names):
+path docs/examples/** rules=uuid,machine-path
+
+# One exact matched text, e.g. a documentation placeholder home path. Write the text
+# the gate printed (first four characters are shown in the report; the line is in the file):
+# literal <exact matched text>   (uncomment and fill in)
+
+# Per-line opt-out lives in the file itself, not here:
+#   some_value = "..."  # spill-gate: allow
+#   some_value = "..."  # spill-gate: allow=uuid
