@@ -6,7 +6,8 @@ four the README [Modules table](README.md#modules) uses:
 - **Gates** — [`plan-gate`](plan-gate/), [`commit-msg-gate`](commit-msg-gate/),
   [`generated-sink-commit-gate`](generated-sink-commit-gate/),
   [`generated-sink-prepush-gate`](generated-sink-prepush-gate/),
-  [`test-protection-guard`](test-protection-guard/) and
+  [`test-protection-guard`](test-protection-guard/),
+  [`spill-gate`](spill-gate/) and
   [`eslint-plugin-strictlock`](eslint-plugin-strictlock/).
 - **Hygiene** — [`memory-cap`](memory-cap/) and [`externalized-memory`](externalized-memory/)
   (including its projection bundle).

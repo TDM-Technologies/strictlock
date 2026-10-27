@@ -55,6 +55,7 @@ The modules fall into four families:
 | [**generated-sink-commit-gate**](generated-sink-commit-gate/) | Gates | A git hook that refuses a commit when a generated file (an index, manifest or schema) is not an exact regeneration from its source. | v1 |
 | [**generated-sink-prepush-gate**](generated-sink-prepush-gate/) | Gates | A git hook that re-checks generated files at push time, as a second line behind the commit-time check. | v1 |
 | [**test-protection-guard**](test-protection-guard/) | Gates | Flags, but never blocks, a change to an existing test assertion made in the same commit as source code, unless the commit says why. | v1 |
+| [**spill-gate**](spill-gate/) | Gates | A git hook that refuses a commit or push carrying private keys, tokens, stray UUIDs or machine paths, with an allowlist kept in the repo. Reduces spill risk; does not eliminate it. | v1 |
 | [**eslint-plugin-strictlock**](eslint-plugin-strictlock/) | Gates | An ESLint rule ([on npm](https://www.npmjs.com/package/eslint-plugin-strictlock)) that fails the lint when a whole test asserts almost nothing. | v0.1.1 |
 | [**memory-cap**](memory-cap/) | Hygiene | A hook that refuses edits that would make an agent's auto-loaded memory index too long. | v1 |
 | [**externalized-memory**](externalized-memory/) | Hygiene | Templates and a small script for keeping project state in one file on disk that every session reads first; the script writes to a temporary file and then renames it, so a reader never sees a half-written file. | v1 |
@@ -162,7 +163,7 @@ and `sink-resolver` run unless their switch is set to something other than those
   tool, or typing `X=on` before the agent's command, does **not** reach them. Set the variable
   where you set the gate's other variables, then restart the session.
 - **Git hooks** (commit-msg-gate, generated-sink-commit-gate, generated-sink-prepush-gate,
-  test-protection-guard's pre-commit mode, the sink-resolver `post-merge` example) run inside
+  test-protection-guard's pre-commit mode, spill-gate, the sink-resolver `post-merge` example) run inside
   whatever process calls git. The variable must be present in the environment of **every** such
   process: a terminal you did not export it in, a GUI git client, an IDE's commit button, a
   script or CI job. Where it is missing, an on-switch means the gate is simply off for that

@@ -74,6 +74,9 @@ jobs:
       - name: test-protection-guard tests
         if: ${{ !cancelled() }}
         run: python test-protection-guard/tests/test_test_protection_guard.py
+      - name: spill-gate tests
+        if: ${{ !cancelled() }}
+        run: python spill-gate/tests/test_spill_gate.py
 
   node:
     name: eslint-plugin tests (node ${{ matrix.node }}, eslint ${{ matrix.eslint }})
@@ -155,3 +158,5 @@ jobs:
             exit 1
           fi
           echo "Secret scan passed."
+      - name: spill-gate dogfood scan of the tracked tree
+        run: python3 spill-gate/spill-gate.py scan-tree
