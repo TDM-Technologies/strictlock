@@ -3603,30 +3603,49 @@ def _fc_sed_parse(args: list[str], bsd: bool):
     return in_place, (positionals if have_script else positionals[1:]), suffixes
 
 
-def _fc_sed_can_write(path: str, has_cd: bool) -> bool:
-    """Could `sed -i` write to this name? It edits an existing file (or replaces a
-    symlink with a regular file); it cannot create a file or edit a directory. So a
-    name that does not exist, or is a directory, is not a destination (the BSD/GNU
-    readings report the script word, `''`, and so on as files). A symlink is kept
-    whatever it points at. A name that cannot be resolved here (relative after a
-    `cd`, no working directory) is kept, so the caller's undetermined handling
-    applies."""
+def _fc_sed_names(path: str, has_cd: bool) -> list[str]:
+    """The destination name(s) to report for one word a `sed -i` reading calls a file;
+    [] drops it. `sed -i` edits an existing file (or replaces a symlink with a regular
+    file); it cannot create a file or edit a directory. So a name that does not exist,
+    or is a directory, is not a destination (the readings report the script word, `''`,
+    and so on as files). A symlink is kept whatever it points at.
+    A RELATIVE name could be relative to the agent's shell directory, which is not
+    necessarily the hook's: it is tried under every candidate base (the payload `cwd`,
+    $CLAUDE_PROJECT_DIR, the hook's cwd) and dropped only when it is absent (or a
+    directory) under ALL of them; where it exists it is reported as that absolute path.
+    A name that cannot be resolved here (relative after a `cd`, no base) is kept as is,
+    so the caller's undetermined handling applies."""
     p = os.path.expanduser(path) if path.startswith("~") else path
-    if not os.path.isabs(p):
-        if has_cd:
-            return True
+
+    def writable(q):
         try:
-            p = os.path.join(os.getcwd(), p)
-        except OSError:
+            if os.path.islink(q):
+                return True
+            return os.path.lexists(q) and not os.path.isdir(q)
+        except (OSError, ValueError):
             return True
+
+    if os.path.isabs(p):
+        return [p] if writable(p) else []
+    if has_cd:
+        return [p]
+    bases: list[str] = []
+    for cand in (str(_CALL_CTX.get("payload_cwd") or "").strip(),
+                 os.environ.get("CLAUDE_PROJECT_DIR", "").strip()):
+        if cand and os.path.isabs(cand) and os.path.isdir(cand):
+            bases.append(cand)
     try:
-        if os.path.islink(p):
-            return True
-        if not os.path.lexists(p):
-            return False
-        return not os.path.isdir(p)
-    except (OSError, ValueError):
-        return True
+        bases.append(os.getcwd())
+    except OSError:
+        pass
+    if not bases:
+        return [p]
+    found: list[str] = []
+    for base in bases:
+        q = os.path.join(base, p)
+        if writable(q) and q not in found:
+            found.append(q)
+    return found
 
 
 def _fc_sed(args: list[str], has_cd: bool = False):
@@ -3634,7 +3653,7 @@ def _fc_sed(args: list[str], has_cd: bool = False):
     an empty suffix means no backup). Which sed runs (GNU or BSD) cannot be known from
     the hook (its PATH can differ from the agent's shell), so the command line is read
     BOTH ways and the destinations are the UNION. A reported name that sed could not
-    write (it does not exist, or it is a directory: see _fc_sed_can_write) is dropped,
+    write (it does not exist, or it is a directory: see _fc_sed_names) is dropped,
     which leaves the over-included script word out. If either reading does not parse,
     the destination is undetermined."""
     readings = [_fc_sed_parse(args, bsd) for bsd in (False, True)]
@@ -3647,15 +3666,14 @@ def _fc_sed(args: list[str], has_cd: bool = False):
         for f in fs:
             if _fc_expands(f):
                 return [], f"a variable, glob or brace in {f[:60]!r}"
-            if not _fc_sed_can_write(f, has_cd):
-                continue
-            if f not in files:
-                files.append(f)
-            for suf in suffixes:
-                if "*" in suf or _fc_expands(suf):
-                    return [], f"a backup suffix pattern {suf[:40]!r}"
-                if suf and f + suf not in files:
-                    files.append(f + suf)
+            for name in _fc_sed_names(f, has_cd):
+                if name not in files:
+                    files.append(name)
+                for suf in suffixes:
+                    if "*" in suf or _fc_expands(suf):
+                        return [], f"a backup suffix pattern {suf[:40]!r}"
+                    if suf and name + suf not in files:
+                        files.append(name + suf)
     return [os.path.expanduser(f) if f.startswith("~") else f for f in files], None
 
 

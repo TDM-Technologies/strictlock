@@ -3553,6 +3553,32 @@ class FileCommandLeaseTests(unittest.TestCase):
         for require in ("", "on"):
             self.assertHeld("sed -i '' s/a/b/ %s" % L, PLAN_GATE_REQUIRE_LEASE=require)
 
+    def test_relative_sed_name_is_resolved_against_the_agents_directory_too(self):
+        # The agent's shell sits in the repo (the payload `cwd`); the hook process
+        # runs somewhere else that has no such file. The name must not be dropped.
+        self.lease("alice", self.leased)
+        elsewhere = self.root / "hookcwd"
+        elsewhere.mkdir()
+        e = {"PLAN_GATE_SCOPE_LEASE": str(SCOPE_LEASE), "SCOPE_LEASE_OWNER": "bob",
+             "SCOPE_LEASE_LOCK_ID": "", "PLAN_GATE_REQUIRE_LEASE": "on"}
+        def run(cmd, payload_cwd):
+            payload = {"tool_name": "Bash", "tool_input": {"command": cmd}}
+            if payload_cwd:
+                payload["cwd"] = str(payload_cwd)
+            return run_gate(payload, self.plans, cwd=elsewhere, extra_env=e)
+        for cmd in ("sed -i '' s/a/b/ leased.txt", "sed -i s/a/b/ leased.txt",
+                    "sed -i.bak s/a/b/ leased.txt"):
+            proc = run(cmd, self.repo)
+            self.assertEqual(decision(proc), "deny", "%s -> %s" % (cmd, proc.stdout))
+            self.assertIn("alice", self.reason(proc), cmd)
+        # my own lease: allowed from the same directory split
+        self.lease("bob", self.free)
+        proc = run("sed -i '' s/a/b/ free.txt", self.repo)
+        self.assertEqual(decision(proc), "allow", proc.stdout)
+        # a name that exists under NO base is still dropped (the script word)
+        proc = run("sed -i '' s/a/b/ free.txt", None)   # no payload cwd, hook cwd lacks it
+        self.assertEqual(decision(proc), "allow", proc.stdout)
+
     def test_sed_backup_copy_needs_its_own_lease_under_require(self):
         L = self.p(self.leased)
         self.lease("bob", self.leased)
@@ -3864,7 +3890,9 @@ class FileCommandParserTests(unittest.TestCase):
         cwd = os.getcwd()
         try:
             os.chdir(self.d)
-            self.assertEqual(self.g._fc_sed(["-i", "", "s/a/b/", "f.txt"]), (["f.txt"], None))
+            # reported resolved, as the absolute path where it exists
+            self.assertEqual(self.g._fc_sed(["-i", "", "s/a/b/", "f.txt"]),
+                             ([os.path.join(os.getcwd(), "f.txt")], None))
             self.assertEqual(self.g._fc_sed(["-i", "", "s/a/b/", "nope.txt"]), ([], None))
             # after a `cd` a relative name cannot be resolved: kept (the caller then
             # reports it as undetermined, as before)

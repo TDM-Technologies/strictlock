@@ -168,8 +168,11 @@ reading can report words that are not files (`sed -i '' s/a/b/ f` reads the scri
 as a file under GNU rules), so a reported name is kept only if `sed -i` could write it: it
 **exists** and is **not a directory**. `sed -i` cannot create a file or edit a directory, so
 nonexistent names and directories are dropped. A **symlink is always kept**, whatever it
-points at (GNU `sed -i` replaces a symlink with a regular file). Relative names resolve against
-the working directory; after a `cd` in the same command they cannot be resolved and are kept
+points at (GNU `sed -i` replaces a symlink with a regular file). A relative name is tried under
+every directory the agent might be in: the `cwd` the harness reports in the hook payload,
+`$CLAUDE_PROJECT_DIR`, and the hook's own working directory. It is dropped only if it is absent
+(or a directory) under all of them, and where it exists it is reported as that absolute path.
+After a `cd` in the same command a relative name cannot be resolved and is kept
 (so the destination stays undetermined, as before). A name containing a variable, glob or
 brace is undetermined and is checked before this filter, so a script word such as `s/x*/y/`
 in the `-i ''` idiom also makes the destination undetermined. The backup copy `<file><suffix>`
